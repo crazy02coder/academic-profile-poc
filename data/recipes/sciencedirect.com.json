@@ -1,0 +1,11 @@
+{
+ "domain": "sciencedirect.com",
+ "replay": {},
+ "pages": {},
+ "people": {},
+ "events": [],
+ "access": {
+  "tier": "scrapling.stealthy+cloudflare",
+  "at": "2026-10-16 19:10:15"
+ }
+}

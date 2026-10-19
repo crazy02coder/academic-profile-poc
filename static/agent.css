@@ -1,0 +1,36 @@
+/* Yan panel (≈ 360–500 px) düzeni */
+body.agent { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+.a-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.a-head .brand { font-size: 17px; } .a-head small { color: var(--muted); font-size: 11px; margin-left: 4px; }
+.a-tools { display: flex; gap: 6px; }
+#learn.on { color: #0b0e14; background: var(--err); border-color: var(--err); animation: blink 1.4s steps(1) infinite; }
+.pill-ctx { margin: 8px 12px 0; padding: 6px 10px; border-radius: 10px; background: rgba(124,156,255,.12);
+  border: 1px solid rgba(124,156,255,.35); font-size: 12.5px; display: flex; justify-content: space-between; gap: 8px; }
+.pill-ctx button { background: transparent; color: var(--muted); padding: 0 4px; font-weight: 400; }
+.a-thread { padding: 14px 12px; gap: 12px; }
+.a-thread .msg { max-width: 100%; }
+.a-thread .avatar { flex: 0 0 26px; height: 26px; border-radius: 8px; font-size: 13px; }
+.a-thread .bubble { padding: 10px 12px; font-size: 13.5px; }
+.a-composer { padding: 10px 12px 12px; gap: 8px; }
+.a-composer button { padding: 8px 14px; }
+.acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.acts button { background: var(--panel2); color: var(--text); border: 1px solid var(--line); font-weight: 500; font-size: 12.5px; padding: 5px 10px; }
+.acts button:hover { border-color: var(--accent); }
+.acts button.primary { background: linear-gradient(135deg, var(--accent), #9b7cff); color: #0b0e14; border: 0; font-weight: 650; }
+.people { max-height: 220px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.people button { background: rgba(94,234,212,.08); border: 1px solid rgba(94,234,212,.3); color: var(--text); font-weight: 500;
+  font-size: 12.5px; padding: 4px 9px; border-radius: 999px; }
+.people input { width: 100%; margin-bottom: 4px; padding: 6px 10px; font-size: 12.5px; }
+.mini-table { width: 100%; font-size: 12px; margin-top: 8px; }
+.mini-table td, .mini-table th { padding: 4px; }
+.api-row { font: 11.5px/1.5 ui-monospace, Menlo, monospace; padding: 3px 0; border-bottom: 1px dashed var(--line); word-break: break-all; }
+.api-row b { color: var(--accent2); }
+.steps.small .step { font-size: 12.5px; }
+.prof h2 { font-size: 16px; margin: 0 0 2px; }
+.prof p { margin: 1px 0; color: var(--muted); font-size: 12.5px; }
+.pub-li { font-size: 12.5px; padding: 5px 0; border-bottom: 1px dashed var(--line); cursor: pointer; }
+.pub-li:hover { color: var(--accent); }
+.pub-li small { color: var(--muted); }
+.notice { padding: 20px; color: var(--muted); line-height: 1.6; }
+
+.pill-ctx[hidden] { display: none; }

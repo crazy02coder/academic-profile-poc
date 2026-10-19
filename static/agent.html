@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Akademik İz Agent</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/agent.css">
+  <script src="/static/agent.js" defer></script>
+</head>
+<body class="agent">
+  <header class="a-head">
+    <div class="brand"><span class="logo">◈</span> akademik<b>iz</b> <small>agent</small></div>
+    <div class="a-tools">
+      <button id="learn" class="mini" title="Gerçek tarayıcının ağ trafiğini REA'ya öğret">● Öğren</button>
+      <button id="refresh" class="mini" title="Sayfayı yeniden anla">↻</button>
+    </div>
+  </header>
+  <div id="pill" class="pill-ctx" hidden></div>
+  <div id="thread" class="thread a-thread"></div>
+  <form id="ask" class="composer a-composer">
+    <input id="question" placeholder="Bir şey sor ya da 'X'i bul' de…" autocomplete="off">
+    <button id="send">↵</button>
+  </form>
+  <div id="modal" class="modal" hidden>
+    <div class="modal-box"><button id="modalClose" class="modal-x" title="Kapat">×</button><div id="modalBody"></div></div>
+  </div>
+</body>
+</html>

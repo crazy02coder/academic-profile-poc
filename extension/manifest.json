@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Akademik İz Agent",
+  "version": "1.0.0",
+  "description": "REA + Scrapling + Qwen site asistanı. Arayüz yerel sunucudan yüklenir; sunucu kodu değişince eklentiyi yeniden kurmak gerekmez.",
+  "permissions": ["sidePanel", "tabs", "scripting", "activeTab", "debugger", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "Akademik İz Agent" }
+}

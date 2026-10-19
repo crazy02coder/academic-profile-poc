@@ -1,0 +1,157 @@
+{
+ "key": "suleyman-ozekici@ku.edu.tr",
+ "runs": [
+  {
+   "at": "2026-10-16 17:54:41",
+   "fields": {
+    "title": [
+     "prof dr"
+    ],
+    "department": [
+     "koc muhendislik fakultesi"
+    ],
+    "institution": [
+     "koc"
+    ],
+    "interest": [
+     "elektronik muhendisligi elektrik",
+     "elektronik muhendisligi akademik kadrosu",
+     "ders plani",
+     "fazlasi hakkinda bilgi edinin"
+    ]
+   },
+   "papers": []
+  },
+  {
+   "at": "2026-10-16 17:58:04",
+   "fields": {
+    "title": [
+     "prof dr"
+    ],
+    "department": [
+     "koc muhendislik fakultesi"
+    ],
+    "institution": [
+     "koc"
+    ],
+    "interest": [
+     "elektronik muhendisligi elektrik",
+     "elektronik muhendisligi akademik kadrosu",
+     "ders plani",
+     "fazlasi hakkinda bilgi edinin"
+    ]
+   },
+   "papers": []
+  },
+  {
+   "at": "2026-10-16 18:01:21",
+   "fields": {
+    "title": [
+     "prof dr"
+    ],
+    "department": [
+     "endustri muhendisligi"
+    ],
+    "institution": [
+     "koc"
+    ],
+    "orcid": [
+     "0000 0003 3610 1746"
+    ],
+    "interest": [
+     "stokastik modelleme",
+     "uygulamali olasilik ve istatistik",
+     "guvenilirlik ve bakim",
+     "yoneylem arastirmasi",
+     "finans muhendisligi"
+    ]
+   },
+   "papers": [
+    "10.1002/1520-6750(198808)35:4<481::aid-nav3220350404>3.0.co;2-8",
+    "10.1002/1520-6750(199208)39:5<699::aid-nav3220390508>3.0.co;2-h",
+    "10.1002/9780470400531.eorms0178",
+    "10.1002/9780470400531.eorms0834",
+    "10.1002/9781118445112.stat04158",
+    "10.1002/9781118445112.stat04179",
+    "10.1002/asmb.2839",
+    "10.1002/asmb.885",
+    "10.1002/nav.10072",
+    "10.1002/nav.1046",
+    "10.1002/nav.20125",
+    "10.1007/978-1-4419-9021-1_13",
+    "10.1007/978-1-4757-2868-2_9",
+    "10.1007/978-3-662-03274-9",
+    "10.1007/978-3-662-03274-9_10",
+    "10.1007/978-3-662-03274-9_9",
+    "10.1007/s00186-005-0020-x",
+    "10.1007/s00186-006-0067-3",
+    "10.1007/s00291-012-0307-2",
+    "10.1007/s00291-014-0380-9",
+    "10.1007/s00291-014-0385-4",
+    "10.1007/s10479-008-0406-2",
+    "10.1007/s10479-010-0816-9",
+    "10.1007/s11590-013-0616-7",
+    "10.1016/0377-2217(94)00264-d",
+    "10.1016/j.apm.2014.05.029",
+    "10.1016/j.csda.2005.06.015",
+    "10.1016/j.ejor.2005.02.079",
+    "10.1016/j.ejor.2007.01.053",
+    "10.1016/j.ejor.2009.03.017",
+    "10.1016/j.ejor.2009.10.029",
+    "10.1016/j.ejor.2010.07.019",
+    "10.1016/j.ejor.2011.10.012",
+    "10.1016/j.ejor.2011.12.037",
+    "10.1016/j.ejor.2012.09.020",
+    "10.1016/j.ejor.2013.03.014",
+    "10.1016/j.ejor.2021.09.042",
+    "10.1016/j.ijpe.2011.04.033",
+    "10.1016/j.ijpe.2014.04.014",
+    "10.1016/j.ijpe.2019.01.039",
+    "10.1016/j.ijpe.2024.109189",
+    "10.1016/j.parco.2006.11.002",
+    "10.1016/j.ress.2018.07.019",
+    "10.1016/s0169-7161(03)22032-0",
+    "10.1016/s0377-2217(02)00461-7",
+    "10.1016/s0377-2217(97)00355-x",
+    "10.1016/s0925-5273(01)00165-7",
+    "10.1016/s0951-8320(02)00047-9",
+    "10.1017/s0021900200027698",
+    "10.1017/s0269964800000322",
+    "10.1017/s0269964800003843",
+    "10.1017/s0269964800004630",
+    "10.1017/s0269964801154069",
+    "10.1017/s0269964814000229",
+    "10.1017/s0269964820000157",
+    "10.1023/a:1018937420735",
+    "10.1057/palgrave.jors.2601173",
+    "10.1080/07408170108936899",
+    "10.1080/0740817x.2010.523768",
+    "10.1080/0740817x.2012.733484",
+    "10.1080/0740817x.2014.981322",
+    "10.1080/1351847x.2025.2553048",
+    "10.1080/15326349.2019.1577142",
+    "10.1080/15326349.2022.2112225",
+    "10.1137/0323010",
+    "10.1287/inte.17.5.1",
+    "10.1287/opre.36.4.542",
+    "10.1287/opre.39.2.261",
+    "10.1287/trsc.21.1.55",
+    "10.1287/trsc.28.3.246",
+    "10.1561/0200000073",
+    "10.2139/ssrn.4888257",
+    "10.3182/20090603-3-ru-2001.00279",
+    "advanced queueing models",
+    "gorev tabanli dizgelerin guvenirlik analizi",
+    "kismi gozlemlenebilir bozulma seviyelerine sahip gorev tabanli sistemlerin optimal degisim problemi simulasyon tabanli y",
+    "queueing theory and applications",
+    "reliability mttf and availability analysis of systems with exponential lifetimes",
+    "reliability mttf and availability of systems with markovian missions and aging",
+    "seri baglanmis kosut alt dizgeler icin gorev tabanli bilesen sinami",
+    "stochastic processes in queueing theory",
+    "the design of optimum component test plans for system reliabiltiy",
+    "urban water demand forecasting with machine learning methods sakarya example",
+    "wiley encyclopedia of operations research and management science"
+   ]
+  }
+ ]
+}

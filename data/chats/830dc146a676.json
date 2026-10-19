@@ -1,0 +1,58 @@
+{
+ "id": "830dc146a676",
+ "job_id": "7da46decf26c",
+ "name": "Serdar Müldür",
+ "title": "Prof. Dr.",
+ "institution": "303653 Profesör Serdar Müldür Ostim Teknik Üniversitesi",
+ "papers": 15,
+ "created": "2026-10-19 07:59:09",
+ "updated": "2026-10-19 08:02:55",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Son yıllarda hangi konulara yöneldi?",
+   "at": "08:02"
+  },
+  {
+   "role": "assistant",
+   "content": "Son yıllarda Serdar Müldür, özellikle 2003-2005 yılları arasında, epileptik EEG sinyallerinin sinirsel-bulanık sistem ile sınıflandırılmasında ilerlemiş olup, bu çalışmaların hastalıkların tanı ve tedavisinde yardımcı olması açısından önemli katkılar sağlamıştır.",
+   "meta": {
+    "mode": "cag",
+    "requested": "auto",
+    "full_tokens": 1747,
+    "context_tokens": 1972,
+    "retrieval_s": 0.0,
+    "ttft": 6.8,
+    "prompt_tokens": 1972,
+    "prompt_eval_s": 6.68,
+    "output_tokens": 77,
+    "total_s": 9.52,
+    "model": "qwen2.5-coder:7b"
+   },
+   "at": "08:02"
+  },
+  {
+   "role": "user",
+   "content": "2026 yılında peki",
+   "at": "08:02"
+  },
+  {
+   "role": "assistant",
+   "content": "2026 yılında Serdar Müldür, \"A Web-Based Approach for Monitoring Scientific Research Projects: The Experience of OSTIM Technical University\" adlı makalesini yayınlamıştır. Bu çalışması, OSTIM Teknik Üniversitesi'nin bilimsel araştırma projelerinin izlenmesindeki deneyimlerine dayanmaktadır.",
+   "meta": {
+    "mode": "cag",
+    "requested": "auto",
+    "full_tokens": 1747,
+    "context_tokens": 2066,
+    "retrieval_s": 0.0,
+    "ttft": 0.65,
+    "prompt_tokens": 2066,
+    "prompt_eval_s": 0.47,
+    "output_tokens": 74,
+    "total_s": 3.27,
+    "model": "qwen2.5-coder:7b"
+   },
+   "at": "08:02"
+  }
+ ]
+}

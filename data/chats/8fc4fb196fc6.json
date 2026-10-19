@@ -1,0 +1,148 @@
+{
+ "id": "8fc4fb196fc6",
+ "job_id": "8290729a0fd1",
+ "name": "Murat Yülek",
+ "title": "Prof. Dr.",
+ "institution": "OSTİM Teknik Üniversitesi",
+ "papers": 127,
+ "created": "2026-10-16 19:18:05",
+ "updated": "2026-10-16 19:21:45",
+ "messages": [
+  {
+   "role": "user",
+   "content": "cem say ın karmaşıklık teorisi  üzerine kaç çalışması vardır sence ?",
+   "at": "19:19"
+  },
+  {
+   "role": "assistant",
+   "content": "Toplanan veride bu bilgi yok.",
+   "meta": {
+    "mode": "rag",
+    "requested": "rag",
+    "full_tokens": 15145,
+    "retriever": "BM25+vektör (RRF)",
+    "lexical_hits": 3,
+    "dense": true,
+    "retrieved": [
+     "P115",
+     "P12",
+     "P84",
+     "P72",
+     "P30",
+     "P110"
+    ],
+    "context_tokens": 1388,
+    "retrieval_s": 2.46,
+    "ttft": 4.9,
+    "prompt_tokens": 1388,
+    "prompt_eval_s": 4.71,
+    "output_tokens": 11,
+    "total_s": 5.27,
+    "model": "qwen2.5-coder:7b"
+   },
+   "at": "19:19"
+  },
+  {
+   "role": "user",
+   "content": "En çok atıf alan yayınları hangileri?",
+   "at": "19:21"
+  },
+  {
+   "role": "assistant",
+   "content": "En çok atıf alan yayınları [P98] ve [P126]'dir.",
+   "meta": {
+    "mode": "rag",
+    "requested": "rag",
+    "full_tokens": 15145,
+    "retriever": "BM25+vektör (RRF)",
+    "lexical_hits": 12,
+    "dense": true,
+    "retrieved": [
+     "P90",
+     "P30",
+     "P126",
+     "P120",
+     "P115",
+     "P98"
+    ],
+    "context_tokens": 904,
+    "retrieval_s": 0.12,
+    "ttft": 1.26,
+    "prompt_tokens": 904,
+    "prompt_eval_s": 0.04,
+    "output_tokens": 23,
+    "total_s": 2.05,
+    "model": "qwen2.5-coder:7b"
+   },
+   "at": "19:21"
+  },
+  {
+   "role": "user",
+   "content": "cem sayın ama",
+   "at": "19:21"
+  },
+  {
+   "role": "assistant",
+   "content": "Toplanan veride bu bilgi yok.",
+   "meta": {
+    "mode": "rag",
+    "requested": "rag",
+    "full_tokens": 15145,
+    "retriever": "BM25+vektör (RRF)",
+    "lexical_hits": 0,
+    "dense": true,
+    "retrieved": [
+     "P51",
+     "P12",
+     "P110",
+     "P126",
+     "P95",
+     "P62"
+    ],
+    "context_tokens": 1152,
+    "retrieval_s": 0.05,
+    "ttft": 2.17,
+    "prompt_tokens": 1152,
+    "prompt_eval_s": 2.07,
+    "output_tokens": 11,
+    "total_s": 2.53,
+    "model": "qwen2.5-coder:7b"
+   },
+   "at": "19:21"
+  },
+  {
+   "role": "user",
+   "content": "murat yülekin en çok çalıştığ alan",
+   "at": "19:21"
+  },
+  {
+   "role": "assistant",
+   "content": "Murat Yülek'in en çok çalıştığı alan, ekonomik teoriler ve politikalar olabilir. Bu bilgi tabanındaki yayınları inceleyerek, özellikle 1990'lar ve 2010'lar arasında birçok makaleyi yazdığı görülmektedir. Ancak, daha spesifik bir alan belirtmek için daha fazla bilgi gerekmektedir.",
+   "meta": {
+    "mode": "rag",
+    "requested": "rag",
+    "full_tokens": 15145,
+    "retriever": "BM25+vektör (RRF)",
+    "lexical_hits": 120,
+    "dense": true,
+    "retrieved": [
+     "P115",
+     "P91",
+     "P120",
+     "P90",
+     "P123",
+     "P119"
+    ],
+    "context_tokens": 949,
+    "retrieval_s": 0.06,
+    "ttft": 1.31,
+    "prompt_tokens": 949,
+    "prompt_eval_s": 1.2,
+    "output_tokens": 92,
+    "total_s": 4.54,
+    "model": "qwen2.5-coder:7b"
+   },
+   "at": "19:21"
+  }
+ ]
+}
