@@ -36,12 +36,23 @@ SEARCH_INPUT_NAMES = ("q", "s", "search", "query", "keyword", "keywords", "k", "
 
 
 # --------------------------------------------------------------------------- yardımcılar
+PERSON_CUE = re.compile(r"(?i)\b(adında|adinda|adlı|adli|isimli|akademisyen|hoca|öğretim üyesi|ogretim uyesi|personel)\b")
+
+
+def _single_name_ok(name: str, question: str) -> bool:
+    """Tek kelimelik ad/soyad ('Gülsüm adında biri') ancak soruda kişi ipucu varsa kişi araması sayılır."""
+    return len(name.split()) == 1 and len(name) >= 3 and bool(PERSON_CUE.search(question)) and not re.search(r"\d", name)
+
+
 def person_in(question: str) -> str:
     """Sorudaki kişi adı — yalnızca Büyük Harfle yazılmışsa ya da 'adlı/isimli' ile belirtilmişse."""
-    if not PERSON_Q.search(question):
+    if not PERSON_Q.search(question) and not PERSON_CUE.search(question):
         return ""
     name = _question_name(question)
-    if not name or not looks_like_person(name):
+    if not name:
+        single = re.search(r"\b([A-ZÇĞİÖŞÜ][a-zçğıöşü]{2,})\s+(?:adında|adinda|adlı|adli|isimli)", question)
+        return single.group(1) if single else ""
+    if not looks_like_person(name):
         return ""
     capitalized = all(w[:1].isupper() for w in name.split())
     marked = re.search(r"(?i)\b(adl[ıi]|isimli)\b", question)
@@ -257,8 +268,8 @@ async def _read_pages(urls: list[str], seen_urls: set, limit: int = 3) -> list[d
     for p in fetched:
         if isinstance(p, Exception) or p.status >= 400:
             continue
-        md = navigator.page_view(p.selector, max_chars=9000)
-        text = md if len(md) > 400 else _visible_text(p.selector)[:9000]
+        md = navigator.page_view(p.selector, max_chars=40000)
+        text = md if len(md) > 400 else _visible_text(p.selector)[:40000]
         out.append({"url": p.url, "title": clean(p.selector.css("title::text").get() or "")[:90] or p.url, "text": text})
     return out
 
@@ -267,9 +278,9 @@ def _page_from_html(html: str, url: str) -> dict:
     from .discover import _visible_text
 
     sel = parse(html, url)
-    md = navigator.page_view(sel, max_chars=9000)
+    md = navigator.page_view(sel, max_chars=40000)
     return {"url": url, "title": clean(sel.css("title::text").get() or "")[:90] or url,
-            "text": md if len(md) > 400 else _visible_text(sel)[:9000]}
+            "text": md if len(md) > 400 else _visible_text(sel)[:40000]}
 
 
 async def answer_single(url: str, html: str, question: str, history: list[dict], llm, log):
@@ -283,18 +294,34 @@ async def answer_single(url: str, html: str, question: str, history: list[dict],
     sel = parse(html, url)
     seen_urls: set = {url.split("#")[0]}
 
-    # 1) Qwen soruyu yorumlar (TR+EN eş anlamlılar, sayfa türü, cevap türü)
-    intent = await understand.interpret(question, llm, {k: v for k, v in atlas_mod.CAT_NAMES.items() if k != "api"})
+    # 1) Qwen soruyu yorumlar (TR+EN eş anlamlılar, sayfa türü) — AYNI ANDA açık sayfa okunup değerlendirilir
+    page0 = _page_from_html(html, url)
+    interp_task = asyncio.create_task(understand.interpret(question, llm, {k: v for k, v in atlas_mod.CAT_NAMES.items() if k != "api"}))
+    open_task = asyncio.create_task(understand.judge(question, [page0], llm)) if llm.available else None
+    intent = await interp_task
     if intent:
         await log("Soru yorumu: aranacak ifadeler " + ", ".join(intent["terms"][:6])
                   + (f" · sayfa türü {', '.join(atlas_mod.CAT_NAMES[p].split(' /')[0] for p in intent['page_types'])}"
                      if intent["page_types"] else ""))
-        person = intent["person"] if intent["person"] and looks_like_person(intent["person"]) else person_in(question)
+        person = intent["person"] if intent["person"] and (looks_like_person(intent["person"]) or _single_name_ok(intent["person"], question)) \
+            else person_in(question)
         terms = intent["terms"]
     else:
         person = person_in(question)
         terms = [search_terms(question)] if search_terms(question) else []
     query = person or (terms[0] if terms else "")
+    if open_task is not None:
+        verdict = await open_task
+        if not verdict and len(page0["text"]) > 12000 and terms:  # uzun sayfada terimlerin geçtiği yerlerle bir kez daha
+            verdict = await understand.judge(question, [page0], llm, terms=terms + ([person] if person else []))
+        if verdict:
+            yield {"meta": {"mode": "live", "path": ["açık sayfa"], "found": True,
+                            "sources": [{"id": "S1", "url": page0["url"], "page": page0["title"]}]}}
+            if person:
+                yield {"person": person}
+            yield {"delta": f"{verdict['answer']} [S1]\n\n> “{verdict['quote']}”"}
+            return
+        await log("Açık sayfada cevap yok → anlam haritası, sitenin araması ve site haritası paralel deneniyor…")
 
     async def stage_page():
         return [_page_from_html(html, url)], "açık sayfa"
@@ -357,56 +384,102 @@ async def answer_single(url: str, html: str, question: str, history: list[dict],
         return await _read_pages([hit["url"]], seen_urls, limit=1), "canlı tarama (Qwen + Scrapling)"
 
     tried, best_page = [], []
-    for stage in (stage_page, stage_atlas, stage_search, stage_sitemap, stage_crawl):
-        if stage is not stage_page and not query:
-            break
+
+    async def finish(verdict: dict, how: str):
+        page = verdict["page"]
+        recipes.save(store)
+        out = [{"meta": {"mode": "live", "path": [how], "found": True,
+                         "sources": [{"id": "S1", "url": page["url"], "page": page["title"]}]}}]
+        if person:
+            out.append({"person": person})
+        out.append({"delta": f"{verdict['answer']} [S1]\n\n> “{verdict['quote']}”"})
+        return out
+
+    if not query:
+        stages = []
+    elif llm.available:
+        stages = [stage_atlas, stage_search, stage_sitemap]
+    else:
+        stages = [stage_atlas, stage_search, stage_sitemap, stage_crawl]
+
+    if llm.available and stages:
+        # Aşamalar AYNI ANDA çalışır; biten aşamanın sayfaları hemen Qwen'e okutulur; ilk geçerli cevap kazanır.
+        running: dict = {asyncio.create_task(asyncio.wait_for(st(), timeout=75)): ("stage", st) for st in stages}
+        result_events = None
         try:
-            pages, how = await asyncio.wait_for(stage(), timeout=150 if stage is stage_crawl else 75)
-        except asyncio.TimeoutError:
-            await log("Bu yöntem süre sınırını aştı → sonraki yönteme geçiliyor.")
-            continue
-        if stage is stage_atlas and atlas_hit.get("files") and not pages:
-            files = atlas_hit["files"]  # hedef bir belge (PDF/Excel): doğrudan ver
-            recipes.save(store)
-            yield {"meta": {"mode": "live", "path": [how], "found": True,
-                            "sources": [{"id": f"D{i + 1}", "url": e["u"], "page": e["t"] or "belge"} for i, e in enumerate(files)]}}
-            yield {"delta": "İstediğin belge" + ("ler" if len(files) > 1 else "") + ":\n" +
-                            "\n".join(f"- **{e['t'] or urlparse(e['u']).path.rsplit('/', 1)[-1]}** "
-                                      f"({urlparse(e['u']).path.rsplit('.', 1)[-1].upper()}) [D{i + 1}]" for i, e in enumerate(files))}
+            while running and result_events is None:
+                done, _ = await asyncio.wait(running.keys(), return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    kind, ref = running.pop(task)
+                    try:
+                        res = task.result()
+                    except Exception:  # noqa: BLE001 - süre aşımı / hata: o aşama sonuçsuz
+                        continue
+                    if kind == "stage":
+                        pages, how = res
+                        if ref is stage_atlas and atlas_hit.get("files") and not pages:
+                            files = atlas_hit["files"]  # hedef bir belge (PDF/Excel): doğrudan ver
+                            recipes.save(store)
+                            result_events = [
+                                {"meta": {"mode": "live", "path": [how], "found": True,
+                                          "sources": [{"id": f"D{i + 1}", "url": e["u"], "page": e["t"] or "belge"} for i, e in enumerate(files)]}},
+                                {"delta": "İstediğin belge" + ("ler" if len(files) > 1 else "") + ":\n" +
+                                          "\n".join(f"- **{e['t'] or urlparse(e['u']).path.rsplit('/', 1)[-1]}** "
+                                                    f"({urlparse(e['u']).path.rsplit('.', 1)[-1].upper()}) [D{i + 1}]" for i, e in enumerate(files))}]
+                            break
+                        if pages:
+                            tried.append(how)
+                            if ref is stage_atlas and atlas_hit.get("pages"):
+                                best_page.append({"u": pages[0]["url"], "t": pages[0]["title"]})
+                            await log(f"{how}: Qwen {len(pages)} sayfayı okuyup karar veriyor…")
+                            jt = asyncio.create_task(understand.judge(question, pages, llm, terms=(terms + ([person] if person else []))))
+                            running[jt] = ("judge", how)
+                    else:
+                        if res:
+                            result_events = await finish(res, ref)
+                            break
+                        await log(f"{ref}: okunan sayfalarda cevap yok.")
+        finally:
+            for t in running:
+                t.cancel()
+        if result_events:
+            for ev in result_events:
+                yield ev
             return
-        if not pages:
-            continue
-        tried.append(how)
-        if stage is stage_atlas and atlas_hit.get("pages"):
-            best_page.append({"u": pages[0]["url"], "t": pages[0]["title"]})
-        if llm.available:
-            # 2) Qwen sayfaları okur ve karar verir (kelime filtresi yok); alıntı sayfada doğrulanır
-            await log(f"{how}: Qwen {len(pages)} sayfayı okuyup cevabın orada olup olmadığına karar veriyor…")
-            verdict = await understand.judge(question, pages, llm)
-            if not verdict:
-                await log(f"{how}: okunan sayfalarda cevap yok → sonraki yönteme geçiliyor.")
+        # Hiçbiri bulamadı → son çare canlı tarama
+        try:
+            pages, how = await asyncio.wait_for(stage_crawl(), timeout=150)
+        except Exception:  # noqa: BLE001
+            pages, how = [], ""
+        if pages:
+            tried.append(how)
+            verdict = await understand.judge(question, pages, llm, terms=(terms + ([person] if person else [])))
+            if verdict:
+                for ev in await finish(verdict, how):
+                    yield ev
+                return
+    else:
+        # Model yoksa: sıralı, kelime eşleştirmeli yedek
+        for stage in stages:
+            try:
+                pages, how = await asyncio.wait_for(stage(), timeout=150 if stage is stage_crawl else 75)
+            except Exception:  # noqa: BLE001
                 continue
-            page = verdict["page"]
-            recipes.save(store)
-            yield {"meta": {"mode": "live", "path": [how], "found": True,
-                            "sources": [{"id": "S1", "url": page["url"], "page": page["title"]}]}}
-            if person:
-                yield {"person": person}
-            yield {"delta": f"{verdict['answer']} [S1]\n\n> “{verdict['quote']}”"}
-            return
-        # Model yoksa: kelime eşleştirmeli yedek
-        q_tokens = [t for t in content_tokens(person or query) if len(t) > 2]
-        chunks = []
-        for pg in pages:
-            chunks += [{"id": "", "url": pg["url"], "page": pg["title"], "text": pg["text"][i:i + 900]}
-                       for i in range(0, len(pg["text"]), 900)]
-        hits = [c for _, c in _rank(question, chunks) if _relevant(c["text"], q_tokens, person)][:3]
-        if hits:
-            draft = await _draft(llm, question, hits, history)
-            yield {"meta": {"mode": "live", "path": [how], "found": True,
-                            "sources": [{"id": c["id"], "url": c["url"], "page": c["page"]} for c in hits]}}
-            yield {"delta": draft}
-            return
+            if not pages:
+                continue
+            tried.append(how)
+            q_tokens = [t for t in content_tokens(person or query) if len(t) > 2]
+            chunks = []
+            for pg in pages:
+                chunks += [{"id": "", "url": pg["url"], "page": pg["title"], "text": pg["text"][i:i + 900]}
+                           for i in range(0, len(pg["text"]), 900)]
+            hits = [c for _, c in _rank(question, chunks) if _relevant(c["text"], q_tokens, person)][:3]
+            if hits:
+                draft = await _draft(llm, question, hits, history)
+                yield {"meta": {"mode": "live", "path": [how], "found": True,
+                                "sources": [{"id": c["id"], "url": c["url"], "page": c["page"]} for c in hits]}}
+                yield {"delta": draft}
+                return
 
     recipes.save(store)
     srcs = [{"id": "S1", "url": best_page[0]["u"], "page": best_page[0]["t"] or "sayfa"}] if best_page else []
@@ -458,7 +531,7 @@ async def decompose(question: str, llm) -> list[dict]:
             "'rektör kim'), 'count' (bir birimin sayısı, örn. 'kaç fakülte var' → unit='fakülte'), 'list_each' "
             "(her birim için bir görevli, örn. 'fakültelerin dekanları' → unit='fakülte', role='dekan'). "
             "Birimler: fakülte, enstitü, yüksekokul, bölüm. Görevler: dekan, müdür, bölüm başkanı.\n"
-            f"MESAJ: {question}", DECOMPOSE_SCHEMA, timeout=45)
+            f"MESAJ: {question}", DECOMPOSE_SCHEMA, timeout=45, fast=True)
         parts = [p for p in (data or {}).get("parts", []) if clean(p.get("question"))]
     if not parts:  # LLM yoksa: basit bölme
         for piece in re.split(r"\?|;|\baynı zamanda\b|\bayrıca\b|(?<=\bvar)\s+(?=\S)|(?<=\bvarmı)\s+(?=\S)|"
@@ -610,7 +683,28 @@ async def find_role(unit: dict, role: str, at: dict, llm, log) -> dict:
     return {"unit": unit["name"], "role": role, "name": "", "url": unit["url"]}
 
 
+_ANSWER_CACHE: dict[tuple[str, str], tuple[float, list]] = {}
+ANSWER_TTL = 600  # sn
+
+
 async def answer(url: str, html: str, question: str, history: list[dict], llm, log):
+    """Önbellek sarmalayıcı: aynı sitede aynı soru 10 dk içinde tekrar sorulursa cevap anında döner."""
+    key = (registrable(urlparse(url).hostname or ""), " ".join(fold(question).split()))
+    hit = _ANSWER_CACHE.get(key)
+    if hit and time.time() - hit[0] < ANSWER_TTL:
+        await log("Bu soru az önce cevaplanmıştı → önbellekten.")
+        for ev in hit[1]:
+            yield ev
+        return
+    events = []
+    async for ev in _answer(url, html, question, history, llm, log):
+        events.append(ev)
+        yield ev
+    if any(e.get("meta", {}).get("found") for e in events):
+        _ANSWER_CACHE[key] = (time.time(), events)
+
+
+async def _answer(url: str, html: str, question: str, history: list[dict], llm, log):
     """Birleşik mesajları alt sorulara ayırır; her parçayı uygun yöntemle cevaplar ve tek cevapta birleştirir."""
     from . import atlas as atlas_mod
 
@@ -672,3 +766,21 @@ async def answer(url: str, html: str, question: str, history: list[dict], llm, l
         sections.append(f"{head}\n{text.strip()}")
     yield {"meta": {"mode": "live", "path": list(dict.fromkeys(paths)), "found": True, "sources": sources}}
     yield {"delta": "\n\n".join(sections)}
+
+
+async def locate_target(url: str, html: str, query: str, llm, log) -> dict | None:
+    """'Bul: X' — soru-cevap ile AYNI zincir (Qwen yorumu → açık sayfa → anlam haritası → arama → harita →
+    canlı tarama; Qwen sayfayı okuyup karar verir). Bulunan sayfa ve kısa cevap döner; panel oraya götürür."""
+    question = query if re.search(r"\?|\b(kim|nerede|nedir|hangi)\b", query, re.I) else f"{query} kim / nerede?"
+    meta, text, person = {}, "", ""
+    async for ev in answer_single(url, html, question, [], llm, log):
+        if "meta" in ev:
+            meta = ev["meta"]
+        if "person" in ev:
+            person = ev["person"]
+        text += ev.get("delta", "")
+    if not meta.get("found") or not meta.get("sources"):
+        return None
+    src = meta["sources"][0]
+    return {"url": src["url"], "title": src["page"], "answer": re.sub(r"\s*\[[SD]\d+\]", "", text).strip(),
+            "person": person, "path": meta.get("path", []), "here": src["url"].split("#")[0] == url.split("#")[0]}

@@ -156,11 +156,68 @@ def _stealth_sync(url: str, wait_selector: str | None = None, solve_cf: bool = F
                 via="scrapling.stealthy+cloudflare" if solve_cf else "scrapling.stealthy", selector=resp)
 
 
+_STEALTH: dict = {"session": None, "loop": None, "lock": None}
+
+
+async def _stealth_session():
+    """Tek, kalıcı Scrapling AsyncStealthySession: tarayıcı her sayfa için yeniden açılmaz (≈3–4 sn kazanç)."""
+    from scrapling.fetchers import AsyncStealthySession
+
+    loop = asyncio.get_running_loop()
+    if _STEALTH["loop"] is not loop:
+        _STEALTH.update(session=None, loop=loop, lock=asyncio.Lock())
+    async with _STEALTH["lock"]:
+        if _STEALTH["session"] is None:
+            sess = AsyncStealthySession(headless=True, network_idle=True, timeout=30000, block_webrtc=True,
+                                        hide_canvas=True, locale="tr-TR", extra_headers=TR_HEADERS, max_pages=4)
+            await sess.start()
+            _STEALTH["session"] = sess
+    return _STEALTH["session"]
+
+
+async def close_stealth():
+    sess = _STEALTH.get("session")
+    _STEALTH["session"] = None
+    if sess is not None:
+        try:
+            await sess.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def fetch_stealth(url: str, wait_selector: str | None = None, solve_cf: bool = False) -> Page:
-    return await asyncio.to_thread(_stealth_sync, url, wait_selector, solve_cf)
+    try:
+        sess = await _stealth_session()
+        kw = {"solve_cloudflare": solve_cf, "timeout": 60000 if solve_cf else 30000}
+        if wait_selector:
+            kw["wait_selector"] = wait_selector
+        resp = await sess.fetch(url, **kw)
+        return Page(url=str(resp.url), status=resp.status, html=resp.html_content or "",
+                    via="scrapling.stealthy+cloudflare" if solve_cf else "scrapling.stealthy", selector=resp)
+    except Exception:  # noqa: BLE001 - oturum bozulduysa sıfırla, tek seferlik tarayıcıyla dene
+        await close_stealth()
+        return await asyncio.to_thread(_stealth_sync, url, wait_selector, solve_cf)
+
+
+_PAGE_CACHE: dict[str, tuple[float, "Page"]] = {}
+PAGE_TTL = 300  # sn — aynı sayfa birkaç dakika içinde tekrar istenirse ağa çıkılmaz
 
 
 async def fetch_smart(url: str, log=None, allow_stealth: bool = True, allow_cloudflare: bool = False) -> Page:
+    import time as _t
+
+    hit = _PAGE_CACHE.get(url)
+    if hit and _t.time() - hit[0] < PAGE_TTL:
+        return hit[1]
+    page = await _fetch_smart(url, log, allow_stealth, allow_cloudflare)
+    if page.status < 400 and not wall_reason(page.status, page.html):
+        if len(_PAGE_CACHE) > 500:
+            _PAGE_CACHE.clear()
+        _PAGE_CACHE[url] = (_t.time(), page)
+    return page
+
+
+async def _fetch_smart(url: str, log=None, allow_stealth: bool = True, allow_cloudflare: bool = False) -> Page:
     """Merdiven: statik → (duvar ise) stealth. Duvarlar loglanır, akış kırılmaz."""
     page: Page | None = None
     try:

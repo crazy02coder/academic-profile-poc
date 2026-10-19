@@ -127,14 +127,7 @@ async def build(url: str, html: str, log) -> dict:
     for u in (await sitemap_urls(url, log))[:5000]:
         slug = urlparse(u).path.rstrip("/").rsplit("/", 1)[-1].replace("-", " ").replace("_", " ")
         entries.append({"u": u, "t": slug[:90], "cat": categorize(slug, u), "host": urlparse(u).hostname or "", "src": "sitemap.xml"})
-    apis = []
-    if rea.available():
-        cap = await rea.recon(home, settle_ms=2500)
-        if cap.ok:
-            for t in cap.api_calls:
-                if registrable(urlparse(t.url).hostname or "") == root:
-                    apis.append({"u": t.url, "t": f"{t.method} {urlparse(t.url).path}", "cat": "api",
-                                 "host": urlparse(t.url).hostname or "", "src": f"REA {cap.evidence_id[:12]}"})
+    apis: list[dict] = []  # REA gözlemi burada çıkarıldı: harita kurulumuna katkısı yoktu, ~10 sn sürüyordu
     atlas = {"root": root, "at": time.time(), "entries": entries + apis, "hubs": {}, "incomplete": not home_ok}
     save(atlas)
     counts = summary(atlas)
@@ -257,7 +250,7 @@ async def route(atlas: dict, question: str, llm, log, intent: dict | None = None
             "Soruyu en doğrudan cevaplayacak en fazla 3 adresin numarasını seç (sayfa veya belge).\n"
             f"{listing}\nJSON: {{\"picks\": [numaralar], \"reason\": \"kısa\"}}",
             {"type": "object", "properties": {"picks": {"type": "array", "items": {"type": "integer"}},
-                                              "reason": {"type": "string"}}, "required": ["picks"]}, timeout=45)
+                                              "reason": {"type": "string"}}, "required": ["picks"]}, timeout=45, fast=True)
         picks = [cands[i] for i in (data or {}).get("picks", []) if isinstance(i, int) and 0 <= i < min(30, len(cands))]
         if picks:
             chosen = picks[:3]

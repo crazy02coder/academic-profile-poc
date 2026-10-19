@@ -272,6 +272,13 @@ async def recipes_check():
     return await check_changes()
 
 
+@app.on_event("shutdown")
+async def _close_browsers():
+    from .net import close_stealth
+
+    await close_stealth()
+
+
 @app.on_event("startup")
 async def _watcher():
     minutes = float(os.getenv("WATCH_INTERVAL_MIN", "0"))
@@ -500,8 +507,10 @@ async def page_ask(body: PageIn):
 
 @app.post("/api/page/find")
 async def page_find(body: PageIn):
+    from . import live
+
     llm = await LLM().probe()
-    return _sse(lambda log: site.find(body.url, body.html, body.query, llm, log))
+    return _sse(lambda log: live.locate_target(body.url, body.html, body.query, llm, log))
 
 
 @app.post("/api/page/extract")

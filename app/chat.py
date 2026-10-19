@@ -20,7 +20,7 @@ from typing import AsyncIterator
 
 from .text import content_tokens, expand_bilingual, fold, stem_tr
 
-CAG_BUDGET_TOKENS = int(os.getenv("CAG_BUDGET_TOKENS", "11000"))
+CAG_BUDGET_TOKENS = int(os.getenv("CAG_BUDGET_TOKENS", "8500"))  # 12k bağlama sığacak şekilde
 MODES = {"auto": "Otomatik", "rag": "RAG", "cag": "CAG", "hybrid": "Hibrit"}
 
 SYSTEM = ("Sen 'Akademik İz' asistanısın. Kullanıcı tek bir akademisyen hakkında soru soruyor. YALNIZCA verilen "

@@ -591,6 +591,18 @@
    "at": "2026-10-19 11:19:37",
    "kind": "mapped",
    "detail": "https://research.ku.edu.tr/tr/arastirma-destegi/vpri/ haritalandı"
+  },
+  {
+   "at": "2026-10-19 11:30:21",
+   "kind": "learned_from_browser",
+   "detail": "0 istek, 0 tarif",
+   "evidence_id": "ev_8a78ade877b81560ef55fa10f152311c6126d4d5222c7e52fb585be87e21c39f"
+  },
+  {
+   "at": "2026-10-19 11:30:32",
+   "kind": "learned_from_browser",
+   "detail": "0 istek, 0 tarif",
+   "evidence_id": "ev_564b2f87712d40e6d3f3a64813b426f6e8370dae805e5d1fb2467e508efd230f"
   }
  ],
  "staff_pages": [
@@ -604,5 +616,7 @@
   "https://research.ku.edu.tr/tr/arastirma-altyapisi/programlar/lisansustu-programlari/",
   "https://research.ku.edu.tr/tr/arastirma-destegi/",
   "https://research.ku.edu.tr/tr/arastirma-destegi/vpri/ekibimiz/"
- ]
+ ],
+ "search_failed_at": 1792398235.392672,
+ "observed_apis": []
 }

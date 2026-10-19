@@ -211,9 +211,12 @@ async function find(query) {
   let result = null;
   await sse("/api/page/find", { url: snap.url, html: snap.html, query }, (m) => { if (m.stage) st(m.stage); if ("result" in m) result = m.result; if (m.error) st(m.error); });
   st("");
-  if (!result) { bubble.innerHTML = `"${esc(query)}" için sitede bir sayfa bulamadım. Farklı kelimelerle dener misin?`; return; }
-  bubble.innerHTML = `Buldum${result.pages ? ` (${result.pages} sayfa tarandı)` : ""}: <b>${esc(result.title)}</b><br><span class="prov">${esc(result.url)}</span>
-    <div class="acts"><button class="primary" data-go="${esc(result.url)}" data-hl="${esc(result.person ? result.person.split(" ").slice(-1)[0] : query)}">Oraya götür</button>
+  if (!result) { bubble.innerHTML = `"${esc(query)}" sitede bulunamadı (açık sayfa, anlam haritası, sitenin araması, site haritası ve canlı tarama denendi).`; return; }
+  bubble.innerHTML = `${fmt(result.answer)}
+    <div class="meta"><b>Site asistanı</b> · kaynak: ${esc((result.path || []).join(" → "))}</div>
+    <div class="acts">${result.here
+      ? `<button class="primary" data-hl="${esc((result.person || query).split(" ").slice(-1)[0])}" data-hlonly="1">Sayfada göster</button>`
+      : `<button class="primary" data-go="${esc(result.url)}" data-hl="${esc((result.person || query).split(" ").slice(-1)[0])}">Oraya götür: ${esc(result.title)}</button>`}
     ${result.person ? `<button data-person="${esc(result.person)}">${esc(result.person)} — akademik profilini çıkar</button>` : ""}</div>`;
 }
 
@@ -339,6 +342,7 @@ document.addEventListener("click", async (e) => {
   if (t.id === "refresh") { state.info = null; state.page = null; return understandPage(); }
   if (t.dataset.person) return startProfile(t.dataset.person);
   if (t.dataset.paper) return openPaper(t.dataset.paper);
+  if (t.dataset.hlonly) { await ext("highlight", { text: t.dataset.hl }).catch(() => {}); return; }
   if (t.dataset.go) {
     e.preventDefault();
     await ext("navigate", { url: t.dataset.go });

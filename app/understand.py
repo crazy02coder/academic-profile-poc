@@ -144,7 +144,7 @@ async def pick_links(sel, url: str, llm, goal: str, k: int = 2) -> list[tuple[st
         "tanesinin numarasını seç (menü başlıkları genelde: Akademik, Öğretim, Birimler, Fakülteler…). Hiçbiri "
         f"uygun değilse boş liste ver.\n\nLİNKLER:\n{listing}\n" + 'JSON: {"links": [numaralar]}',
         {"type": "object", "properties": {"links": {"type": "array", "items": {"type": "integer"}}}, "required": ["links"]},
-        timeout=45) or {}
+        timeout=45, fast=True) or {}
     return [links[i] for i in data.get("links", []) if isinstance(i, int) and 0 <= i < len(links)][:k]
 
 
@@ -172,12 +172,15 @@ async def interpret(question: str, llm, categories: dict[str, str]) -> dict | No
         "terms: sitede aranacak 3-8 KISA ifade; Türkçe ve İngilizce eş anlamlıları dahil (örn. rektör → rektör, "
         "rektörlük, rector, president, yönetim). Soru kalıplarını (kim, nedir, kaç) yazma.\n"
         f"page_types: cevabın büyük olasılıkla bulunduğu sayfa türleri, şu anahtarlardan (en olasıdan başla):\n{cats}\n"
-        "answer_type: beklenen cevap türü. person: soru adı verilmiş belirli bir kişiyle ilgiliyse adı, değilse boş. "
+        "answer_type: beklenen cevap türü. person: soru adı verilmiş bir kişiyle ilgiliyse adı (yalnızca ad ya da "
+        "soyad verilmişse onu yaz, örn. 'Gülsüm adında biri var mı' → person='Gülsüm'), değilse boş. "
         "unit: soru belirli bir fakülte/bölümle sınırlıysa adı, değilse boş.\n"
-        f"SORU: {question}", INTENT_SCHEMA, timeout=40)
+        f"SORU: {question}", INTENT_SCHEMA, timeout=40)  # zincirin yönünü belirlediği için büyük model
     if not data or not data.get("terms"):
         return None
-    data["terms"] = [clean(t) for t in data["terms"] if clean(t)][:8]
+    junk = {"adinda", "adli", "isimli", "adin", "akademisyen", "akademisyenler", "var", "varmi", "biri", "kisi",
+            "hoca", "hocasi", "ogretim uyesi", "personel"}
+    data["terms"] = [clean(t) for t in data["terms"] if clean(t) and fold(t) not in junk][:8]
     data["page_types"] = [p for p in data.get("page_types") or [] if p in categories][:3]
     data["person"] = clean(data.get("person") or "")
     data["unit"] = clean(data.get("unit") or "")
@@ -197,12 +200,49 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", fold(s)).strip()
 
 
-async def judge(question: str, pages: list[dict], llm) -> dict | None:
+def _excerpt(text: str, terms: list[str], budget: int) -> str:
+    """Sayfa bütçeye sığmıyorsa: kısa başlangıç + arama ifadelerinin geçtiği bölgeler (cevap kesilmesin)."""
+    import re
+
+    if len(text) <= budget:
+        return text
+    head = text[: budget // 4]
+    spans = []
+    for term in terms:
+        for w in [x for x in term.split() if len(x) > 3][:3] or [term]:
+            for m in re.finditer(re.escape(w[:6]), text, re.I):
+                spans.append((max(0, m.start() - 500), min(len(text), m.end() + 500)))
+    spans.sort()
+    merged = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+        else:
+            merged.append((a, b))
+    body, left = [], budget - len(head)
+    for a, b in merged:
+        if a < len(head):
+            a = len(head)
+        if a >= b:
+            continue
+        piece = text[a:b]
+        if len(piece) > left:
+            piece = piece[:left]
+        body.append(piece)
+        left -= len(piece)
+        if left <= 0:
+            break
+    return head + (" … " + " … ".join(body) if body else text[len(head): budget])
+
+
+async def judge(question: str, pages: list[dict], llm, terms: list[str] | None = None) -> dict | None:
     """Qwen sayfaları (kelime filtresi olmadan) okur ve cevabın hangisinde olduğuna karar verir.
     Kabul koşulu: verdiği alıntı ilgili sayfanın metninde birebir geçmeli (uydurma engeli)."""
     if not pages or not llm.available:
         return None
-    block = "\n\n".join(f"=== SAYFA {i} — {p['title']} ({p['url']})\n{p['text'][:3800]}" for i, p in enumerate(pages, 1))
+    budget = max(3500, 12000 // len(pages))
+    block = "\n\n".join(f"=== SAYFA {i} — {p['title']} ({p['url']})\n{_excerpt(p['text'], terms or [], budget)}"
+                          for i, p in enumerate(pages, 1))
     data = await llm.json(
         "Aşağıdaki web sayfalarını oku ve soruyu cevapla. Kurallar:\n"
         "- Cevap hangi sayfada AÇIKÇA yazıyorsa page = o sayfanın numarası (1'den başlar); hiçbirinde yoksa page = 0.\n"
@@ -217,7 +257,7 @@ async def judge(question: str, pages: list[dict], llm) -> dict | None:
         return None
 
     def contains(pg):  # alıntı birebir ya da (model birkaç kelimeyi kırptıysa) uzun bir parçası sayfada geçmeli
-        page_n = _norm(pg["text"][:3800])
+        page_n = _norm(pg["text"])
         return q_n in page_n or (len(q_n) > 30 and (q_n[:40] in page_n or q_n[-40:] in page_n))
 
     # Sayfa numarası yerine alıntının geçtiği sayfa esas alınır (model numarayı karıştırsa da doğru sayfa bulunur)

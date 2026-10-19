@@ -412,7 +412,7 @@ async def find_generic(url: str, html: str, query: str, llm, log) -> dict | None
             data = await llm.json(f"Kullanıcı bu sitede şunu arıyor: '{query}'. Aşağıdaki linklerden hedefe en hızlı "
                                   f"götürecek en fazla 4 tanesinin numarasını seç.\n{listing}\nJSON: {{\"links\": [..]}}",
                                   {"type": "object", "properties": {"links": {"type": "array", "items": {"type": "integer"}}},
-                                   "required": ["links"]}, timeout=45)
+                                   "required": ["links"]}, timeout=45, fast=True)
             for i in (data or {}).get("links", [])[:4]:
                 if isinstance(i, int) and 0 <= i < min(60, len(candidates)) and candidates[i] not in picked:
                     picked.insert(0, candidates[i])

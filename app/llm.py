@@ -18,13 +18,14 @@ from .config import LLM_MODE, OLLAMA_MODEL, OLLAMA_URL
 
 PREFERRED = ("qwen2.5:7b", "qwen2.5:14b", "qwen2.5:3b", "qwen2.5")
 EMBED_PREFERRED = ("bge-m3", "nomic-embed-text", "mxbai-embed-large", "all-minilm")
-NUM_CTX = int(os.getenv("LLM_NUM_CTX", "16384"))
+NUM_CTX = int(os.getenv("LLM_NUM_CTX", "12288"))  # paralel slot × bağlam belleği 18 GB Mac'e sığsın
 KEEP_ALIVE = os.getenv("LLM_KEEP_ALIVE", "30m")
 
 
 class LLM:
     def __init__(self):
         self.model: str = ""
+        self.fast_model: str = ""  # soru yorumu, link seçimi gibi kısa işler için küçük model
         self.embed_model: str = ""
         self.available = False
         self.reason = ""
@@ -60,16 +61,19 @@ class LLM:
             self.available, self.reason = False, "Ollama'da Qwen modeli yok (ollama pull qwen2.5:7b)"
             return self
         self.model, self.available, self.reason = chosen, True, ""
+        fast_env = os.getenv("OLLAMA_FAST_MODEL", "")
+        self.fast_model = next((n for pref in ((fast_env,) if fast_env else ()) + ("qwen2.5:3b", "qwen2.5:1.5b")
+                                for n in names if pref and n.startswith(pref)), chosen)
         return self
 
     def _options(self, temperature: float) -> dict:
         return {"temperature": temperature, "num_ctx": NUM_CTX}
 
     async def json(self, prompt: str, schema: dict | None = None, system: str = "", timeout: int = 120,
-                   num_ctx: int | None = None) -> dict | None:  # noqa: ARG002 - num_ctx sabit tutulur
+                   num_ctx: int | None = None, fast: bool = False) -> dict | None:  # noqa: ARG002 - num_ctx sabit
         if not self.available:
             return None
-        body = {"model": self.model, "prompt": prompt, "stream": False, "format": schema or "json",
+        body = {"model": self.fast_model if fast and self.fast_model else self.model, "prompt": prompt, "stream": False, "format": schema or "json",
                 "options": self._options(0.1), "keep_alive": KEEP_ALIVE}
         if system:
             body["system"] = system
