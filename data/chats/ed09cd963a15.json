@@ -1,0 +1,101 @@
+{
+ "id": "ed09cd963a15",
+ "job_id": "f1b2a436b08a",
+ "name": "Gülşen Seven",
+ "title": "Dr. Öğr. Üyesi",
+ "institution": "TED University",
+ "papers": 37,
+ "created": "2026-10-20 13:45:06",
+ "updated": "2026-10-20 14:35:12",
+ "messages": [
+  {
+   "role": "user",
+   "content": "En çok atıf alan yayınları hangileri?",
+   "at": "14:19"
+  },
+  {
+   "role": "assistant",
+   "content": "Yanıt 120 saniye içinde tamamlanamadı. Yerel model veya embedding hazırlığı zaman aşımına uğradı.",
+   "meta": {
+    "mode": "hybrid",
+    "route": "hem bütüne hem ayrıntıya bakan soru",
+    "requested": "auto",
+    "full_tokens": 2760,
+    "error": "Yanıt 120 saniye içinde tamamlanamadı. Yerel model veya embedding hazırlığı zaman aşımına uğradı."
+   },
+   "at": "14:19"
+  },
+  {
+   "role": "user",
+   "content": "Son yıllarda hangi konulara yöneldi?",
+   "at": "14:21"
+  },
+  {
+   "role": "assistant",
+   "content": "Gülşen Seven, 2023-2026 yılları arasında çoğunlukla Doğal Dil İşleme ve LLM (Lazım olan Dil Modeli), Eğitim Teknolojileri üzerine yayınlar yaptı. [P7,P23]",
+   "meta": {
+    "mode": "cag",
+    "route": "genel soru",
+    "requested": "auto",
+    "full_tokens": 2760,
+    "context_tokens": 3086,
+    "retrieval_s": 0.0,
+    "ttft": 10.85,
+    "prompt_tokens": 3086,
+    "prompt_eval_s": 10.71,
+    "output_tokens": 63,
+    "total_s": 13.12,
+    "model": "qwen2.5:7b"
+   },
+   "at": "14:21"
+  },
+  {
+   "role": "user",
+   "content": "En sık kimlerle çalışıyor?",
+   "at": "14:35"
+  },
+  {
+   "role": "assistant",
+   "content": "Gülşen Seven, en sık işbirliği yapmakta olduğu yazarlar arasında G Seven (6 kez), Mehmet Alper Yalçınkaya (3 kez), A Özman Erkman (3 kez) sıralanabilir. [P32]",
+   "meta": {
+    "mode": "cag",
+    "route": "bütüne bakan soru (sayma/sıralama/genel profil)",
+    "requested": "auto",
+    "full_tokens": 2760,
+    "context_tokens": 3165,
+    "retrieval_s": 0.0,
+    "ttft": 0.68,
+    "prompt_tokens": 3165,
+    "prompt_eval_s": 0.5,
+    "output_tokens": 63,
+    "total_s": 2.99,
+    "model": "qwen2.5:7b"
+   },
+   "at": "14:35"
+  },
+  {
+   "role": "user",
+   "content": "Son yıllarda hangi konulara yöneldi?",
+   "at": "14:35"
+  },
+  {
+   "role": "assistant",
+   "content": "Son yıllarda Gülşen Seven, Doğal Dil İşleme ve LLM, Eğitim Teknolojileri üzerine yayınlar yaptı. [P7,P23]",
+   "meta": {
+    "mode": "cag",
+    "route": "genel soru",
+    "requested": "auto",
+    "full_tokens": 2760,
+    "context_tokens": 3248,
+    "retrieval_s": 0.0,
+    "ttft": 0.61,
+    "prompt_tokens": 3248,
+    "prompt_eval_s": 0.49,
+    "output_tokens": 38,
+    "total_s": 1.97,
+    "model": "qwen2.5:7b"
+   },
+   "at": "14:35"
+  }
+ ]
+}

@@ -6,7 +6,7 @@
  "institution": "303653 Profesör Serdar Müldür Ostim Teknik Üniversitesi",
  "papers": 15,
  "created": "2026-10-19 07:59:09",
- "updated": "2026-10-19 08:02:55",
+ "updated": "2026-10-20 14:33:17",
  "messages": [
   {
    "role": "user",
@@ -53,6 +53,30 @@
     "model": "qwen2.5-coder:7b"
    },
    "at": "08:02"
+  },
+  {
+   "role": "user",
+   "content": "En çok atıf alan yayınları hangileri?",
+   "at": "14:33"
+  },
+  {
+   "role": "assistant",
+   "content": "En çok atıf alan yayınlar Serdar Müldür'un şunlardır:\n- [P9] Determination of Aorta Failure with the Application of FFT, AR and Wavelet Methods to Doppler Technique (2001) - 58 atıf\n- [P8] A model Approach to Sharing Electronic Medical Records Between and Within the State Hospitals in Turkey (2001) - 13 atıf\n\nBu yayınlar, serisinin en yüksek atıf sayılarını göstermektedir.",
+   "meta": {
+    "mode": "cag",
+    "route": "bütüne bakan soru (sayma/sıralama/genel profil)",
+    "requested": "auto",
+    "full_tokens": 1747,
+    "context_tokens": 2160,
+    "retrieval_s": 0.0,
+    "ttft": 10.76,
+    "prompt_tokens": 2160,
+    "prompt_eval_s": 10.17,
+    "output_tokens": 113,
+    "total_s": 15.06,
+    "model": "qwen2.5:7b"
+   },
+   "at": "14:33"
   }
  ]
 }

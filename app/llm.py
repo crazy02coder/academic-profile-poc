@@ -106,6 +106,7 @@ class LLM:
         body = {"model": self.model, "messages": messages, "stream": True, "options": self._options(0.2),
                 "keep_alive": KEEP_ALIVE}
         started = time.time()
+        received_text = False
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=body) as resp:
                 resp.raise_for_status()
@@ -113,8 +114,11 @@ class LLM:
                     if not line:
                         continue
                     chunk = json.loads(line)
+                    if chunk.get("error"):
+                        raise RuntimeError(str(chunk["error"]))
                     piece = (chunk.get("message") or {}).get("content", "")
                     if piece:
+                        received_text = True
                         if stats is not None and "ttft" not in stats:
                             stats["ttft"] = round(time.time() - started, 2)
                         yield piece
@@ -125,6 +129,8 @@ class LLM:
                             stats["output_tokens"] = chunk.get("eval_count")
                             stats["total_s"] = round(time.time() - started, 2)
                         break
+        if not received_text:
+            raise RuntimeError("Ollama boş cevap döndürdü")
 
     def label(self) -> str:
         if not self.available:

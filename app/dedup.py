@@ -122,6 +122,9 @@ async def resolve(records: list[dict], subject: str, llm=None, log=None) -> tupl
         cites = [m["citations"] for m in members if isinstance(m.get("citations"), int)]
         best["citations"] = max(cites) if cites else None
         best["sources"] = sorted({m["source"] for m in members}, key=lambda s: SOURCE_PRIORITY.get(s, 9))
+        yok_context = next((m["yok_context"] for m in members if m.get("yok_context")), None)
+        if yok_context:
+            best["yok_context"] = yok_context
         variants, seen = [], set()
         for m in members:
             k = title_key(m["title"])

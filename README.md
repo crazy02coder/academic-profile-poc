@@ -59,6 +59,19 @@ Qwen en güncel 35 yayını analiz eder. Her iddianın tek cümle olması, geçe
 4. Kaynak başına en fazla 100 kayıt alınır; tam bibliyografya iddiası yoktur. OpenAlex anahtarsız ücretsiz istek denenir; erişim/kota hatasında Crossref'e geçilir. Servis koşulları değişebilir.
 5. Aynı DOI birleştirilir. DOI yoksa yıl + ortak yazar + aynı başlık veya sınırlı TR/EN sözlüğüyle çok yüksek başlık örtüşmesi gerekir. Farklı DOI'ler birleştirilmez. Bu, genel çok dilli semantik tekilleştirme değildir. Orijinal varyantlar, kaynaklar ve diller korunur. `langdetect` kısa başlıklarda yanılabilir; düşük güven `Belirsiz` gösterilir.
 
+## Yayın ayrıntısı ve YÖK
+
+YÖK ayrıntıları eski `yayinDetay.jsp?id=…&no=…` adresi doğrudan açılarak okunmaz.
+Akademisyen profili üzerinden güncel yayın listesi açılır; başlık/yıl eşleşmesinden
+sonra ayrıntı isteği aynı tarayıcı oturumunda yapılır. Yeni kayıtlarda profil
+bağlamı birleştirme sırasında korunur; eski raporlarda raporun YÖK profil bağlantısı
+kullanılır. Kaynak düğmesi akademisyenin YÖK profiline gider.
+
+Genel site açıklamaları ve oturum hataları makale özeti kabul edilmez. Gerçek
+özet veya Semantic Scholar TL;DR metni yoksa Qwen çağrılmaz; yalnızca künye
+gösterilir. Erişilemeyen sayfa için yayının hiç özeti olmadığı iddia edilmez.
+Bu düzenleme test veya canlı YÖK sorgusu çalıştırılmadan yapılmıştır.
+
 ## Docker
 
 ```bash

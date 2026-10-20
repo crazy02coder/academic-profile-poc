@@ -5,6 +5,13 @@ const safeUrl = (u) => { try { const x = new URL(u); return ["http:", "https:"].
 
 const thread = $("#thread");
 let jobId = null, result = null, chatId = null;
+let chatRequest = null;
+let paperRequest = null;
+
+function setChatBusy(value) {
+  $("#send").disabled = value || !result;
+  document.querySelectorAll(".suggest button").forEach((button) => { button.disabled = value; });
+}
 const SOURCE_NAMES = { openalex: "OpenAlex", crossref: "Crossref", orcid: "ORCID", yok: "YÖK", scholar: "Scholar" };
 const PROV = { university: "kurum sayfası", "rea-json": "REA · gizli API", yok: "YÖK Akademik", openalex: "OpenAlex", scholar: "Scholar", llm: "Qwen (metinde doğrulandı)", consensus: "kaynak uzlaşısı" };
 
@@ -232,32 +239,65 @@ function formatAnswer(text) {
 }
 
 async function ask(question) {
-  if (!question || !result) return;
+  if (!question || !result || chatRequest) return;
   jobId = result.job_id || jobId;
+  const controller = new AbortController();
+  chatRequest = controller;
+  setChatBusy(true);
   addMsg("user", esc(question));
-  const bubble = addMsg("bot", `<div class="answer typing"></div>`, false);
+  const bubble = addMsg("bot", `<div class="answer typing"></div><div class="prov chat-stage" role="status">Yanıt hazırlanıyor…</div>`, false);
   const out = $(".answer", bubble);
-  $("#send").disabled = true;
+  const stage = $(".chat-stage", bubble);
   let text = "";
-  const mode = "auto";
-  const res = await fetch(`/api/jobs/${jobId}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, chat_id: chatId, mode }) });
-  const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const parts = buf.split("\n\n"); buf = parts.pop();
-    for (const part of parts) {
-      if (!part.startsWith("data: ")) continue;
-      const msg = JSON.parse(part.slice(6));
-      if (msg.chat_id) chatId = msg.chat_id;
-      if (msg.delta) { text += msg.delta; out.innerHTML = formatAnswer(text); thread.scrollTop = thread.scrollHeight; }
-      if (msg.done) out.insertAdjacentHTML("afterend", metaLine(msg.meta));
+  let completed = false, failure = "", reader = null;
+  const deadline = setTimeout(() => controller.abort(), 150000);
+  try {
+    const res = await fetch(`/api/jobs/${jobId}/chat`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, chat_id: chatId, mode: "auto" }), signal: controller.signal,
+    });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(typeof error.detail === "string" ? error.detail : `İstek başarısız (HTTP ${res.status}).`);
     }
+    if (!res.body) throw new Error("Sunucu cevap akışı açmadı.");
+    reader = res.body.getReader();
+    const dec = new TextDecoder(); let buf = "";
+    const event = (part) => {
+      const data = part.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+      if (!data) return;
+      const msg = JSON.parse(data);
+      if (msg.chat_id) chatId = msg.chat_id;
+      if (msg.stage) stage.textContent = msg.stage;
+      if (msg.delta) {
+        text += msg.delta; out.innerHTML = formatAnswer(text); out.classList.remove("typing");
+        stage.textContent = ""; thread.scrollTop = thread.scrollHeight;
+      }
+      if (msg.error) failure = msg.error;
+      if (msg.done) { completed = true; out.insertAdjacentHTML("afterend", metaLine(msg.meta)); }
+    };
+    while (!completed) {
+      const { value, done } = await reader.read();
+      if (done) { buf += dec.decode(); if (buf.trim()) event(buf); break; }
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split(/\r?\n\r?\n/); buf = parts.pop();
+      for (const part of parts) event(part);
+    }
+    if (failure) throw new Error(failure);
+    if (!completed) throw new Error("Cevap tamamlanmadan bağlantı kesildi. Soruyu yeniden gönderebilirsin.");
+    if (!text.trim()) throw new Error("Yerel model boş cevap döndürdü.");
+  } catch (error) {
+    if (!text) out.textContent = "Cevap alınamadı.";
+    stage.textContent = error.name === "AbortError"
+      ? "Cevap bekleme süresi doldu veya sohbet değiştirildi."
+      : `Hata: ${error.message}`;
+  } finally {
+    clearTimeout(deadline);
+    if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+    out.classList.remove("typing");
+    if (chatRequest === controller) { chatRequest = null; setChatBusy(false); }
+    loadChats();
   }
-  out.classList.remove("typing");
-  $("#send").disabled = false;
-  loadChats();
 }
 
 // ------------------------------------------------------------ sohbet geçmişi
@@ -273,6 +313,8 @@ async function loadChats() {
 }
 
 function resetThread() {
+  chatRequest?.abort();
+  chatRequest = null;
   thread.innerHTML = "";
   result = null; chatId = null; jobId = null;
   $("#question").disabled = true; $("#send").disabled = true; $("#question").placeholder = "Önce bir profil oluşturun…";
@@ -304,44 +346,79 @@ async function deleteChat(cid) {
 async function openPaper(pid) {
   const p = result?.publications.find((x) => x.id === pid);
   if (!p) return;
+  paperRequest?.abort();
+  const controller = new AbortController();
+  paperRequest = controller;
+  const jid = result.job_id || jobId;
   const modal = $("#modal"), body = $("#modalBody");
   modal.hidden = false;
   body.innerHTML = `<div class="prov">${esc(pid)} · ${esc(p.year || "")} · ${p.sources.map((s) => esc(SOURCE_NAMES[s] || s)).join(" + ")}</div>
     <h2 class="m-title">${esc(p.title)}</h2><div id="mMeta" class="prov">${esc(p.venue || "")}</div>
     <div id="mStages" class="log small"></div>
-    <h3 class="m-h">Qwen özeti</h3><div id="mSum" class="answer typing"></div>
-    <h3 class="m-h">Özet (abstract)</h3><div id="mAbs" class="m-abs prov">…</div>
+    <h3 class="m-h">Türkçe özet</h3><div id="mSum" class="answer typing"></div>
+    <h3 class="m-h">Özet (abstract)</h3><div id="mAbs" class="m-abs prov">Kaynak okunuyor…</div>
     <div id="mLinks" class="chips" style="margin-top:12px"></div>`;
-  const stages = $("#mStages"); let text = "";
-  const res = await fetch(`/api/jobs/${result.job_id || jobId}/papers/${pid}`);
-  const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const parts = buf.split("\n\n"); buf = parts.pop();
-    for (const part of parts) {
-      if (!part.startsWith("data: ")) continue;
-      const m = JSON.parse(part.slice(6));
-      if (m.stage) { stages.insertAdjacentHTML("beforeend", `<div>› ${esc(m.stage)}</div>`); }
+  const stages = $("#mStages", body), metaEl = $("#mMeta", body), sumEl = $("#mSum", body);
+  const absEl = $("#mAbs", body), linksEl = $("#mLinks", body);
+  let text = "", reader = null, completed = false, failure = "", timedOut = false;
+  const deadline = setTimeout(() => { timedOut = true; controller.abort(); }, 210000);
+  try {
+    const res = await fetch(`/api/jobs/${jid}/papers/${pid}`, { signal: controller.signal });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(typeof error.detail === "string" ? error.detail : `İstek başarısız (HTTP ${res.status}).`);
+    }
+    if (!res.body) throw new Error("Sunucu ayrıntı akışı açmadı.");
+    reader = res.body.getReader();
+    const dec = new TextDecoder(); let buf = "";
+    const event = (part) => {
+      const data = part.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+      if (!data || controller.signal.aborted || paperRequest !== controller) return;
+      const m = JSON.parse(data);
+      if (m.stage) stages.insertAdjacentHTML("beforeend", `<div>› ${esc(m.stage)}</div>`);
       if (m.meta) {
         const d = m.meta;
-        $("#mMeta").innerHTML = `${esc(d.journal || "")} ${d.date ? "· " + esc(d.date) : ""}<br>${esc((d.authors || []).slice(0, 12).join(", "))}`
-          + (d.keywords?.length ? `<div class="chips" style="margin-top:8px">${d.keywords.map((k) => `<span class="chip">${esc(k)}</span>`).join("")}</div>` : "");
-        $("#mAbs").textContent = d.abstract || "Özet bulunamadı.";
-        if (d.tldr) $("#mAbs").insertAdjacentHTML("beforebegin", `<div class="prov"><b>TL;DR (Semantic Scholar):</b> ${esc(d.tldr)}</div>`);
-        if (d.s2_citations != null) $("#mMeta").insertAdjacentHTML("beforeend", `<div class="prov">Semantic Scholar atıf: ${esc(d.s2_citations)}</div>`);
-        $("#mAbs").insertAdjacentHTML("beforeend", `<div class="prov" style="margin-top:6px">(${esc(d.source_note)}${d.via ? " · " + esc(d.via) : ""})</div>`);
-        $("#mLinks").innerHTML = [safeUrl(d.final_url) && `<a class="chip alt" href="${safeUrl(d.final_url)}" target="_blank" rel="noopener">Kaynağa git ↗</a>`,
+        metaEl.innerHTML = `${esc(d.journal || "")} ${d.date ? "· " + esc(d.date) : ""}<br>${esc((d.authors || []).slice(0, 12).join(", "))}`
+          + (d.keywords?.length ? `<div class="chips" style="margin-top:8px">${d.keywords.map((k) => `<span class="chip">${esc(k)}</span>`).join("")}</div>` : "")
+          + Object.entries(d.bibliography || {}).map(([label, value]) => `<div><b>${esc(label)}:</b> ${esc(value)}</div>`).join("");
+        absEl.textContent = d.abstract || "Bu kayıtta özet metni alınamadı.";
+        if (d.tldr) absEl.insertAdjacentHTML("beforebegin", `<div class="prov"><b>TL;DR (Semantic Scholar):</b> ${esc(d.tldr)}</div>`);
+        if (d.s2_citations != null) metaEl.insertAdjacentHTML("beforeend", `<div class="prov">Semantic Scholar atıf: ${esc(d.s2_citations)}</div>`);
+        absEl.insertAdjacentHTML("beforeend", `<div class="prov" style="margin-top:6px">${esc(d.source_note)}</div>`);
+        linksEl.innerHTML = [safeUrl(d.final_url) && `<a class="chip alt" href="${safeUrl(d.final_url)}" target="_blank" rel="noopener">${esc(d.source_label || "Kaynağa git")} ↗</a>`,
           safeUrl(d.pdf) && `<a class="chip alt" href="${safeUrl(d.pdf)}" target="_blank" rel="noopener">PDF ↗</a>`].filter(Boolean).join("");
       }
-      if (m.delta) { text += m.delta; $("#mSum").innerHTML = formatAnswer(text); }
+      if (m.delta) { text += m.delta; sumEl.innerHTML = formatAnswer(text); sumEl.classList.remove("typing"); }
+      if (m.error) failure = m.error;
+      if (m.done) completed = true;
+    };
+    while (!completed) {
+      const { value, done } = await reader.read();
+      if (done) { buf += dec.decode(); if (buf.trim()) event(buf); break; }
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split(/\r?\n\r?\n/); buf = parts.pop();
+      for (const part of parts) event(part);
     }
+    if (failure) throw new Error(failure);
+    if (!completed) throw new Error("Yayın ayrıntısı tamamlanmadan bağlantı kesildi.");
+    if (!text) sumEl.textContent = "Özet metni alınamadı.";
+  } catch (error) {
+    if (error.name === "AbortError" && !timedOut) return;
+    if (!text) sumEl.textContent = "Yayın ayrıntısı tamamlanamadı.";
+    stages.insertAdjacentHTML("beforeend", `<div class="warning">${esc(timedOut ? "Yayın ayrıntısı bekleme süresi doldu." : error.message)}</div>`);
+  } finally {
+    clearTimeout(deadline);
+    if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+    sumEl.classList.remove("typing");
+    if (paperRequest === controller) paperRequest = null;
   }
-  $("#mSum").classList.remove("typing");
 }
 
-function closeModal() { $("#modal").hidden = true; }
+function closeModal() {
+  paperRequest?.abort();
+  paperRequest = null;
+  $("#modal").hidden = true;
+}
 
 document.addEventListener("click", (e) => {
   const pp = e.target.closest("[data-paper]");
@@ -389,16 +466,7 @@ $("#recipes").addEventListener("click", async () => {
     <div class="recon">${st.events.slice(-8).map((e) => `<div class="${e.kind.includes("drift") || e.kind.includes("fail") ? "ev-drift" : ""}">${esc(e.at)} · ${esc(e.kind)} · ${esc(e.detail)}</div>`).join("")}</div></div>`).join("")
     : "Henüz öğrenilmiş site tarifi yok.", true);
 });
-$("#ask").addEventListener("submit", (e) => { e.preventDefault(); const q = $("#question").value.trim(); $("#question").value = ""; ask(q); });
-$("#extHelp").addEventListener("click", () => {
-  addMsg("bot", `<div class="install"><b>Akademik İz Agent — Chrome eklentisi kurulumu</b><ol>
-    <li>Soldaki <b>Chrome eklentisini indir</b> ile zip'i indir ve bir klasöre aç.</li>
-    <li>Chrome'da <code>chrome://extensions</code> adresine git, sağ üstten <b>Geliştirici modu</b>nu aç.</li>
-    <li><b>Paketlenmemiş öğe yükle</b> → açtığın <code>akademik-iz-extension</code> klasörünü seç.</li>
-    <li>Araç çubuğunda ◈ simgesini sabitle; herhangi bir sitede simgeye basınca yan panelde sohbet açılır.</li></ol>
-    <p class="prov">Eklenti yalnızca bir kabuk: sohbet ekranı bu yerel sunucudan yüklenir. Kod değişince eklentiyi yeniden kurman
-    gerekmez, yan paneli kapatıp açman (veya ↻) yeter. Sunucu çalışmıyorsa panel <code>bash run.sh</code> uyarısı gösterir.</p></div>`, true);
-});
+$("#ask").addEventListener("submit", (e) => { e.preventDefault(); if (chatRequest) return; const q = $("#question").value.trim(); $("#question").value = ""; ask(q); });
 loadEnv();
 loadChats();
 { const cid = new URLSearchParams(location.search).get("chat"); if (cid) openChat(cid); }

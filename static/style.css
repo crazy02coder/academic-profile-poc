@@ -150,8 +150,3 @@ details.tech > summary, details.tech-card > summary { cursor: pointer; color: #5
 details.tech > summary::before, details.tech-card > summary::before { content: "▸ "; }
 details[open].tech > summary::before, details[open].tech-card > summary::before { content: "▾ "; }
 details.tech-card > summary h3 { display: inline; margin: 0; }
-
-.agent-dl { display: block; text-align: center; padding: 10px 14px; border-radius: 10px; font-weight: 650; color: #0b0e14;
-  background: linear-gradient(135deg, var(--accent2), var(--accent)); text-decoration: none; }
-.agent-dl:hover { text-decoration: none; filter: brightness(1.08); }
-.install ol { padding-left: 18px; line-height: 1.8; } .install code { background: var(--panel2); padding: 1px 6px; border-radius: 6px; }

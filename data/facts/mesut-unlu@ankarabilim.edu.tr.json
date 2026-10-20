@@ -10,6 +10,25 @@
     "interest": []
    },
    "papers": []
+  },
+  {
+   "at": "2026-10-20 11:30:34",
+   "fields": {
+    "title": [
+     "ogretim uyesi"
+    ],
+    "department": [
+     "bilgisayar muhendisligi"
+    ],
+    "institution": [
+     "ankara bilim"
+    ],
+    "interest": [
+     "bilgisayar programlama",
+     "e ogrenme"
+    ]
+   },
+   "papers": []
   }
  ]
 }

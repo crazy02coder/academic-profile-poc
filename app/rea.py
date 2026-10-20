@@ -103,11 +103,22 @@ def _parse(raw: str) -> Capture:
     except ValueError:
         return Capture(ok=False, error="REA çıktısı JSON değil")
     result = doc.get("normalized_result")
-    ok = result is not None
-    if result is None:
-        result = (doc.get("details") or {}).get("partial_observation", {}).get("capture") or {}
+    nested_error = result if isinstance(result, dict) and (result.get("error") or result.get("code")) else None
+    error_doc = nested_error or (doc.get("error") if isinstance(doc.get("error"), dict) else doc)
+    ok = isinstance(result, dict) and nested_error is None
+    if not ok:
+        partial = (error_doc.get("details") or {}).get("partial_observation") or {}
+        result = partial.get("capture") or partial.get("normalized_result") or (partial if "steps" in partial else {})
+    detail = error_doc.get("details") or {}
+    diagnostic = {k: error_doc[k] for k in ("code", "category") if error_doc.get(k)}
+    diagnostic.update({k: detail[k] for k in ("provider_id", "operation", "reason", "execution_failure", "diagnostics")
+                       if detail.get(k) is not None})
+    message = error_doc.get("message") or error_doc.get("error") or "REA hatası"
+    error = str(message)
+    if diagnostic:
+        error = json.dumps(diagnostic, ensure_ascii=False)[:600] + " · " + error
     cap = Capture(ok=ok, evidence_id=doc.get("evidence_id", ""), duration_ms=result.get("duration_ms", 0),
-                  error="" if ok else (doc.get("message") or doc.get("error") or "REA hatası"))
+                  error="" if ok else error)
     tx: dict[str, Transaction] = {}
     for ev in (result.get("events") or {}).get("items", []):
         tid = ev.get("transaction_id")
@@ -174,6 +185,53 @@ def run_scenario_sync(scenario: dict, timeout: int = 90) -> Capture:
 def _capture_block(response_body: bool = True) -> dict:
     return {"at_end": ["dom", "url"], "events": ["network"],
             "network": {"request_body": True, "response_body": response_body, "header_values": False}}
+
+
+async def capture_connected(endpoint: str, target_id: str, url: str, timeout: int = 6,
+                            wait_ms: int = 700) -> Capture:
+    """Playwright sekmesinde verilen adrese git, DOM/ağ gözlemi yap.
+
+    İptal ve zaman aşımı CLI sürecini de sonlandırır. Tarayıcı çağırana aittir.
+    Arama motorunun geçici isteklerinden tekrar oynatılabilir API varsayılmaz.
+    """
+    cmd = rea_command()
+    if not cmd:
+        return Capture(ok=False, error="REA CLI bulunamadı")
+    scenario = {
+        "browser": {"mode": "connect", "cdp_endpoint": endpoint, "target_id": target_id},
+        "start_url": {"url": url, "query": []},
+        "environment": {"locale": "tr-TR", "timezone": "Europe/Istanbul", "service_workers": "allow"},
+        "actions": [{"step_id": "dynamic-results", "action": "wait_for_timeout", "duration_ms": wait_ms}],
+        "capture": {"at_end": ["dom", "url"], "events": ["network"],
+                    "network": {"request_body": False, "response_body": False, "header_values": False}},
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(scenario, fh)
+        path = fh.name
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, "capture-browser-scenario", path, "--format", "json",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "NO_COLOR": "1"})
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+        cap = _parse(stdout.decode("utf-8", "replace"))
+        if proc.returncode and cap.ok:
+            cap.ok = False
+            cap.error = f"REA CLI çıkış kodu {proc.returncode}"
+        if not stdout.strip() and stderr.strip():
+            cap.error = f"REA JSON döndürmedi; CLI çıkış kodu {proc.returncode}."
+        return cap
+    except TimeoutError:
+        return Capture(ok=False, error=f"REA {timeout}s süre sınırı")
+    finally:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.communicate()
+        os.unlink(path)
 
 
 async def recon(url: str, settle_ms: int = 3500) -> Capture:

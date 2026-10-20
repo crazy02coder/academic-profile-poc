@@ -15,7 +15,7 @@ from . import rea, recipes
 from .config import CONTACT_MAIL, USER_AGENT
 from .discover import Profile, registrable, tr_title
 from .net import fetch_smart, parse, wall_reason
-from .text import clean, doi_key, fold, name_score
+from .text import clean, doi_key, fold, name_score, title_key
 
 OPENALEX = "https://api.openalex.org"
 CROSSREF = "https://api.crossref.org"
@@ -366,6 +366,14 @@ def _yok_parse_profile(sel) -> dict:
     full = clean(td.get_all_text(separator=" "))
     path_m = re.search(r"([A-ZÇĞİÖŞÜ0-9 .'’\-]+ÜNİVERSİTESİ[^@]*?)/\s*(?:[A-ZÇĞİÖŞÜa-zçğıöşü ]+Temel Alanı|$)", full)
     path = [p.strip() for p in (path_m.group(1) if path_m else "").split("/") if p.strip()]
+    if path:  # bazı sonuç düzenlerinde kurumun önüne kimlik no, unvan ve ad yapışıyor → yalnızca kurum adı kalsın
+        m = re.search(r"((?:[A-ZÇĞİÖŞÜ.'’\-]+\s+){0,4}(?:TEKNİK\s+)?ÜNİVERSİTESİ)$", path[0])
+        head = path[0]
+        for junk in [title, name] + list(YOK_TITLES):
+            if junk:
+                head = head.replace(junk, " ")
+        head = re.sub(r"^\s*\d+\s*", "", re.sub(r"\s+", " ", head)).strip()
+        path[0] = head or (m.group(1) if m else path[0])
     labels = [clean(x) for x in td.css("span.label::text").getall()]
     tail = full.split(labels[-1], 1)[-1] if labels else ""
     tail = re.split(r"\S+\[at\]\S+", tail)[0]
@@ -381,7 +389,7 @@ YOK_TITLES = {"PROFESÖR": "Prof. Dr.", "DOÇENT": "Doç. Dr.", "DOKTOR ÖĞRET�
               "ÖĞRETİM GÖREVLİSİ": "Öğr. Gör.", "ARAŞTIRMA GÖREVLİSİ": "Arş. Gör."}
 
 
-def _yok_pubs(sel, kind: str) -> list[dict]:
+def _yok_pubs(sel, kind: str, profile_url: str = "") -> list[dict]:
     out = []
     pane = sel.css("#all tbody.searchable > tr") or sel.css("tbody.searchable > tr")
     for tr in pane:
@@ -397,7 +405,108 @@ def _yok_pubs(sel, kind: str) -> list[dict]:
             year=year.group(1) if year else None, venue=venue.group(1) if venue else "",
             authors=[tr_title(clean(x.get_all_text())) for x in tr.css("a.popoverData")], doi=doi,
             url=doi or urljoin(YOK + "view/", a[0].attrib.get("href", "")), type=kind,
-            labels=[clean(x) for x in tr.css("span.label::text").getall() if clean(x)]))
+            labels=[clean(x) for x in tr.css("span.label::text").getall() if clean(x)],
+            yok_context={"profile_url": profile_url, "kind": kind} if profile_url else {}))
+    return out
+
+
+def yok_detail_sync(paper: dict, profile_url: str, emit) -> dict:
+    """Eski şifreli ayrıntı URL'si yerine profil → güncel liste → aynı oturumda AJAX."""
+    from .rea import StealthBridge
+    from urllib.parse import parse_qs
+
+    context = paper.get("yok_context") or {}
+    profile_url = context.get("profile_url") or profile_url
+    target = urlparse(profile_url or "")
+    out = {"final_url": profile_url, "source_label": "YÖK profiline git", "access_status": "unavailable"}
+    if target.scheme != "https" or target.hostname != "akademik.yok.gov.tr" or \
+            not target.path.endswith("/AkademisyenGorevOgrenimBilgileri") or not parse_qs(target.query).get("authorId"):
+        out["access_note"] = "YÖK ayrıntısı için akademisyenin profil bağlantısı bulunamadı; eski ayrıntı bağlantısı yeniden kullanılmadı."
+        emit(out["access_note"])
+        return out
+
+    expected = {title_key(paper["title"])} | {title_key(v["title"]) for v in paper.get("variants", [])}
+    kind = context.get("kind") or paper.get("type") or "article"
+    labels = {"article": "Makaleler", "proceedings": "Bildiriler", "book": "Kitaplar"}
+    label = labels.get(kind, "Makaleler")
+    with StealthBridge() as bridge:
+        emit("YÖK: akademisyen profili açılıyor; yayın listesi ve ayrıntı aynı oturumda okunacak.")
+        profile = bridge.fetch(profile_url, network_idle=False)
+        listing_url = next((urljoin(YOK, a.attrib.get("href", "")) for a in profile.css("a")
+                            if "AkademisyenYayinBilgileri" in a.attrib.get("href", "")
+                            and clean(a.get_all_text()) == label), "")
+        if not listing_url or urlparse(listing_url).hostname != target.hostname:
+            out["access_note"] = "YÖK profilindeki yayın listesine ulaşılamadı; oturum veya erişim hatası olabilir."
+            emit(out["access_note"])
+            return out
+        box = {}
+
+        def read_detail(page):
+            try:
+                rows = _yok_pubs(parse(page.content(), page.url), kind, profile_url)
+                matches = [r for r in rows if title_key(r["title"]) in expected
+                           and (not paper.get("year") or not r.get("year") or paper["year"] == r["year"])]
+                if len(matches) != 1:
+                    box["error"] = "Yayın güncel YÖK listesinde tek bir kayıtla eşleştirilemedi."
+                    return
+                row = matches[0]
+                detail_url = urljoin(YOK + "view/", row["source_id"])
+                if urlparse(detail_url).hostname != target.hostname:
+                    box["error"] = "YÖK ayrıntı bağlantısı beklenen alan adına ait değil."
+                    return
+                response = page.evaluate("""async (url) => {
+                    const controller = new AbortController();
+                    const deadline = setTimeout(() => controller.abort(), 30000);
+                    try {
+                        const response = await fetch(url, {
+                            credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+                            headers: {'X-Requested-With': 'XMLHttpRequest'}
+                        });
+                        return {status: response.status, html: await response.text(), url: response.url};
+                    } finally { clearTimeout(deadline); }
+                }""", detail_url)
+                box.update(row=row, **response)
+            except Exception as exc:  # Scrapling page_action hatalarını kendi içinde yakalar.
+                box["error"] = f"YÖK ayrıntısı okunamadı ({type(exc).__name__})."
+
+        bridge.fetch(listing_url, page_action=read_detail, network_idle=False)
+        html = box.get("html", "")
+        if box.get("error") or not html:
+            out["access_note"] = box.get("error") or "YÖK ayrıntı isteği boş cevap döndürdü."
+            emit(out["access_note"])
+            return out
+        sel = parse(html, box.get("url") or listing_url)
+        text = clean(sel.get_all_text(separator=" "))
+        failed = box.get("error") or (f"YÖK HTTP {box['status']} döndürdü." if box.get("status", 0) >= 400 else "")
+        if not failed and any(marker in fold(text) for marker in ("istediginiz isleme cevap veremiyoruz",
+                                                                  "istek oturum zaman", "session expired")):
+            failed = "YÖK ayrıntı isteği oturum/zaman aşımı hatası döndürdü."
+        if failed or not text:
+            out["access_note"] = failed or "YÖK ayrıntı isteği boş cevap döndürdü."
+            emit(out["access_note"])
+            return out
+
+        field_names = r"Ad[ıi]|Yazar(?:\(lar\))?|Kapsam|Hakem|[İI]ndeks\s+t[üu]r[üu]|T[üu]r|Yay[ıi]n\s+Yeri|Y[ıi]l|ISSN|ISBN|DOI|[ÖO]zet|Abstract"
+
+        def field(label_pattern):
+            match = re.search(rf"(?:^|\s)(?:{label_pattern})\s*:\s*(.*?)(?=\s+(?:{field_names})\s*:|"
+                              rf"\s+(?:IEEE|ACM|APA|Chicago|MLA|BibTeX)\b|$)", text, re.I)
+            return clean(match.group(1)) if match else ""
+
+        title = field(r"Ad[ıi]")
+        if title_key(title) not in expected:
+            out["access_note"] = "YÖK yanıtında bu yayının başlığı doğrulanamadı; içerik künye veya özet olarak kullanılmadı."
+            emit(out["access_note"])
+            return out
+        row = box["row"]
+        out.update(title=title, authors=[clean(a.get_all_text()) for a in sel.css('a[href*="authorId="]')]
+                   or row["authors"], journal=field(r"Yay[ıi]n\s+Yeri") or row["venue"],
+                   date=field(r"Y[ıi]l") or str(row.get("year") or ""), abstract=field(r"[ÖO]zet|Abstract"),
+                   via="scrapling.stealthy.yok-session", access_status="metadata_only")
+        out["bibliography"] = {label: value for label, pattern in (
+            ("Kapsam", r"Kapsam"), ("Hakem", r"Hakem"), ("İndeks türü", r"[İI]ndeks\s+t[üu]r[üu]"),
+            ("Tür", r"T[üu]r"), ("ISSN", r"ISSN"), ("ISBN", r"ISBN")) if (value := field(pattern))}
+        emit("YÖK yayın künyesi aynı oturumdaki güncel ayrıntı isteğinden alındı.")
     return out
 
 
@@ -472,18 +581,23 @@ def yok_sync(name: str, institution: str, link: str, emit) -> dict:
             listing = bridge.fetch(list_link)
             best, best_score = None, 0.0
             inst_f = fold(institution)
+            def row_name(tr):  # isim <h4> içinde doğrudan ya da bir <a> içinde olabilir
+                h = tr.css("h4")
+                return clean(h[0].get_all_text(separator=" ")) if h else ""
+
             for tr in listing.css("tr"):
                 text = clean(tr.get_all_text(separator=" "))
-                h4 = clean((tr.css("h4::text").get() or ""))
+                h4 = row_name(tr)
                 score = name_score(name, h4 or text)
                 if score < 0.75:
                     continue
                 if inst_f and inst_f.split()[0] in fold(text):
                     score += 1
-                href = next((a.attrib.get("href") for a in tr.css("a") if "authorId" in (a.attrib.get("href") or "")), None)
+                href = next((a.attrib.get("href") for a in tr.css("a") if re.search(r"authorId|AkademisyenGorevOgrenim",
+                                                                                   a.attrib.get("href") or "")), None)
                 if href and score > best_score:
                     best, best_score = urljoin(YOK, href), score
-            n = len([1 for tr in listing.css("tr") if name_score(name, clean(tr.css("h4::text").get() or "")) >= 0.75])
+            n = len([1 for tr in listing.css("tr") if name_score(name, row_name(tr)) >= 0.75])
             if not best or (institution and best_score < 1):
                 emit(f"YÖK: {n} aynı adlı akademisyen var, kurumla eşleşen yok; atlandı.")
                 return result
@@ -495,6 +609,7 @@ def yok_sync(name: str, institution: str, link: str, emit) -> dict:
             emit("YÖK profil sayfası ayrıştırılamadı.")
             return result
         result["profile"] = prof
+        result["profile_url"] = link
         emit(f"YÖK profili: {prof.get('title_raw')} · {' / '.join(prof.get('path', [])[:3])}"
              + (f" · ORCID {prof['orcid']}" if prof.get("orcid") else ""))
         pub_links = [(clean(a.get_all_text()), urljoin(YOK, a.attrib.get("href", ""))) for a in page.css("a")
@@ -503,7 +618,7 @@ def yok_sync(name: str, institution: str, link: str, emit) -> dict:
             if label not in ("Makaleler", "Bildiriler", "Kitaplar"):
                 continue
             pubs = _yok_pubs(bridge.fetch(url), {"Makaleler": "article", "Bildiriler": "proceedings",
-                                                 "Kitaplar": "book"}[label])
+                                                 "Kitaplar": "book"}[label], link)
             emit(f"YÖK {label}: {len(pubs)} kayıt.")
             result["records"].extend(pubs)
     return result
@@ -519,6 +634,8 @@ async def yok_works(profile: Profile, log) -> tuple[list[dict], dict | None]:
                                   profile.links.get("yok", ""), emit)
     prof = res.get("profile") or {}
     if prof:
+        if res.get("profile_url"):
+            profile.links["yok"] = res["profile_url"]
         src = profile.links.get("yok") or YOK
         profile.set("title", YOK_TITLES.get(prof.get("title_raw", ""), tr_title(prof.get("title_raw", ""))), "yok", src,
                     override=True)

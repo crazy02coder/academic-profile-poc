@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import json
 import time
@@ -9,7 +10,6 @@ import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -32,7 +32,8 @@ from .llm import LLM
 from .sources import crossref_works, openalex_works, orcid_works, scholar_works, yok_works
 
 app = FastAPI(title="Akademik İz")
-app.add_middleware(CORSMiddleware, allow_origin_regex=r"chrome-extension://.*|http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?",
+logger = logging.getLogger(__name__)
+app.add_middleware(CORSMiddleware, allow_origin_regex=r"http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?",
                    allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 JOBS: dict[str, dict] = {}
@@ -52,7 +53,6 @@ STEPS = [  # arayüz kendi sade aşamalarını gösterir; bu liste /api/jobs yan
 class JobIn(BaseModel):
     url: str = Field(default="", max_length=2000)
     name: str = Field(min_length=2, max_length=160)
-    html: str = Field(default="", max_length=8_000_000)  # eklentiden gelen render edilmiş sayfa
 
 
 class ChatIn(BaseModel):
@@ -78,7 +78,7 @@ async def pipeline(job: dict, data: JobIn):
         report: dict = {}
         yok_rea = None
         name = re.sub(r"^[\s\"“”'‘’]+|[\s\"“”'‘’]+$", "", data.name)
-        profile, report = await locate(data.url.strip(), name, log, llm, data.html)
+        profile, report = await locate(data.url.strip(), name, log, llm)
         await log("scrape", "done" if profile.found else "warning",
                   f"{profile.name or data.name} · {profile.get('title', 'unvan ?')} · "
                   f"{profile.get('department', 'bölüm ?')}")
@@ -275,8 +275,10 @@ async def recipes_check():
 @app.on_event("shutdown")
 async def _close_browsers():
     from .net import close_stealth
+    from .google_search import close as close_google
 
     await close_stealth()
+    await close_google()
 
 
 @app.on_event("startup")
@@ -337,19 +339,60 @@ async def chat(jid: str, body: ChatIn):
 
     async def stream():
         yield f"data: {json.dumps({'chat_id': conv['id']})}\n\n"
+        yield f"data: {json.dumps({'stage': 'Yanıt hazırlanıyor…'}, ensure_ascii=False)}\n\n"
+        queue: asyncio.Queue = asyncio.Queue(maxsize=64)
         meta: dict = {}
-        text = ""
+
+        async def stage(message: str):
+            await queue.put({"stage": message})
+
+        async def produce():
+            text = ""
+            try:
+                # Embedding hazırlığı ve model üretimi aynı toplam bütçeyi paylaşır.
+                async with asyncio.timeout(120):
+                    async for piece in answer(kb, body.question, list(conv["messages"]), llm, mode, meta,
+                                              on_stage=stage):
+                        text += piece
+                        await queue.put({"delta": piece})
+                if not text.strip():
+                    raise RuntimeError("Yerel model boş cevap döndürdü.")
+            except TimeoutError:
+                meta["error"] = "Yanıt 120 saniye içinde tamamlanamadı. Yerel model veya embedding hazırlığı zaman aşımına uğradı."
+                logger.warning("Profil sohbeti zaman aşımına uğradı: iş %s", jid)
+                await queue.put({"error": meta["error"]})
+            except Exception as exc:  # noqa: BLE001
+                meta["error"] = f"Sohbet tamamlanamadı: {type(exc).__name__}: {str(exc)[:200]}"
+                logger.exception("Profil sohbeti tamamlanamadı: iş %s", jid)
+                await queue.put({"error": meta["error"]})
+            try:
+                # Eşzamanlı başka bir cevap kaydedildiyse geçmişini kaybetme.
+                latest = history_store.load(conv["id"])
+                if latest is not None:
+                    latest["messages"].append({"role": "user", "content": body.question, "at": time.strftime("%H:%M")})
+                    latest["messages"].append({"role": "assistant", "content": text or meta.get("error", ""),
+                                               "meta": meta, "at": time.strftime("%H:%M")})
+                    history_store.save(latest)
+            except Exception:  # noqa: BLE001
+                logger.exception("Sohbet geçmişi kaydedilemedi: iş %s", jid)
+                await queue.put({"error": "Cevap geçmişe kaydedilemedi."})
+            await queue.put({"done": True, "meta": meta})
+
+        task = asyncio.create_task(produce())
         try:
-            async for piece in answer(kb, body.question, conv["messages"], llm, mode, meta):
-                text += piece
-                yield f"data: {json.dumps({'delta': piece}, ensure_ascii=False)}\n\n"
-        except Exception as exc:  # noqa: BLE001
-            text += f"Hata: {type(exc).__name__}"
-            yield f"data: {json.dumps({'delta': f'Hata: {type(exc).__name__}'})}\n\n"
-        conv["messages"].append({"role": "user", "content": body.question, "at": time.strftime("%H:%M")})
-        conv["messages"].append({"role": "assistant", "content": text, "meta": meta, "at": time.strftime("%H:%M")})
-        history_store.save(conv)
-        yield f"data: {json.dumps({'done': True, 'meta': meta}, ensure_ascii=False)}\n\n"
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=5)
+                except TimeoutError:
+                    yield ": bekleniyor\n\n"
+                    continue
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                if event.get("done"):
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
@@ -369,12 +412,35 @@ async def paper(jid: str, pid: str):
     cache = PAPER_CACHE.setdefault(jid, {})
 
     async def stream():
+        queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+
+        async def produce():
+            try:
+                async with asyncio.timeout(180):
+                    async for event in paper_detail(item, llm, cache, result.get("profile")):
+                        await queue.put(event)
+            except TimeoutError:
+                await queue.put({"error": "Yayın ayrıntısı 180 saniye içinde tamamlanamadı."})
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Yayın ayrıntısı alınamadı: iş %s, yayın %s", jid, pid)
+                await queue.put({"error": f"Yayın ayrıntısı alınamadı: {type(exc).__name__}: {str(exc)[:200]}"})
+            await queue.put({"done": True})
+
+        task = asyncio.create_task(produce())
         try:
-            async for ev in paper_detail(item, llm, cache):
-                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-        except Exception as exc:  # noqa: BLE001
-            yield f"data: {json.dumps({'stage': f'Hata: {type(exc).__name__}'})}\n\n"
-        yield "data: {\"done\": true}\n\n"
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=5)
+                except TimeoutError:
+                    yield ": bekleniyor\n\n"
+                    continue
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                if event.get("done"):
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
@@ -418,128 +484,3 @@ async def chats_delete_all():
         history_store.delete_result(c["job_id"])
     KB_CACHE.clear()
     return {"deleted": "all"}
-
-
-# =========================================================== Chrome eklentisi / site ajanı
-from . import page as site  # noqa: E402
-
-
-class PageIn(BaseModel):
-    url: str = Field(min_length=4, max_length=4000)
-    html: str = Field(default="", max_length=8_000_000)
-    question: str = ""
-    query: str = ""
-    deep: bool = False
-    history: list[dict] = []
-    har: dict = {}
-    name: str = ""
-    attrs: dict = {}
-    scope: str = "site"  # "site": canlı site asistanı · "page": yalnızca açık sayfa (özet)
-
-
-def _sse(work):
-    """`work(log)` bir async generator ya da coroutine; loglar ve sonuç SSE olarak akar."""
-    async def stream():
-        queue: asyncio.Queue = asyncio.Queue()
-
-        async def log(msg):
-            await queue.put({"stage": msg})
-
-        async def runner():
-            try:
-                res = work(log)
-                if hasattr(res, "__aiter__"):
-                    async for ev in res:
-                        await queue.put(ev)
-                else:
-                    await queue.put({"result": await res})
-            except Exception as exc:  # noqa: BLE001
-                await queue.put({"error": f"{type(exc).__name__}: {str(exc)[:200]}"})
-            await queue.put(None)
-
-        task = asyncio.create_task(runner())
-        while True:
-            ev = await queue.get()
-            if ev is None:
-                break
-            yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
-        await task
-        yield "data: {\"done\": true}\n\n"
-
-    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
-
-
-@app.get("/agent")
-async def agent_page():
-    """Eklentinin yan panelinde açılan sohbet ekranı (sunucudan yüklenir → eklenti yeniden kurulmaz)."""
-    return FileResponse(ROOT / "static" / "agent.html")
-
-
-@app.get("/api/extension.zip")
-async def extension_zip():
-    import io
-    import zipfile
-
-    buf = io.BytesIO()
-    folder = ROOT / "extension"
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in folder.rglob("*"):
-            if f.is_file():
-                z.write(f, f"akademik-iz-extension/{f.relative_to(folder)}")
-    return Response(buf.getvalue(), media_type="application/zip",
-                    headers={"Content-Disposition": "attachment; filename=akademik-iz-extension.zip"})
-
-
-@app.post("/api/page/understand")
-async def page_understand(body: PageIn):
-    return await asyncio.to_thread(site.understand, body.url, body.html)
-
-
-@app.post("/api/page/ask")
-async def page_ask(body: PageIn):
-    from . import live
-
-    llm = await LLM().probe()
-    if body.scope == "page":
-        return _sse(lambda log: site.ask(body.url, body.html, body.question, body.history, llm, False, log))
-    return _sse(lambda log: live.answer(body.url, body.html, body.question, body.history, llm, log))
-
-
-@app.post("/api/page/find")
-async def page_find(body: PageIn):
-    from . import live
-
-    llm = await LLM().probe()
-    return _sse(lambda log: live.locate_target(body.url, body.html, body.query, llm, log))
-
-
-@app.post("/api/page/extract")
-async def page_extract(body: PageIn):
-    return _sse(lambda log: site.extract(body.url, body.html, log))
-
-
-@app.post("/api/page/apis")
-async def page_apis(body: PageIn):
-    return _sse(lambda log: site.apis_live(body.url, log))
-
-
-@app.post("/api/page/learn")
-async def page_learn(body: PageIn):
-    return _sse(lambda log: site.learn_from_har(body.url, body.har, body.name, body.attrs, log))
-
-
-@app.post("/api/page/atlas")
-async def page_atlas(body: PageIn):
-    """Sitenin anlam haritası: kategoriler ve örnek adresler (yan panelde gösterilir)."""
-    from . import atlas as atlas_mod
-
-    async def work(log):
-        at = await atlas_mod.build(body.url, body.html, log)
-        out = []
-        for cat, n in atlas_mod.summary(at):
-            ex = [e for e in at["entries"] if e["cat"] == cat][:5]
-            out.append({"cat": cat, "name": atlas_mod.CAT_NAMES.get(cat, cat), "count": n,
-                        "examples": [{"t": e["t"], "u": e["u"]} for e in ex]})
-        return {"root": at["root"], "total": len(at["entries"]), "categories": out}
-
-    return _sse(work)

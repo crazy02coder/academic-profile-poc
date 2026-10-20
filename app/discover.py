@@ -399,7 +399,7 @@ def _link_score(url: str, text: str, name: str, root_domain: str) -> float:
 
 
 # -------------------------------------------------------------------- ana akış
-async def locate(url: str, name: str, log, llm=None, start_html: str = "") -> tuple[Profile, dict]:
+async def locate(url: str, name: str, log, llm=None) -> tuple[Profile, dict]:
     profile = Profile(query_name=name)
     report: dict = {"start_url": url, "strategy": [], "rea": None, "crawl": {"pages": 0}, "walls": [],
                     "recipe": {"events": []}}
@@ -412,13 +412,13 @@ async def locate(url: str, name: str, log, llm=None, start_html: str = "") -> tu
         report["recipe"]["events"].append({"kind": kind, "detail": msg})
         await log("rea", status, msg)
 
+    # 0) Arama motoru: site:alanadı "Ad Soyad" — başlangıç sayfası okunurken AYNI ANDA
+    web_task = asyncio.create_task(_web_person(url, name, log, report))
+
     # 1) Scrapling her zaman önce: hızlı, ucuz, parmak izi için yeterli
     page: Page | None = None
     try:
-        if start_html:  # Chrome eklentisi: kullanıcının gerçek tarayıcısında render edilmiş sayfa (duvar yok)
-            page = Page(url=url, status=200, html=start_html, via="chrome.extension", selector=parse(start_html, url))
-        else:
-            page = await fetch_smart(url, log=lambda m: log("scrape", "running", m))
+        page = await fetch_smart(url, log=lambda m: log("scrape", "running", m))
         report["strategy"].append(page.via)
         await log("scrape", "running", f"Scrapling [{page.via}]: HTTP {page.status}, {len(page.html)//1024} KB HTML.")
         reason = wall_reason(page.status, page.html)
@@ -430,12 +430,19 @@ async def locate(url: str, name: str, log, llm=None, start_html: str = "") -> tu
     static_text = _visible_text(static_sel) if static_sel is not None else ""
     skeleton = recipes.dom_skeleton(static_sel) if static_sel is not None else []
 
+    try:
+        web_hit = await web_task
+    except Exception:  # noqa: BLE001
+        web_hit = None
+
     # 2) Değişiklik algılama: saklı site haritasıyla kıyas
     chk = recipes.check_page(store, url, skeleton) if skeleton else {"known": False}
     report["recipe"]["start_page"] = chk
     replay = store["replay"].get("person_lookup") or store["replay"].get("listing_api")
-    need_rea = rea.available()
-    if chk.get("known") and not chk.get("drift"):
+    need_rea = rea.available() and web_hit is None  # kişi bulunduysa REA keşfine gerek yok
+    if web_hit is not None:
+        pass
+    elif chk.get("known") and not chk.get("drift"):
         await rlog("cache", f"Site haritası hafızada ({chk['learned_at']} öğrenildi); yapı benzerliği "
                             f"%{chk['similarity']*100:.0f} → değişiklik yok.")
         need_rea = False
@@ -512,8 +519,8 @@ async def locate(url: str, name: str, log, llm=None, start_html: str = "") -> tu
     if rea_dom_sel is not None:
         candidates.append((rea_dom_sel, capture.final_url or url, capture.dom, rea_text))
 
-    hit = None
-    for sel, base, html, text in candidates:
+    hit = web_hit
+    for sel, base, html, text in ([] if hit else candidates):
         if name_in_text(name, text) and navigator.is_person_hit(sel, text, name, base):
             hit = (sel, base, html, text)
             break
@@ -541,7 +548,7 @@ async def locate(url: str, name: str, log, llm=None, start_html: str = "") -> tu
                 store["staff_pages"] = sorted(set(store.get("staff_pages", [])) | {urldefrag(base)[0], *pages})
             if hit:
                 break
-    # 6) Hafızadaki kadro sayfaları (ucuz), sonra LLM ajanı, en son kural tabanlı crawler
+    # 6) Hafızadaki kadro sayfaları (ucuz), arama motoru, sonra LLM ajanı + Scrapling Spider yarışı
     if hit is None:
         hit = await navigator.scan_known_staff_pages(store, name, log)
     if hit is None and candidates:
@@ -627,6 +634,25 @@ async def locate(url: str, name: str, log, llm=None, start_html: str = "") -> tu
     entry["profile_url"] = profile.source_url
     recipes.save(store)
     return profile, report
+
+
+async def _web_person(url: str, name: str, log, report: dict):
+    """Arama motoruna doğrudan `site:alanadı "Ad Soyad"` — soru yorumu yok, site taranmaz."""
+    from . import websearch
+
+    found = await websearch.site_search(url, f'"{strip_titles(name)}"', lambda m: log("crawl", "running", m), k=4)
+    if not found:
+        return None
+    pages = await asyncio.gather(*(fetch_smart(u) for u in found), return_exceptions=True)
+    for pg in pages:
+        if isinstance(pg, Exception) or pg.status >= 400:
+            continue
+        t = _visible_text(pg.selector)
+        if name_in_text(name, t) and navigator.is_person_hit(pg.selector, t, name, pg.url):
+            report["race_winner"] = "websearch"
+            await log("crawl", "done", f"Arama motoru kişiyi buldu: {pg.url} (REA keşfi ve site taraması atlandı).")
+            return (pg.selector, pg.url, pg.html, t)
+    return None
 
 
 async def _race(tasks: dict[str, asyncio.Task], stops: dict[str, asyncio.Event] | None = None):

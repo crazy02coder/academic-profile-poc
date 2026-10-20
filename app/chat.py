@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import os
 import re
 import time
@@ -22,6 +23,7 @@ from .text import content_tokens, expand_bilingual, fold, stem_tr
 
 CAG_BUDGET_TOKENS = int(os.getenv("CAG_BUDGET_TOKENS", "8500"))  # 12k bağlama sığacak şekilde
 MODES = {"auto": "Otomatik", "rag": "RAG", "cag": "CAG", "hybrid": "Hibrit"}
+logger = logging.getLogger(__name__)
 
 SYSTEM = ("Sen 'Akademik İz' asistanısın. Kullanıcı tek bir akademisyen hakkında soru soruyor. YALNIZCA verilen "
           "BİLGİ TABANI'ndaki bilgilere dayanarak Türkçe, kısa ve net cevap ver. Bir yayına dayanan her cümlenin "
@@ -183,7 +185,8 @@ def _details(papers: list[dict]) -> str:
                      f"{p['title']} — {p.get('abstract', '')[:600]}" for p in papers)
 
 
-async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: str, meta: dict) -> AsyncIterator[str]:
+async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: str, meta: dict,
+                 on_stage=None) -> AsyncIterator[str]:
     """Seçilen moda göre bağlamı kurar, cevabı akıtır; `meta`ya ölçümleri yazar."""
     started = time.time()
     used, why = kb.choose(mode, question)
@@ -192,11 +195,15 @@ async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: s
         prefix = SYSTEM + "\n\nBİLGİ TABANI (tam, önbellekli):\n" + kb.full
         tail = ""
     elif used == "hybrid":
+        if on_stage:
+            await on_stage("İlgili yayınlar hazırlanıyor (BM25 ve varsa embedding modeli)…")
         papers, info = await kb.retrieve(question, llm)
         meta.update(info)
         prefix = SYSTEM + "\n\nBİLGİ TABANI (çekirdek, önbellekli):\n" + kb.core
         tail = "SORUYLA İLGİLİ AYRINTILAR (RAG):\n" + _details(papers) + "\n\n"
     else:  # rag
+        if on_stage:
+            await on_stage("İlgili yayınlar hazırlanıyor (BM25 ve varsa embedding modeli)…")
         papers, info = await kb.retrieve(question, llm)
         meta.update(info)
         prefix = SYSTEM + "\n\nBİLGİ TABANI (yalnız getirilen):\n" + "\n".join(kb._header()[:4])
@@ -205,6 +212,8 @@ async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: s
     meta["retrieval_s"] = round(time.time() - started, 2)
 
     if llm.available:
+        if on_stage:
+            await on_stage("Yerel model cevabı hazırlıyor…")
         messages = [{"role": "system", "content": prefix}]
         for h in history[-6:]:
             if h.get("role") in ("user", "assistant") and h.get("content"):
@@ -220,7 +229,9 @@ async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: s
             # KV önbelleği etkisi prompt işleme süresinde görülür (aynı önek → düşük prompt_eval_s)
             meta["model"] = llm.model
             return
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            meta["model_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+            logger.exception("Yerel model profil sohbetine cevap veremedi")
             yield "\n\n_(Yerel model yanıt vermedi; erişim tabanlı cevap:)_\n\n"
     meta["model"] = "mock"
     for piece in await _mock_answer(kb, question, llm):

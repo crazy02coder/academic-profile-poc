@@ -60,6 +60,21 @@ def wall_reason(status: int, html: str) -> str | None:
     return None
 
 
+SOFT_404 = re.compile(r"(?i)(aradığınız sayfa bulunamadı|sayfa bulunamadı|page not found|404 not found|"
+                      r"the page you (?:are looking for|requested) (?:could not be found|does not exist)|"
+                      r"sayfa mevcut değil|böyle bir sayfa yok)")
+
+
+def soft_404(html: str) -> bool:
+    """Genel yumuşak 404 tespiti: başlıkta ya da kısa gövdenin başında 'bulunamadı' ifadesi."""
+    head = re.sub(r"<[^>]+>", " ", html[:200000])
+    title = re.search(r"(?is)<title>(.*?)</title>", html[:20000])
+    if title and SOFT_404.search(title.group(1)):
+        return True
+    text = re.sub(r"\s+", " ", head)
+    return bool(SOFT_404.search(text)) and len(text) < 40000 and text.count(" ") < 4000
+
+
 # --------------------------------------------------------------------------- TLS
 _bundle_cache: dict[str, str] = {}
 _GLOBAL_BUNDLE = CACHE_DIR / "ca-augmented.pem"  # certifi + keşfedilen tüm ara sertifikalar
@@ -210,6 +225,8 @@ async def fetch_smart(url: str, log=None, allow_stealth: bool = True, allow_clou
     if hit and _t.time() - hit[0] < PAGE_TTL:
         return hit[1]
     page = await _fetch_smart(url, log, allow_stealth, allow_cloudflare)
+    if page.status < 400 and soft_404(page.html):
+        page.status = 404  # "200" dönüp "sayfa bulunamadı" diyen sayfalar (eski arama indeksi, silinmiş içerik)
     if page.status < 400 and not wall_reason(page.status, page.html):
         if len(_PAGE_CACHE) > 500:
             _PAGE_CACHE.clear()
