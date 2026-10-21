@@ -192,8 +192,8 @@
    "content_origin": "",
    "evidence_id": "",
    "learned_at": "2026-10-20 13:44:18",
-   "checked_at": "2026-10-20 13:44:18",
-   "checks": 1,
+   "checked_at": "2026-10-21 07:55:23",
+   "checks": 2,
    "hash": "7132f0713b66"
   }
  },
@@ -206,6 +206,15 @@
    "last_seen": "2026-10-20 13:44:18",
    "card_selector": "body > div > div > main",
    "profile_url": "https://avesis.tedu.edu.tr/gulsen.seven/iletisim"
+  },
+  "ozlem-albayrak": {
+   "name": "Özlem Albayrak",
+   "seen": 1,
+   "first_seen": "2026-10-21 07:55:23",
+   "listing_url": "https://avesis.tedu.edu.tr/ozlem.albayrak",
+   "last_seen": "2026-10-21 07:55:23",
+   "card_selector": "#header",
+   "profile_url": "https://avesis.tedu.edu.tr/ozlem.albayrak"
   }
  },
  "events": []
