@@ -1,4 +1,4 @@
-"""Yayın ayrıntısı: yayıncı sayfasını Scrapling ile getir, künyeyi çıkar, Qwen ile Türkçe özetle.
+"""Yayın ayrıntısı: yayıncı sayfasını Scrapling ile getir, künyeyi çıkar, Gemini ile Türkçe özetle.
 
 Kullanıcı yayına tıkladığında siteye yönlendirmek yerine:
   1. DOI/URL Scrapling ile açılır (Elsevier, IEEE, Springer gibi bot korumalı yayıncılarda
@@ -6,7 +6,7 @@ Kullanıcı yayına tıkladığında siteye yönlendirmek yerine:
   2. Akademik meta etiketleri (citation_*, dc.*, og:*, JSON-LD) okunur: başlık, yazarlar,
      dergi, tarih, özet, anahtar kelimeler, PDF bağlantısı.
   3. Özet bulunamazsa OpenAlex'ten gelen özet kullanılır.
-  4. Gerçek özet/TL;DR varsa Qwen Türkçe özetler; metin yoksa yalnızca künye gösterilir.
+  4. Gerçek özet/TL;DR varsa Gemini Türkçe özetler; metin yoksa yalnızca künye gösterilir.
 """
 from __future__ import annotations
 
@@ -448,9 +448,9 @@ async def detail(paper: dict, llm, cache: dict, profile: dict | None = None) -> 
                 yield {"delta": piece}
         except Exception:  # noqa: BLE001
             complete = False
-            yield {"stage": "Yerel model özeti tamamlayamadı."}
+            yield {"stage": "Model özeti tamamlayamadı."}
             if summary:
-                yield {"error": "Özet tamamlanmadan yerel model bağlantısı kesildi."}
+                yield {"error": "Özet tamamlanmadan model bağlantısı kesildi."}
     if not summary:
         sentences = re.split(r"(?<=[.!?])\s+", basis or "")
         summary = " ".join(sentences[:3]) if sentences and sentences[0] else "Özet bulunamadı; yalnızca künye bilgisi var."

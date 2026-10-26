@@ -1,10 +1,10 @@
 """Profil sohbeti: RAG, CAG ve Hibrit (CAG çekirdek + RAG ayrıntı) bilgi katmanı.
 
   RAG    — her soruda ilgili yayınlar getirilir: Türkçe-duyarlı BM25 + vektör araması
-           (Ollama embedding) Reciprocal Rank Fusion ile birleştirilir. Bağlam küçük.
+           (Gemini embedding) Reciprocal Rank Fusion ile birleştirilir. Bağlam küçük.
   CAG    — kişinin TÜM bilgi tabanı (profil, istatistik, analiz, bütün yayınlar ve
            özetler) sabit bir önek olarak verilir. Önek her soruda bayt bayt aynı
-           olduğundan Ollama KV önbelleğini yeniden kullanır; arama hatası olmaz.
+           olduğundan Gemini örtük önbelleğini yeniden kullanır; arama hatası olmaz.
   Hibrit — CAG çekirdeği (profil + istatistik + analiz + tüm başlıklar, önbellekli)
            + soruya göre RAG ile getirilen özetler (önekten SONRA eklenir, önbelleği bozmaz).
   Otomatik — tam bilgi tabanı CAG bütçesine sığıyorsa CAG, sığmıyorsa Hibrit.
@@ -21,7 +21,7 @@ from typing import AsyncIterator
 
 from .text import content_tokens, expand_bilingual, fold, stem_tr
 
-CAG_BUDGET_TOKENS = int(os.getenv("CAG_BUDGET_TOKENS", "8500"))  # 12k bağlama sığacak şekilde
+CAG_BUDGET_TOKENS = int(os.getenv("CAG_BUDGET_TOKENS", "30000"))  # ücretsiz katmanın dakika token sınırını zorlamadan
 MODES = {"auto": "Otomatik", "rag": "RAG", "cag": "CAG", "hybrid": "Hibrit"}
 logger = logging.getLogger(__name__)
 
@@ -122,15 +122,13 @@ class Knowledge:
     async def dense(self, question: str, llm) -> list[tuple[float, str]]:
         if not llm.available or not llm.embed_model or not self.papers:
             return []
-        nomic = llm.embed_model.startswith("nomic")
         if self.vectors is None:
-            texts = [("search_document: " if nomic else "") + _doc(p)[:1500] for p in self.papers]
-            self.vectors = await llm.embed(texts) or []
+            self.vectors = await llm.embed([_doc(p)[:1500] for p in self.papers]) or []
         if not self.vectors:
             return []
-        # İngilizce ağırlıklı embedding modelleri için TR→EN sorgu genişletme
+        # TR→EN sorgu genişletme: İngilizce yayın özetleriyle eşleşmeyi güçlendirir
         extra = " ".join(t for t in expand_bilingual(content_tokens(question)) if t.isascii())
-        qv = await llm.embed([("search_query: " if nomic else "") + f"{question} {extra}"])
+        qv = await llm.embed([f"{question} {extra}"], task="RETRIEVAL_QUERY")
         if not qv:
             return []
         q = qv[0]
@@ -213,7 +211,7 @@ async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: s
 
     if llm.available:
         if on_stage:
-            await on_stage("Yerel model cevabı hazırlıyor…")
+            await on_stage("Model cevabı hazırlıyor…")
         messages = [{"role": "system", "content": prefix}]
         for h in history[-6:]:
             if h.get("role") in ("user", "assistant") and h.get("content"):
@@ -227,12 +225,12 @@ async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: s
             if stats.get("prompt_tokens"):
                 meta["context_tokens"] = stats["prompt_tokens"]  # tahmin yerine gerçek sayı
             # KV önbelleği etkisi prompt işleme süresinde görülür (aynı önek → düşük prompt_eval_s)
-            meta["model"] = llm.model
+            meta["model"] = stats.get("model") or llm.model
             return
         except Exception as exc:  # noqa: BLE001
             meta["model_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
-            logger.exception("Yerel model profil sohbetine cevap veremedi")
-            yield "\n\n_(Yerel model yanıt vermedi; erişim tabanlı cevap:)_\n\n"
+            logger.exception("Model profil sohbetine cevap veremedi")
+            yield "\n\n_(Model yanıt vermedi; erişim tabanlı cevap:)_\n\n"
     meta["model"] = "mock"
     for piece in await _mock_answer(kb, question, llm):
         yield piece
@@ -251,5 +249,5 @@ async def _mock_answer(kb: Knowledge, question: str, llm) -> list[str]:
     if re.search(r"son|guncel|latest|recent|yeni", q):
         return ["En güncel yayınlar:\n" + "\n".join(f"- ({p['year']}) {p['title']} [{p['id']}]" for p in papers[:5])]
     hits, _ = await kb.retrieve(question, llm, k=5)
-    return ["Sorunla en ilgili yayınlar (mock mod — yerel LLM kapalı):\n"
+    return ["Sorunla en ilgili yayınlar (mock mod — LLM kapalı):\n"
             + "\n".join(f"- ({p['year'] or '?'}) {p['title']} [{p['id']}]" for p in hits)]

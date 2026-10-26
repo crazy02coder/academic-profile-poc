@@ -356,9 +356,9 @@ async def chat(jid: str, body: ChatIn):
                         text += piece
                         await queue.put({"delta": piece})
                 if not text.strip():
-                    raise RuntimeError("Yerel model boş cevap döndürdü.")
+                    raise RuntimeError("Model boş cevap döndürdü.")
             except TimeoutError:
-                meta["error"] = "Yanıt 120 saniye içinde tamamlanamadı. Yerel model veya embedding hazırlığı zaman aşımına uğradı."
+                meta["error"] = "Yanıt 120 saniye içinde tamamlanamadı. Model veya embedding hazırlığı zaman aşımına uğradı."
                 logger.warning("Profil sohbeti zaman aşımına uğradı: iş %s", jid)
                 await queue.put({"error": meta["error"]})
             except Exception as exc:  # noqa: BLE001
@@ -402,7 +402,7 @@ PAPER_CACHE: dict[str, dict] = {}
 
 @app.get("/api/jobs/{jid}/papers/{pid}")
 async def paper(jid: str, pid: str):
-    """Yayına tıklanınca: Scrapling ile yayıncı sayfası + künye + Qwen Türkçe özet (SSE)."""
+    """Yayına tıklanınca: Scrapling ile yayıncı sayfası + künye + Gemini Türkçe özet (SSE)."""
     result = _result_for(jid)
     item = next((p for p in (result or {}).get("publications", []) if p["id"] == pid), None)
     if not item:

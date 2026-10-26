@@ -1,4 +1,4 @@
-"""Çalışma zamanı ayarları ve araç keşfi (REA, Chromium, Ollama)."""
+"""Çalışma zamanı ayarları ve araç keşfi (REA, Chromium, Gemini)."""
 from __future__ import annotations
 
 import glob
@@ -11,8 +11,26 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = ROOT / "runs"
 CACHE_DIR = ROOT / ".cache"
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "")  # boşsa otomatik seçilir
+
+def _load_env(path: Path) -> None:
+    """Proje kökündeki .env (KEY=değer satırları); ortamda zaten tanımlı olanlar ezilmez."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep and key and not key.startswith("#"):
+            os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+_load_env(ROOT / ".env")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", "gemini-3.5-flash-lite")
+# Kota/yoğunluk hatasında sırayla denenecek modeller
+GEMINI_FALLBACKS = [m.strip() for m in os.getenv(
+    "GEMINI_FALLBACKS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash").split(",") if m.strip()]
+GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
 LLM_MODE = os.getenv("LLM_MODE", "auto")  # auto | mock
 
 USER_AGENT = "AkademikIz/2.0 (academic research PoC; mailto:akademik-iz@example.org)"

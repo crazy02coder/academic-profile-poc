@@ -552,7 +552,7 @@ async def locate(url: str, name: str, log, llm=None) -> tuple[Profile, dict]:
     if hit is None:
         hit = await navigator.scan_known_staff_pages(store, name, log)
     if hit is None and candidates:
-        # Yarış: Qwen ajanı (derin, akıllı) ve Scrapling Spider (geniş, paralel) AYNI ANDA çalışır;
+        # Yarış: LLM ajanı (derin, akıllı) ve Scrapling Spider (geniş, paralel) AYNI ANDA çalışır;
         # önce bulan kazanır, diğeri durdurulur.
         seeds = []
         for sel, base, _, _ in candidates:
@@ -564,11 +564,11 @@ async def locate(url: str, name: str, log, llm=None) -> tuple[Profile, dict]:
                 if report.get("content_origin") == "javascript-render" else candidates[0]
             racers["agent"] = asyncio.create_task(navigator.navigate(start_base, start_sel, start_html, name, llm,
                                                                      store, log, report))
-            await log("crawl", "running", "Qwen ajanı ve Scrapling Spider paralel başladı; önce bulan kazanır.")
+            await log("crawl", "running", "LLM ajanı ve Scrapling Spider paralel başladı; önce bulan kazanır.")
         hit, winner = await _race(racers, {"spider": spider_stop})
         if winner:
             report["race_winner"] = winner
-            await log("crawl", "done", f"Kişiyi önce {'Qwen ajanı' if winner == 'agent' else 'Scrapling Spider'} buldu; "
+            await log("crawl", "done", f"Kişiyi önce {'LLM ajanı' if winner == 'agent' else 'Scrapling Spider'} buldu; "
                                        "diğeri durduruldu.")
 
     if hit is None:
@@ -950,7 +950,7 @@ async def _crawl(seeds: list[tuple[str, str]], name: str, start_url: str, log, r
 
 
 async def llm_enrich(profile: Profile, llm, log):
-    """Profil sayfası metninden eksik alanları yerel LLM ile tamamlar (kanıt: sayfa metni)."""
+    """Profil sayfası metninden eksik alanları LLM ile tamamlar (kanıt: sayfa metni)."""
     if not (profile.page_text or profile.card_text) or not llm.available:
         return
     missing = [k for k in ("title", "department", "interests") if not profile.get(k)]
@@ -976,7 +976,7 @@ async def llm_enrich(profile: Profile, llm, log):
         if value:
             profile.set(key, value, "llm", profile.source_url)
     if any(k in profile.facts and profile.facts[k].source == "llm" for k in missing):
-        await log("scrape", "running", "Eksik profil alanları Qwen ile sayfa metninden tamamlandı (metinde doğrulandı).")
+        await log("scrape", "running", "Eksik profil alanları Gemini ile sayfa metninden tamamlandı (metinde doğrulandı).")
 
 
 def dumps(obj) -> str:

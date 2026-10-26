@@ -3,7 +3,7 @@
 Klasik ER hattı: bloklama → çift puanlama → (belirsiz çiftlerde) LLM hakemliği → union-find.
   * Kesin eşleşme : aynı DOI veya aynı normalize başlık
   * Bulanık       : rapidfuzz token_set_ratio ≥ 92 ve yıl farkı ≤ 1
-  * Çapraz dil    : TR/EN farklı dilde, yıl ±1, ortak yazar veya aynı dergi → Qwen'e
+  * Çapraz dil    : TR/EN farklı dilde, yıl ±1, ortak yazar veya aynı dergi → Gemini'ye
                     "bu iki başlık aynı makalenin çevirisi mi?" sorulur; LLM yoksa
                     sınırlı TR→EN sözlükle terim örtüşmesi kullanılır.
 """

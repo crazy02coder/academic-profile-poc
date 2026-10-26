@@ -1,112 +1,271 @@
-# Akademik İz — akademisyen araştırma profili PoC
+# Akademik İz
 
-FastAPI + SSE, **D4Vinci/Scrapling**, **morluto/rea CLI**, OpenAlex/Crossref ve yerel Ollama/Qwen2.5. Ücretli API veya bulut LLM kullanılmaz. Türkçe koyu temalı arayüz HTML/CSS/JavaScript kullanır; CDN bağımlılığı yoktur.
+**Kurum sitesinden akademisyen araştırma profili çıkaran, kanıta dayalı bir asistan.**
 
-**Teslim durumu:** Kullanıcının isteği üzerine kod yazıldı; bağımlılık kurulumu, çalıştırma ve test yapılmadı. Çalıştığı doğrulanmış bir teslim olarak değerlendirilmemelidir.
+Bir akademik kadro linki ve akademisyen adı verirsin. Sistem kişiyi sitede bulur, yayınlarını açık kaynaklardan toplar, birleştirir, doğrular ve Gemini ile kaynak gösteren bir araştırma profili çıkarır. Sonra o kişi hakkında soru sorabilirsin.
 
-## Tek komutla çalıştır
+Tarama ve veri toplama senin bilgisayarında çalışır. Dil modeli olarak Gemini API'nin ücretsiz katmanı kullanılır; ücretli servis gerekmez.
 
-Python 3.11+ yüklü olmalı. Proje dizininde:
+```
+Scrapling · REA · Gemini · OpenAlex · Crossref · ORCID · YÖK Akademik · Google Scholar
+```
+
+---
+
+## Hızlı başlangıç
 
 ```bash
 bash run.sh
 ```
 
-İlk çalıştırmada paketleri kurmak için internet gerekir. http://127.0.0.1:8000 adresini açın. **Örnek demoyu keşfet**, dış servislerden bağımsız kurgu veri akışını başlatır; REA, Ollama veya tarayıcı gerektirmez. Beş kurgu kaydın dört yayına birleşmesi hedeflenir. Demo gerçek akademisyene atfedilmez; kendi kurgu adıyla gösterilir.
+Ardından **http://127.0.0.1:8000** adresini aç.
 
-Gerçek arama girdileri:
+`run.sh` ilk çalıştırmada her şeyi kurar: Python ortamı, Scrapling tarayıcıları, REA (npm).
 
-- Üniversite linki: `[BURAYA AKADEMİK KADRO LİNKİ]`
-- Akademisyen adı: `[BURAYA AD]`
+**Gemini anahtarı:** https://aistudio.google.com/apikey adresinden ücretsiz anahtar al, proje kökünde `.env` dosyasına yaz:
 
-Yer tutucuları gerçek adres ve adla değiştirin. Gerçek aramada sahte yayın üretilmez; kaynak bulunamazsa 0 yayın ile tamamlanır.
-
-## REA ve dinamik sayfalar
-
-Node.js 22.19+ (22.x), 24.11+ (24.x) veya 26+:
-
-```bash
-npm install
-.venv/bin/python -m playwright install chromium
+```
+GEMINI_API_KEY=...
 ```
 
-REA proje içindeki `node_modules/.bin/rea` üzerinden çağrılır; global `rea` veya `REA_BIN=/tam/yol/rea` da kullanılabilir. `rea-agents` morluto/rea paketidir; ücretli native analiz araçlarına ihtiyaç yoktur.
+`.env` git'e girmez. Anahtar yoksa analiz ve sohbet basit kural tabanlı yedeğe (mock) düşer.
 
-Scrapling Fetcher önce statik sayfayı okur. İçerik yetersizse ayrı bir Chromium başlatılır. REA `inspect-web-page <loopback-CDP> <target-id> --observation-ms 6000 --include-accessibility-text --include-json-body-shapes --json` çağrısıyla ağ yapısını inceler. Uygulama sayfayı yeniden yükler; REA pasif gözlem yapar. Aynı origin üzerindeki keşfedilmiş GET JSON isteklerinden adla eşleşen kayıtlar alınır. Tarayıcı sonunda kapatılır. Gözlem penceresi bütün istekleri yakalamayı garanti etmez.
+**Gerekenler**
 
-REA yoksa/hata verirse Scrapling DynamicFetcher denenir; o da kullanılamazsa eldeki statik içerikle devam edilir. Fallback logda açıkça görünür. Demo modunda bu adımlar simüle edilir; gerçek servis çağrılmış gibi gösterilmez.
+| Araç | Sürüm | Not |
+|---|---|---|
+| Python | 3.11+ | |
+| Node.js | 22.19+ / 24.11+ | REA için. Yoksa sistem REA'sız çalışır (aşağıya bak). |
 
-## Yerel Ollama/Qwen
+**Modeller**
 
-Ollama kurulu değilse otomatik mock analiz kullanılır. Gerçek model için ayrı terminalde:
+| Görev | Varsayılan |
+|---|---|
+| Analiz, sohbet, sayfa okuma | `gemini-3.5-flash` |
+| Kısa işler (link seçimi) | `gemini-3.5-flash-lite` |
+| RAG gömme | `gemini-embedding-001` (768 boyut) |
 
-```bash
-ollama serve
-ollama pull qwen2.5:7b
+Ücretsiz katmanda kota (429) ve yoğunluk (503) hataları olağandır. Hata alan istek sıradaki modelle (`GEMINI_FALLBACKS`) yeniden denenir; kotası dolan model 60 sn atlanır.
+
+---
+
+## Nasıl çalışır
+
+```
+ kadro linki + ad
+        │
+        ▼
+ ┌──────────────┐   arama motoru (site:) ─┐
+ │ Kişiyi bul   │   kayıtlı tarif / hafıza ├─► kişi kartı + profil sayfası
+ │              │   LLM ajanı ∥ Spider ───┘
+ └──────┬───────┘
+        ▼
+ ┌──────────────┐
+ │ Yayın topla  │   YÖK · OpenAlex · Crossref · ORCID · Scholar   (paralel)
+ └──────┬───────┘
+        ▼
+ ┌──────────────┐
+ │ Birleştir    │   DOI · başlık · bulanık eşleşme · TR↔EN çeviri eşleşmesi
+ │ & doğrula    │   kaynaklar arası tutarlılık (doğrulandı / tek kaynak / çelişki)
+ └──────┬───────┘
+        ▼
+ ┌──────────────┐
+ │ Analiz       │   Gemini; her cümle bir yayın kimliğine bağlı
+ └──────┬───────┘
+        ▼
+ ┌──────────────┐
+ │ Sohbet       │   soru tipine göre CAG, RAG veya Hibrit otomatik seçilir
+ └──────────────┘
 ```
 
-Ollama zaten servis olarak çalışıyorsa `serve` gerekmez. `OLLAMA_URL` varsayılanı `http://127.0.0.1:11434`; `OLLAMA_MODEL` varsayılanı `qwen2.5:7b`. Daha küçük model: `ollama pull qwen2.5:3b`, ardından `OLLAMA_MODEL=qwen2.5:3b bash run.sh`.
+Her aşama arayüzde canlı akar. Ham teknik loglar **"Teknik ayrıntılar"** altında kapalı durur.
 
-Model erişilemezse, 120 saniyede cevap vermezse veya JSON/kanıt kontrolünü geçemezse **mock analiz** devreye girer. Zorlamak için `LLM_MODE=mock bash run.sh`. Mock, mevcut başlık/özetlerde sınırlı anahtar sözcük kurallarıyla alan, yöntem ve yıl dağılımı çıkarır; eşleşme yoksa iddia yazmaz. Demo daima mock kullanır.
+---
 
-Qwen en güncel 35 yayını analiz eder. Her iddianın tek cümle olması, geçerli yayın ID'sine dayanması ve zaman çizelgesi kanıtlarının yılı kontrol edilir. Anlamsal kanıt uygunluğu garanti edilmez. Her iddianın yanında yayının başlığı ve bağlantısı gösterilir. Kurgu yayın bağlantıları sayfa içindeki demo kaydına gider.
+## Bileşenlerin rolleri
 
-## Yayın toplama ve birleştirme
+Sistem üç parçanın iş bölümüne dayanır:
 
-1. OpenAlex yazarları adla arar; ORCID varsa onu kullanır. Aksi halde tam ad + kurum eşleşmesi gerekir. Birden çok aday varsa rastgele seçim yapılmaz.
-2. Crossref ikinci sırada ek kayıtlar için aranır. Kurum ve ad aynı yazar nesnesinde eşleşmelidir; ORCID varsa önceliklidir. Kurum metadatası eksik yayınlar kaçabilir.
-3. İki kaynak da boşsa Scholar kısa zaman aşımıyla bir kez denenir. Bot engeli tüm akışı bozmaz; CAPTCHA çözümü yapılmaz. Scholar kayıtları kurum doğrulanamadı etiketiyle gösterilir. OpenAlex sonuç vermişse Scholar'a ihtiyaç duyulmaz; kullanılmayan kaynağa başarısız olmuş gibi log yazılmaz.
-4. Kaynak başına en fazla 100 kayıt alınır; tam bibliyografya iddiası yoktur. OpenAlex anahtarsız ücretsiz istek denenir; erişim/kota hatasında Crossref'e geçilir. Servis koşulları değişebilir.
-5. Aynı DOI birleştirilir. DOI yoksa yıl + ortak yazar + aynı başlık veya sınırlı TR/EN sözlüğüyle çok yüksek başlık örtüşmesi gerekir. Farklı DOI'ler birleştirilmez. Bu, genel çok dilli semantik tekilleştirme değildir. Orijinal varyantlar, kaynaklar ve diller korunur. `langdetect` kısa başlıklarda yanılabilir; düşük güven `Belirsiz` gösterilir.
+| Bileşen | Görevi | Benzetme |
+|---|---|---|
+| **Scrapling** | Siteye **erişim**. Statik okuma (Chrome TLS taklidi), bot duvarında gizli tarayıcı ve Cloudflare çözücü, Spider ile tarama, kart ve liste tespiti. | Her gün mutfakta yemeği yapan |
+| **REA** | Sayfanın **arkasındaki gizli isteği bulmak**. Bulduğu isteği bir **tarif** olarak kaydeder. | Aşçıyı bir kez izleyip tarifi deftere yazan |
+| **Gemini** | **Anlamak**. Sayfa türü, doğru link, profil alanları, analiz, sohbet. | |
 
-## Yayın ayrıntısı ve YÖK
+### REA ne işe yarıyor? Somut örnek: Ankara Bilim
 
-YÖK ayrıntıları eski `yayinDetay.jsp?id=…&no=…` adresi doğrudan açılarak okunmaz.
-Akademisyen profili üzerinden güncel yayın listesi açılır; başlık/yıl eşleşmesinden
-sonra ayrıntı isteği aynı tarayıcı oturumunda yapılır. Yeni kayıtlarda profil
-bağlamı birleştirme sırasında korunur; eski raporlarda raporun YÖK profil bağlantısı
-kullanılır. Kaynak düğmesi akademisyenin YÖK profiline gider.
+Kadro sayfasında her hocanın bir kartı ve bir **"Detaylı Bilgi"** butonu var. Ama bu buton bir link değil:
 
-Genel site açıklamaları ve oturum hataları makale özeti kabul edilmez. Gerçek
-özet veya Semantic Scholar TL;DR metni yoksa Qwen çağrılmaz; yalnızca künye
-gösterilir. Erişilemeyen sayfa için yayının hiç özeti olmadığı iddia edilmez.
-Bu düzenleme test veya canlı YÖK sorgusu çalıştırılmadan yapılmıştır.
-
-## Docker
-
-```bash
-docker compose up --build
+```html
+<button data-id="1234">Detaylı Bilgi</button>
 ```
 
-Aynı adreste çalıştırılır. İmaj Scrapling ve Chromium içerir; REA içermez, DynamicFetcher fallback'i kullanır. Tam REA akışı için yerel Node kurulumunu kullanın. Ollama ana makinede `host.docker.internal` üzerinden aranır; erişilemezse mock analiz kullanılır. Açık kaynak Podman ve uyumlu compose sağlayıcısı alternatif olarak kullanılabilir. Docker kurulumu/build de doğrulanmadı.
+Tıklayınca JavaScript arka planda sunucuya gizli bir istek atıyor ve detayı (bölüm, ilgi alanları, ORCID…) bir pencerede gösteriyor. Scrapling HTML'i okuyunca sadece butonu görür. Detay HTML'de yok, gidilecek bir adres de yok.
 
-## Dosyalar
+**İlk sefer (REA, bir kez):**
 
-- `app/main.py`: iş oluşturma, SSE ve süreç yönetimi
-- `app/scraper.py`: Scrapling, REA CLI ve Scholar fallback
-- `app/publications.py`: OpenAlex/Crossref ve yazar eşleştirme
-- `app/data.py`: dil tespiti, birleştirme ve kurgu demo
-- `app/analysis.py`: Ollama, kanıt doğrulama ve mock
-- `static/`: tek sayfa arayüz
-- `run.sh`, `Dockerfile`, `compose.yaml`: çalıştırma
+1. REA sayfayı gerçek bir tarayıcıda açar ve butona **tıklar**.
+2. Tıklama anında giden trafiği izler ve isteği yakalar:
+   ```
+   POST https://ankarabilim.edu.tr/department-personnel-info
+   personnelId=1234
+   ```
+3. `1234` değerinin butondaki `data-id` ile aynı olduğunu fark eder.
+4. Bunu tarif olarak kaydeder: *"Detay için butonun `data-id`'sini `personnelId` olarak bu adrese gönder."*
 
-PoC yerel ve tek kullanıcı içindir. Tek worker kullanın. İşler bellektedir; sunucu yeniden başlarsa kaybolur, tamamlanan işler bir saat sonra yeni iş açılırken temizlenir. Başlangıç URL ve statik yönlendirmelerde özel IP kontrolü vardır; dinamik tarayıcı tam ağ izolasyonu sağlamaz. Çok kullanıcılı internet dağıtımı için ağ izolasyonu, kimlik doğrulama ve kalıcı iş kuyruğu gerekir. E-posta profil alanı oluşturulmaz; analiz metnindeki e-posta desenleri çıkarılır. Unvan/bölüm bulma HTML yapısına bağlı sezgiseldir; bulunamayan alanlar belirtilir.
+**Sonraki seferler (REA yok, sadece Scrapling):**
 
-## Resmî kaynaklar
+Başka bir hoca arandığında Scrapling kartı bulur, `data-id`'yi alır (ör. `5678`) ve isteği doğrudan atar. Tarayıcı açılmaz, butona tıklanmaz. Yaklaşık 1 saniye sürer.
 
-- https://github.com/D4Vinci/Scrapling (BSD-3-Clause)
-- https://github.com/morluto/rea (MIT)
-- https://github.com/morluto/rea/blob/main/docs/browser-observation.md
-- https://help.openalex.org/api/authentication/
-- https://github.com/CrossRef/rest-api-doc
-- https://docs.ollama.com/api/generate
+**Site değişirse:** tarif artık çalışmaz. Sistem bunu fark eder (`replay_failed`), REA'yı yeniden gönderir, tarif güncellenir. Kimse kod yazmaz.
 
-Proje kodu MIT lisanslıdır; dış veri ve araçların kendi lisansları geçerlidir.
+> **REA öğrenir, Scrapling tekrarlar; bozulunca REA yeniden öğrenir.**
 
-## SSL ve eksik sonuç düzeltmesi
+### YÖK Akademik: ikisi birlikte
 
-Scrapling sertifika zinciri hatasında hata ayrıntısı loga yazılır; sistem `curl` ile TLS doğrulaması açık tutularak HTTP okunur, HTML yine Scrapling ile ayrıştırılır. `curl` yoksa sistemin paket yöneticisiyle kurulmalıdır. Özel CA kullanılıyorsa `SCRAPLING_CA_BUNDLE=/tam/yol/ca.pem bash run.sh` ayarlanabilir. TLS doğrulaması kapatılmaz.
+YÖK düz istemcilere `418` döndürür. Arama da bir formun arkasındaki `POST` isteğidir.
 
-Kurum ismi özgeçmişte geçen mezun olunan üniversiteden alınmaz. OSTİM alan adı güncel kuruma eşlenir; Türkçe `Teknik` ve İngilizce `Technical` yayın eşleştirmesinde normalize edilir. Program başlıkları ve biyografideki ilgi alanları okunur. Üniversite sayfasındaki doğrudan Scholar profil bağlantısı son çare olarak kullanılır. Yayın bulunmazsa mock analiz tamamlandı yerine analiz yapılmadı/kısmi sonuç gösterilir.
+- **Scrapling** gizli tarayıcıyla duvarı geçer.
+- **REA** aynı tarayıcıya CDP üzerinden bağlanır, formu doldurur, Enter'a basar ve arkadaki `POST /AkademikArama/AkademisyenArama` isteğini gözler.
+- Sonraki aramalarda tarif açık oturumun içinden doğrudan oynatılır.
 
-Değişikliklerden sonra sunucuyu Ctrl+C ile durdurup `bash run.sh` ile yeniden başlatın; tarayıcıyı tam yenileyin. Bu düzeltmede test paketi veya uçtan uca uygulama testi çalıştırılmadı.
+### Öğrenilmiş tarifler
+
+| Site | Tarif | Öğrenildi | Kullanım |
+|---|---|---|---|
+| `yok.gov.tr` | `yok_search` | 16.10.2026 | 13 tekrar, 0 hata |
+| `ankarabilim.edu.tr` | `profile_detail` | 16.10.2026 | 3 tekrar, 0 hata |
+
+Tarifler `data/recipes/<alan-adı>.json` altında, REA kanıt kimliğiyle (`evidence_id`) birlikte tutulur.
+
+### REA olmasa ne olur?
+
+| Durum | Sonuç |
+|---|---|
+| Tarif zaten kayıtlı | Fark yok; tekrarı zaten Scrapling yapıyor. |
+| **Ankara Bilim**, tarif yok | Kişi bulunur ama yalnızca kartta yazanlar gelir (ad, unvan). Bölüm, ilgi alanları ve ORCID gelmez. |
+| **YÖK**, tarif yok | YÖK tamamen atlanır. Örnek: Mesut Ünlü'nün 21 yayınının 17'si YÖK'ten geliyordu. REA'sız 4 yayın kalır. YÖK'ten gelen ORCID de kaybolur, OpenAlex'te yanlış kişiyle eşleşme riski artar. |
+| Site güncellendi | Bozulan tarif kendiliğinden onarılamaz. |
+
+**Dürüst sınır:** REA imkânsızı yapmıyor. Bir geliştirici tarayıcının ağ sekmesinden bu istekleri elle bulabilirdi. REA'nın katkısı bunu **otomatik** yapması: keşfetmek, kaydetmek ve bozulunca yeniden öğrenmek. Klasik HTML sitelerde katkısı sınırlıdır.
+
+---
+
+## İlkeler
+
+- **Genel çözüm.** Belirli bir üniversiteye ya da siteye özel kod yok.
+- **Uydurma yok.** Analizdeki her cümle bir yayın kimliğine bağlı ve doğrulanıyor. Bulunamayan bilgi için "bulunamadı" deniyor; sahte yayın üretilmiyor.
+- **Anlamayı model yapar, doğrulamayı kurallar.** Gemini karar verir, çıktısı sayfa metninde kontrol edilir.
+- **Kibar tarama.** `robots.txt`'ye uyulur, sayfa ve derinlik sınırları vardır, sonuçlar önbelleğe alınır.
+
+---
+
+## Yayınlar: toplama, birleştirme, doğrulama
+
+**Kaynaklar** (paralel sorgulanır):
+
+| Kaynak | Not |
+|---|---|
+| YÖK Akademik | REA tarifiyle. Türkçe yayınlarda en zengin kaynak. |
+| OpenAlex | ORCID varsa onunla; yoksa ad + kurum (eğitim kurumu tercih edilir). |
+| Crossref | ORCID filtresiyle. |
+| ORCID | Kişi sayfasında ya da YÖK'te ORCID bulunursa. |
+| Google Scholar | Best-effort; engellenirse akış bozulmaz, CAPTCHA çözülmez. |
+
+**Tekilleştirme** (`app/dedup.py`):
+
+- aynı DOI ya da aynı normalize başlık
+- bulanık başlık eşleşmesi (`rapidfuzz`, ≥92, yıl farkı ≤1)
+- **TR↔EN çeviri eşleşmesi:** farklı dilde, aynı yıl, ortak yazar ya da aynı dergi olan çiftlerde Gemini'ye "aynı çalışma mı?" diye sorulur
+- farklı DOI'ler asla birleştirilmez; tüm dil varyantları korunur
+
+**Doğrulama** (`app/consensus.py`): her alan kaynak ağırlıklarıyla karşılaştırılır ve **doğrulandı / tek kaynak / çelişki / değişti** olarak etiketlenir.
+
+---
+
+## Sohbet: CAG, RAG, Hibrit
+
+Profil çıktıktan sonra kişi hakkında soru sorulabilir. Yöntemi soru tipi belirler:
+
+| Yöntem | Ne zaman | Nasıl |
+|---|---|---|
+| **CAG** | Genel sorular ("ana araştırma alanı ne?") | Tüm profil modelin bağlamına konur; önek her soruda aynı olduğu için Gemini örtük önbelleği tekrarlarda kullanılır. |
+| **RAG** | Ayrıntı soruları ("2019'da hangi dergide yayın yaptı?") | BM25 (Türkçe kök + TR↔EN genişletme) ve gömme araması, RRF ile birleştirilir. |
+| **Hibrit** | İkisinin arası | Çekirdek profil + ilgili parçalar. |
+
+Sohbetler `data/chats/` altında saklanır; listelenebilir, açılabilir ve silinebilir.
+
+---
+
+## Ayarlar
+
+Hepsi isteğe bağlı ortam değişkenleri:
+
+| Değişken | Varsayılan | Açıklama |
+|---|---|---|
+| `PORT` | `8000` | Sunucu portu |
+| `GEMINI_API_KEY` | — | Gemini anahtarı (`.env`) |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | Ana model |
+| `GEMINI_FAST_MODEL` | `gemini-3.5-flash-lite` | Kısa işler |
+| `GEMINI_FALLBACKS` | `gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash` | Hata/kota durumunda sırayla denenir |
+| `GEMINI_EMBED_MODEL` | `gemini-embedding-001` | RAG gömme modeli |
+| `LLM_MODE` | `auto` | `mock` modeli devre dışı bırakır |
+| `CAG_BUDGET_TOKENS` | `30000` | Bu sınırı aşan bilgi tabanında CAG yerine Hibrit |
+| `CRAWL_MAX_PAGES` / `_DEPTH` / `_CONCURRENCY` | `90` / `3` / `8` | Tarama sınırları |
+| `BRAVE_API_KEY` | — | Varsa resmi Brave Search API kullanılır |
+| `DDGS_BACKEND` | `brave,duckduckgo,google` | `ddgs` motor sırası |
+| `GOOGLE_SEARCH_ENABLED` | `1` | Google sonuç sayfası araması |
+| `GOOGLE_REA_ENABLED` | `1` | Google sayfasını REA ile yakalama |
+| `REA_BIN` | `node_modules/.bin/rea` | REA CLI yolu |
+| `WATCH_INTERVAL_MIN` | — | Periyodik değişiklik taraması |
+
+---
+
+## Proje yapısı
+
+```
+app/
+  main.py          FastAPI uç noktaları, iş hattı, SSE akışı
+  discover.py      sitede kişiyi bulma ve profil çıkarma
+  navigator.py     LLM ajanı, sayfalama, site içi arama formu (REA)
+  spider.py        Scrapling Spider; JS sayfalarda REA
+  rea.py           REA CLI entegrasyonu, StealthBridge (Scrapling ↔ REA)
+  recipes.py       tarifler: öğrenme, tekrar oynatma, değişiklik algılama
+  sources.py       YÖK, OpenAlex, Crossref, ORCID, Scholar
+  dedup.py         tekilleştirme (TR↔EN dahil)
+  consensus.py     kaynaklar arası doğrulama
+  analysis.py      kanıtlı araştırma analizi
+  chat.py          CAG / RAG / Hibrit sohbet
+  paper.py         yayın detayı ve özet
+  websearch.py     site: araması (ddgs → Brave API → Google → Brave sayfası)
+  google_search.py Google sonuç sayfası (Playwright + REA)
+  net.py           erişim katmanı: TLS zincir onarımı, duvar ve yumuşak 404 tespiti
+  llm.py           Gemini istemcisi (JSON şeması, akış, embedding, model zinciri)
+  text.py          Türkçe metin işleme: kök, unvan, ad eşleşmesi, dil tespiti
+  history.py       sohbet ve sonuç geçmişi
+static/            web arayüzü
+data/
+  recipes/         REA tarifleri ve değişiklik olayları (site başına)
+  chats/           sohbet geçmişi
+  facts/           doğrulanmış bilgiler
+runs/              profil sonuçları
+```
+
+---
+
+## Bilinen sınırlar
+
+- **Test seti yok.** Başarı oranı ve süre sistematik olarak ölçülmedi; denemeler tek tek sitelerde yapıldı (OSTİM, Bilkent, Boğaziçi, Koç, Ankara Bilim, KTÜ).
+- **Arama motorları:** ücretsiz motorlar yoğun kullanımda engelliyor. Arama motorlarını ve Google'ı otomatik sorgulamak kullanım koşulları açısından gri alan; kalıcı çözüm resmi bir API (`BRAVE_API_KEY`).
+- **Gemini ücretsiz katmanı:** dakika ve gün sınırları var; yoğun kullanımda istekler yedek modellere kayar. Sayfa metinleri ve sorular Google'a gönderilir (kamuya açık kurum verisi).
+- Tek kullanıcılı, yerel PoC. İşler bellekte tutulur, kimlik doğrulama yoktur.
+
+---
+
+## Kaynaklar
+
+- [Scrapling](https://github.com/D4Vinci/Scrapling) (BSD-3-Clause)
+- [REA](https://github.com/morluto/rea) (MIT)
+- [OpenAlex API](https://docs.openalex.org) · [Crossref REST API](https://github.com/CrossRef/rest-api-doc) · [Gemini API](https://ai.google.dev/gemini-api/docs)
+
+Proje kodu MIT lisanslıdır. Dış veri ve araçlarda kendi lisansları geçerlidir.

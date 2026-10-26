@@ -160,13 +160,13 @@ async def analyze(papers: list[dict], profile: dict, llm, log) -> dict:
             "KURAL: Sadece verilen başlık/özetlerde açıkça desteklenen iddialar yaz. Her iddiada evidence ZORUNLU ve "
             "yalnızca listedeki P# kimlikleri kullanılabilir.")
         await log("analysis", "running", f"{llm.model} ile {len(sample)} yayın analiz ediliyor (yapılandırılmış JSON çıktı)…")
-        data = await llm.json(prompt, SCHEMA, timeout=240, num_ctx=12288)
+        data = await llm.json(prompt, SCHEMA, timeout=240)
         checked = validate(data or {}, papers)
         if checked:
             dropped = sum(len((data or {}).get(k) or []) for k in ("areas", "methods", "timeline")) - \
                 sum(len(checked[k]) for k in ("areas", "methods", "timeline"))
             await log("analysis", "running", f"Kanıt doğrulayıcı: {dropped} desteksiz iddia elendi.")
-            checked["mode"] = "ollama"
+            checked["mode"] = "llm"
             checked["model"] = llm.model
             return checked
         await log("analysis", "warning", "LLM çıktısı kanıt doğrulamasını geçemedi → mock analiz.")

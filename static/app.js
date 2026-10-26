@@ -13,7 +13,7 @@ function setChatBusy(value) {
   document.querySelectorAll(".suggest button").forEach((button) => { button.disabled = value; });
 }
 const SOURCE_NAMES = { openalex: "OpenAlex", crossref: "Crossref", orcid: "ORCID", yok: "YÖK", scholar: "Scholar" };
-const PROV = { university: "kurum sayfası", "rea-json": "REA · gizli API", yok: "YÖK Akademik", openalex: "OpenAlex", scholar: "Scholar", llm: "Qwen (metinde doğrulandı)", consensus: "kaynak uzlaşısı" };
+const PROV = { university: "kurum sayfası", "rea-json": "REA · gizli API", yok: "YÖK Akademik", openalex: "OpenAlex", scholar: "Scholar", llm: "Gemini (metinde doğrulandı)", consensus: "kaynak uzlaşısı" };
 
 function addMsg(role, html, wide = false) {
   const el = document.createElement("div");
@@ -153,7 +153,7 @@ function render(r) {
   const rcp = rec.recipe || {};
   if (rec.rea) reaLines.push(`<b>REA keşfi</b> (${esc(rec.rea.evidence_id?.slice(0, 18))}…): ${rec.rea.requests} istek · ${rec.rea.api_calls.length} XHR/fetch · ${rec.rea.third_party} izleyici · içerik kaynağı: <b>${esc(rec.content_origin || "?")}</b>`);
   if (rec.hidden_api) reaLines.push(`<b>Gizli API</b>: ${esc(rec.hidden_api.method)} ${esc(rec.hidden_api.url)} → ${esc(rec.hidden_api.path)}`);
-  (rec.agent?.steps || []).forEach((st, i) => reaLines.push(`<b>Ajan kararı ${i + 1}</b> (Qwen): ${esc(st.action)} ${st.chosen.map((u) => esc(u)).join(" · ")} <span class="prov">— ${esc(st.reason)}</span>`));
+  (rec.agent?.steps || []).forEach((st, i) => reaLines.push(`<b>Ajan kararı ${i + 1}</b> (Gemini): ${esc(st.action)} ${st.chosen.map((u) => esc(u)).join(" · ")} <span class="prov">— ${esc(st.reason)}</span>`));
   if (rec.agent?.found_at) reaLines.push(`<b>Ajan</b>: <span class="ev-ok">kişi bulundu → ${esc(rec.agent.found_at)}</span>`);
   if (rcp.detail) reaLines.push(`<b>Detay butonu</b>: ${rcp.detail.replayed ? `<span class="ev-ok">tarif tarayıcısız oynatıldı (${rcp.detail.elapsed} sn)</span>` : `REA öğrendi → ${esc(rcp.detail.method)} ${esc(rcp.detail.url)} (${esc(rcp.detail.body || "")}, kimlik: ${esc(rcp.detail.id_attr)})`}`);
   if (rec.crawl?.pages) reaLines.push(`<b>Crawler</b>: ${rec.crawl.pages} sayfa → ${esc(rec.crawl.found_at || "bulunamadı")}`);
@@ -189,7 +189,7 @@ function render(r) {
       : p.interests?.length ? `<h3 style="margin-top:14px">İlgi alanları${prov("interests")}</h3><div class="chips">${p.interests.map((x) => `<span class="chip alt">${esc(x)}</span>`).join("")}</div>` : ""}
   </div>
 
-  <div class="card"><h3>Araştırma alanları <span class="badge mode">${a.mode === "ollama" ? "YEREL QWEN · " + esc(a.model) : a.mode === "mock" ? "MOCK ANALİZ" : "ANALİZ YOK"}</span></h3>
+  <div class="card"><h3>Araştırma alanları <span class="badge mode">${a.mode === "llm" || a.mode === "ollama" ? "GEMINI · " + esc(a.model) : a.mode === "mock" ? "MOCK ANALİZ" : "ANALİZ YOK"}</span></h3>
     <div class="chips" style="margin-bottom:8px">${a.areas.map((x) => `<span class="chip">${esc(x.label)}</span>`).join("")}</div>
     ${a.summary ? `<p>${esc(a.summary)}</p>` : ""}${claims(a.areas)}</div>
 
@@ -285,7 +285,7 @@ async function ask(question) {
     }
     if (failure) throw new Error(failure);
     if (!completed) throw new Error("Cevap tamamlanmadan bağlantı kesildi. Soruyu yeniden gönderebilirsin.");
-    if (!text.trim()) throw new Error("Yerel model boş cevap döndürdü.");
+    if (!text.trim()) throw new Error("Model boş cevap döndürdü.");
   } catch (error) {
     if (!text) out.textContent = "Cevap alınamadı.";
     stage.textContent = error.name === "AbortError"

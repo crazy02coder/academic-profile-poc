@@ -1,10 +1,10 @@
-"""LLM yönlendirmeli site gezgini (REA + Qwen + Scrapling).
+"""LLM yönlendirmeli site gezgini (REA + Gemini + Scrapling).
 
 Kullanıcı yalnızca üniversitenin ana adresini verir. Site yapısı üniversiteden
 üniversiteye değiştiği için sabit kurallar yerine bir ajan döngüsü kullanılır:
 
   GÖZLEM  — Scrapling sayfayı okur; içerik JS ile geliyorsa REA render eder.
-  KARAR   — Qwen'e sayfa özeti (başlık, numaralı linkler, arama kutusu var mı,
+  KARAR   — Gemini'ye sayfa özeti (başlık, numaralı linkler, arama kutusu var mı,
             izlenen yol) verilir; hangi linklerin açılacağına veya site
             aramasının kullanılacağına karar verir (yapılandırılmış JSON).
   EYLEM   — Scrapling seçilen linkleri paralel açar; arama seçildiyse REA kutuya
@@ -198,7 +198,7 @@ def _search_selector(sel) -> str | None:
 
 async def perceive(llm, name: str, sel, url: str, links: list[tuple[str, str]], has_search: bool,
                    trail: list[str], tried_search: bool) -> dict | None:
-    """Qwen sayfayı OKUR: türünü belirler, hedef kişinin sayfası mı karar verir, bilgileri çıkarır ve yön seçer."""
+    """Gemini sayfayı OKUR: türünü belirler, hedef kişinin sayfası mı karar verir, bilgileri çıkarır ve yön seçer."""
     title = clean(sel.css("title::text").get() or "")
     listing = "\n".join(f"{i}. {t[:70]} — {urlparse(u).netloc}{urlparse(u).path[:70]}" for i, (u, t) in enumerate(links))
     prompt = (
@@ -227,7 +227,7 @@ async def perceive(llm, name: str, sel, url: str, links: list[tuple[str, str]], 
     text = clean(sel.get_all_text(separator=" "))
     if data.get("is_target_person_page") and not name_in_text(name, text):
         data["is_target_person_page"] = False
-        data["reason"] = "Qwen hedef dedi ama ad sayfada yok → reddedildi. " + data.get("reason", "")
+        data["reason"] = "Gemini hedef dedi ama ad sayfada yok → reddedildi. " + data.get("reason", "")
     page_f = fold(text)
     for key in ("title", "department"):
         v = clean(data.get(key) or "")
@@ -305,7 +305,7 @@ async def navigate(start_url: str, start_sel, start_html: str, name: str, llm, s
     frontier = [(start_url, start_sel, start_html, ["başlangıç"])]
     steps, fetched, tried_search = 0, 1, False
     report["agent"] = {"steps": []}
-    await log("crawl", "running", f"Ajan başlıyor: Scrapling sayfayı getirip Markdown'a çeviriyor, Qwen okuyup algılıyor "
+    await log("crawl", "running", f"Ajan başlıyor: Scrapling sayfayı getirip Markdown'a çeviriyor, Gemini okuyup algılıyor "
                                   f"ve yön seçiyor, REA gerekirse etkileşime giriyor (en fazla {MAX_STEPS} algı).")
     while frontier and steps < MAX_STEPS:
         url, sel, html, trail = frontier.pop(0)
@@ -315,13 +315,13 @@ async def navigate(start_url: str, start_sel, start_html: str, name: str, llm, s
         view = await perceive(llm, name, sel, url, links, bool(search_css), trail, tried_search)
         steps += 1
         if view is None:
-            await log("crawl", "warning", "Qwen sayfayı algılayamadı (geçersiz çıktı); bu dal atlandı.")
+            await log("crawl", "warning", "Gemini sayfayı algılayamadı (geçersiz çıktı); bu dal atlandı.")
             continue
         chosen = [links[i] for i in view["next_links"]]
         report["agent"]["steps"].append({"at": url, "page_type": view["page_type"], "target": view["is_target_person_page"],
                                          "action": "search" if view["use_search"] else "open",
                                          "reason": view.get("reason", ""), "chosen": [u for u, _ in chosen]})
-        await log("crawl", "running", f"Qwen algısı #{steps}: [{PAGE_TYPE_TR[view['page_type']]}] "
+        await log("crawl", "running", f"Gemini algısı #{steps}: [{PAGE_TYPE_TR[view['page_type']]}] "
                                       f"{'HEDEF ✓' if view['is_target_person_page'] else 'hedef değil'} — "
                                       f"{view.get('reason', '')[:110]}")
         if view["page_type"] == "staff_list" and not view["is_target_person_page"]:
@@ -359,9 +359,9 @@ async def navigate(start_url: str, start_sel, start_html: str, name: str, llm, s
                 continue
             fetched += 1
             new.append((res.url, res.selector, res.html, trail + [t[:30]]))
-        # Adı içeren sayfalar önce algılansın; yoksa Qwen'in sırası korunur (derinlik önce)
+        # Adı içeren sayfalar önce algılansın; yoksa Gemini'nin sırası korunur (derinlik önce)
         new.sort(key=lambda x: not name_in_text(name, _visible_text(x[1])))
         frontier = new + frontier
     store["staff_pages"] = sorted(staff)
-    await log("crawl", "warning", f"Qwen ajanı {steps} algıda kişiyi bulamadı.")
+    await log("crawl", "warning", f"LLM ajanı {steps} algıda kişiyi bulamadı.")
     return None
