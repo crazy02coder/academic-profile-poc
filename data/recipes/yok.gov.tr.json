@@ -53,7 +53,7 @@
    "returns": "html",
    "learned_at": "2026-10-16 15:02:06",
    "evidence_id": "ev_e8d2e157dcd579a49565c47ba8f9b39d976d4f6bcc19e60e71887c93b477c3ff",
-   "hits": 13,
+   "hits": 25,
    "failures": 0
   }
  },
@@ -143,6 +143,78 @@
    "kind": "replay_ok",
    "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
    "elapsed": 0.64
+  },
+  {
+   "at": "2026-10-27 18:19:07",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.55
+  },
+  {
+   "at": "2026-10-27 18:20:25",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.59
+  },
+  {
+   "at": "2026-10-30 17:52:06",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.84
+  },
+  {
+   "at": "2026-10-30 17:54:25",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.54
+  },
+  {
+   "at": "2026-10-30 18:12:42",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.67
+  },
+  {
+   "at": "2026-10-30 18:59:40",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.84
+  },
+  {
+   "at": "2026-10-30 19:51:34",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.57
+  },
+  {
+   "at": "2026-10-30 19:52:26",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.57
+  },
+  {
+   "at": "2026-10-30 20:01:24",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.6
+  },
+  {
+   "at": "2026-10-30 20:04:30",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.55
+  },
+  {
+   "at": "2026-10-30 22:09:38",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.69
+  },
+  {
+   "at": "2026-10-30 22:10:48",
+   "kind": "replay_ok",
+   "detail": "POST https://akademik.yok.gov.tr/AkademikArama/AkademisyenArama",
+   "elapsed": 0.63
   }
  ],
  "access": {

@@ -9,11 +9,14 @@ Klasik ER hattı: bloklama → çift puanlama → (belirsiz çiftlerde) LLM hake
 """
 from __future__ import annotations
 
+import asyncio
+
 from rapidfuzz import fuzz
 
 from .text import LANG_NAMES, _tr_lookup, content_tokens, detect_language, fold, name_score, title_key
 
-SOURCE_PRIORITY = {"openalex": 0, "crossref": 1, "yok": 2, "orcid": 3, "scholar": 4}
+SOURCE_PRIORITY = {"openalex": 0, "crossref": 1, "yok": 2, "trdizin": 3, "tez": 4, "openaire": 5, "orcid": 6,
+                   "scholar": 7}
 
 def _translate(tokens: list[str]) -> set[str]:
     """Köklenmiş tokenları ortak İngilizce uzaya taşır (TR kökü → EN terim)."""
@@ -87,19 +90,26 @@ async def resolve(records: list[dict], subject: str, llm=None, log=None) -> tupl
                     pending_llm.append((i, j, jacc))
 
     if pending_llm:
-        for i, j, jacc in pending_llm[:25]:
-            verdict = None
-            if llm is not None and llm.available:
+        pending_llm = pending_llm[:25]
+
+        async def judge(i, j):
+            if llm is None or not llm.available:
+                return None
+            data = await llm.json(
+                "İki yayın başlığı veriliyor. Biri diğerinin farklı dildeki (TR/EN) karşılığı mı, yani AYNI çalışma mı?\n"
+                f"A ({recs[i]['year']}, {recs[i]['venue']}): {recs[i]['title']}\n"
+                f"B ({recs[j]['year']}, {recs[j]['venue']}): {recs[j]['title']}\n"
+                'JSON: {"same": true/false, "reason": "kısa"}',
+                {"type": "object", "properties": {"same": {"type": "boolean"}, "reason": {"type": "string"}},
+                 "required": ["same"]}, timeout=40, fast=True)
+            return bool(data and data.get("same"))
+
+        # Çiftler birbirinden bağımsız: sırayla değil aynı anda sorulur (LLM eşzamanlılığı llm.py'de sınırlı).
+        verdicts = await asyncio.gather(*(judge(i, j) for i, j, _ in pending_llm), return_exceptions=True)
+        for (i, j, jacc), verdict in zip(pending_llm, verdicts):
+            if isinstance(verdict, bool):
                 stats["llm_checked"] += 1
-                data = await llm.json(
-                    "İki yayın başlığı veriliyor. Biri diğerinin farklı dildeki (TR/EN) karşılığı mı, yani AYNI çalışma mı?\n"
-                    f"A ({recs[i]['year']}, {recs[i]['venue']}): {recs[i]['title']}\n"
-                    f"B ({recs[j]['year']}, {recs[j]['venue']}): {recs[j]['title']}\n"
-                    'JSON: {"same": true/false, "reason": "kısa"}',
-                    {"type": "object", "properties": {"same": {"type": "boolean"}, "reason": {"type": "string"}},
-                     "required": ["same"]}, timeout=40)
-                verdict = bool(data and data.get("same"))
-            if verdict is None:
+            else:
                 verdict = jacc >= 0.5
             if verdict:
                 uf.union(i, j)
@@ -135,6 +145,9 @@ async def resolve(records: list[dict], subject: str, llm=None, log=None) -> tupl
         best["languages"] = sorted({v["lang"] for v in variants})
         best["language_names"] = [LANG_NAMES.get(x, x) for x in best["languages"]]
         best["labels"] = sorted({lab for m in members for lab in (m.get("labels") or [])})[:6]
+        orgs = {(o.get("name"), o.get("type")): o for m in members for o in (m.get("orgs") or [])}
+        if orgs:
+            best["orgs"] = list(orgs.values())
         papers.append(best)
 
     papers.sort(key=lambda p: (-(p["year"] or 0), p["title"]))

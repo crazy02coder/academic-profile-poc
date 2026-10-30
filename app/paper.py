@@ -371,6 +371,11 @@ async def detail(paper: dict, llm, cache: dict, profile: dict | None = None) -> 
     elif url and not url.startswith("https://openalex.org"):
         emit({"stage": f"Scrapling ile yayıncı sayfası getiriliyor: {url}"})
         tasks.append(asyncio.create_task(run("Yayıncı", _publisher(url, emit, paper))))
+    if not doi and not saved_abstract:
+        from .trsources import abstract_by_title
+
+        emit({"stage": "DOI yok: başlıkla TR Dizin ve OpenAIRE (DergiPark, üniversite arşivleri) aranıyor."})
+        tasks.append(asyncio.create_task(run("TR kaynakları", abstract_by_title(paper["title"], paper.get("year")))))
     if doi:
         emit({"stage": "Paralel: Semantic Scholar (özet + TL;DR + atıf) ve Crossref sorgulanıyor."})
         tasks.append(asyncio.create_task(run("Semantic Scholar", _semantic_scholar(doi))))
@@ -399,6 +404,11 @@ async def detail(paper: dict, llm, cache: dict, profile: dict | None = None) -> 
     pub = results.get("Yayıncı") or {}
     s2 = results.get("Semantic Scholar") or {}
     cr = results.get("Crossref") or ""
+    tr = results.get("TR kaynakları") or {}
+    if tr.get("keywords") and not pub.get("keywords"):
+        pub["keywords"] = tr["keywords"]
+    if tr.get("url") and not meta.get("final_url"):
+        meta.update(final_url=tr["url"], source_label=f"{tr['source']} kaydına git")
     for k in ("title", "journal", "date", "pdf", "final_url", "via", "source_label", "access_status", "access_note", "bibliography"):
         if k in pub:
             meta[k] = pub[k]
@@ -409,6 +419,7 @@ async def detail(paper: dict, llm, cache: dict, profile: dict | None = None) -> 
     publisher_note = "özet YÖK ayrıntı kaydından" if is_yok else "özet yayıncı sayfasından (Scrapling" + (" + REA)" if pub.get("rea") else ")")
     candidates = [(pub.get("abstract") or "", publisher_note),
                   (s2.get("abstract") or "", "özet Semantic Scholar'dan"), (cr, "özet Crossref'ten"),
+                  (tr.get("abstract") or "", f"özet {tr.get('source', 'TR Dizin')} kaydından (başlıkla eşleşti)"),
                   (meta["abstract"] or "", meta["source_note"] or "özet OpenAlex'ten")]
     candidates = [(_abstract_text(text, paper["title"]), source) for text, source in candidates]
     best = max(candidates, key=lambda c: len(c[0]))

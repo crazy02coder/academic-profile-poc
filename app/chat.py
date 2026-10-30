@@ -87,7 +87,45 @@ class Knowledge:
             "ODAK DEĞİŞİMİ: " + "; ".join(f"{t['period']}: {t['text']}" for t in an.get("timeline", [])),
             "EN ÇOK ATIF: " + "; ".join(f"[{p['id']}] {p['citations']}" for p in top_cited),
             "SIK ORTAK YAZARLAR: " + ", ".join(f"{a} ({c})" for a, c in coauth.most_common(10)),
+            *self._yok_lines(),
         ]
+
+    def _yok_lines(self) -> list[str]:
+        """YÖK profilindeki yayın dışı bilgiler: sohbet 'hangi dersleri veriyor?' gibi sorulara cevap verebilsin."""
+        yok = self.prof.get("yok") or {}
+        if not yok and not self.result.get("industry"):
+            return []
+
+        def timeline(items):
+            return "; ".join(f"{x['period']} {x['role']} — {x['place']} {x['unit']}".strip() for x in items)
+
+        def rows(items, limit=40):
+            return "; ".join(" | ".join(str(v) for k, v in r.items() if v and k not in ("url", "group")) for r in items[:limit])
+
+        sec = yok.get("sections") or {}
+        out = [f"YÖK GÖREV GEÇMİŞİ: {timeline(yok.get('career') or [])}",
+               f"YÖK ÖĞRENİM: {timeline(yok.get('education') or [])}"]
+        for key, label in (("admin", "İDARİ GÖREVLER"), ("courses", "VERDİĞİ DERSLER"), ("theses", "YÖNETTİĞİ TEZLER"),
+                           ("projects", "PROJELER"), ("awards", "ÖDÜLLER"), ("patents", "PATENTLER"),
+                           ("memberships", "ÜYELİKLER"), ("experience", "ÜNİVERSİTE DIŞI DENEYİM"), ("art", "SANATSAL")):
+            if sec.get(key):
+                out.append(f"YÖK {label} ({len(sec[key])}): {rows(sec[key])}")
+        if yok.get("collaborators"):
+            out.append("YÖK BİRLİKTE ÇALIŞTIĞI KİŞİLER: " + "; ".join(
+                f"{c['title']} {c['name']} ({c['institution']})" for c in yok["collaborators"]))
+        if yok.get("tr_projects"):
+            out.append(f"TR DİZİN TÜBİTAK PROJELERİ ({len(yok['tr_projects'])}): " + "; ".join(
+                f"{p['year'] or '?'} {p['title']} ({p['role']}{', ' + p['group'] if p['group'] else ''})" for p in yok["tr_projects"]))
+        for e in self.result.get("industry") or []:
+            out.append(f"SANAYİ İŞ BİRLİĞİ: {e['name']}"
+                       f"{' (resmi ' + '/'.join(e['kinds']) + ', ' + ', '.join(e['cities'][:3]) + ')' if e['official'] else ''} — "
+                       + "; ".join(f"{ev['type']}: {ev['text']}" + (f" [{ev['pub']}]" if ev['pub'] else "") for ev in e["evidence"][:6]))
+        tez = yok.get("tez_merkezi") or {}
+        for key, label in (("own", "KENDİ TEZLERİ"), ("advised", "DANIŞMANLIK YAPTIĞI TEZLER")):
+            if tez.get(key):
+                out.append(f"YÖK TEZ MERKEZİ {label} ({len(tez[key])}): " + "; ".join(
+                    f"{t['year']} {t['type']} — {t['title']} — {t['author']} ({t['university']})" for t in tez[key]))
+        return out
 
     def _core(self) -> str:
         lines = self._header() + ["", "TÜM YAYINLAR (kimlik, yıl, dergi, atıf, dil, kaynak):"]

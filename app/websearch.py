@@ -196,7 +196,8 @@ async def _provider(provider: str, query: str, log=None) -> list[dict]:
                             rows = await {"ddgs": _ddgs, "brave_api": _brave_api,
                                           "brave_page": _brave_page}[provider](query)
             except Exception as exc:  # bir motor diğer motorları devre dışı bırakmaz
-                state["blocked_until"] = time.monotonic() + 60
+                # Google bot kontrolü saatlerce sürer; her aramada yeniden denemek ~5 sn kaybettirir.
+                state["blocked_until"] = time.monotonic() + (3600 if type(exc).__name__ == "GoogleBlocked" else 60)
                 if log:
                     await log(f"Arama · {provider}: {type(exc).__name__}: {str(exc)[:160]}; diğer yöntemlere geçiliyor.")
                 return []

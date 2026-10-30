@@ -4,3 +4,4 @@ node_modules/
 .env
 runs/
 .cache/
+data/

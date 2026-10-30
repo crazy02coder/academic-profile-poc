@@ -73,6 +73,7 @@ class Profile:
     card_text: str = ""
     observations: list[dict] = field(default_factory=list)  # doğrulama için her gözlem
     verification: dict = field(default_factory=dict)
+    yok: dict = field(default_factory=dict)  # YÖK fotoğraf, görev/öğrenim, dersler, tezler, iş birlikleri…
 
     def observe(self, key: str, value, source: str, url: str = ""):
         """Kaynaktan gelen bilgiyi seçmeden kayda geçirir (konsensüs için)."""
@@ -108,6 +109,7 @@ class Profile:
             "found": self.found,
             "provenance": {k: {"source": f.source, "url": f.url} for k, f in self.facts.items()},
             "verification": self.verification,
+            "yok": self.yok,
         }
 
 

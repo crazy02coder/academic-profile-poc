@@ -12,7 +12,7 @@ from urllib.parse import quote, urljoin, urlparse
 import httpx
 
 from . import rea, recipes
-from .config import CONTACT_MAIL, USER_AGENT
+from .config import CONTACT_MAIL, OPENALEX_PARAMS, USER_AGENT
 from .discover import Profile, registrable, tr_title
 from .net import fetch_smart, parse, wall_reason
 from .text import clean, doi_key, fold, name_score, title_key
@@ -59,7 +59,7 @@ async def openalex_institution(client, profile: Profile) -> dict | None:
     queries = [q for q in (name, re.sub(r"(?i)üniversitesi", "University", name or ""), domain.split(".")[0] if domain else "") if q]
     pool: dict[str, dict] = {}
     for q in dict.fromkeys(queries):
-        r = await client.get(f"{OPENALEX}/institutions", params={"search": q, "per-page": 10, "mailto": CONTACT_MAIL})
+        r = await client.get(f"{OPENALEX}/institutions", params={"search": q, "per-page": 10, **OPENALEX_PARAMS})
         if r.status_code != 200:
             continue
         for inst in r.json().get("results", []):
@@ -78,7 +78,7 @@ async def openalex_institution(client, profile: Profile) -> dict | None:
 async def openalex_author(client, profile: Profile, log) -> dict | None:
     orcid = profile.links.get("orcid")
     if orcid:
-        r = await client.get(f"{OPENALEX}/authors", params={"filter": f"orcid:{orcid}", "mailto": CONTACT_MAIL})
+        r = await client.get(f"{OPENALEX}/authors", params={"filter": f"orcid:{orcid}", **OPENALEX_PARAMS})
         res = r.json().get("results", []) if r.status_code == 200 else []
         if res:
             await log("publications", "running", f"OpenAlex: ORCID {orcid} ile yazar kesinleştirildi → {res[0]['id'].rsplit('/', 1)[-1]}.")
@@ -87,7 +87,7 @@ async def openalex_author(client, profile: Profile, log) -> dict | None:
     if inst:
         profile.set("institution", tr_title(inst["display_name"]) if inst["display_name"].isupper() else inst["display_name"],
                     "openalex", inst["id"])
-    params = {"search": profile.name or profile.query_name, "per-page": 25, "mailto": CONTACT_MAIL}
+    params = {"search": profile.name or profile.query_name, "per-page": 25, **OPENALEX_PARAMS}
     if inst:
         params["filter"] = f"affiliations.institution.id:{inst['id'].rsplit('/', 1)[-1]}"
     r = await client.get(f"{OPENALEX}/authors", params=params)
@@ -131,13 +131,14 @@ async def openalex_works(profile: Profile, log) -> tuple[list[dict], dict | None
             profile.observe("orcid", oid, "openalex", author["id"])
         for inst in author.get("last_known_institutions") or []:
             profile.observe("institution", inst.get("display_name"), "openalex", author["id"])
-        out, cursor = [], "*"
+        out, page, more = [], 1, True
         select = ("id,doi,display_name,publication_year,primary_location,authorships,abstract_inverted_index,"
                   "cited_by_count,language,type,topics")
-        while cursor and len(out) < 400:
+        # cursor= ile sayfalama anahtarsız 401 döner; page= anahtarsız çalışır.
+        while more and len(out) < 400:
             r = await client.get(f"{OPENALEX}/works", params={
-                "filter": f"author.id:{aid}", "per-page": 200, "cursor": cursor, "select": select,
-                "sort": "publication_year:desc", "mailto": CONTACT_MAIL})
+                "filter": f"author.id:{aid}", "per-page": 200, "page": page, "select": select,
+                "sort": "publication_year:desc", **OPENALEX_PARAMS})
             if r.status_code != 200:
                 break
             data = r.json()
@@ -146,12 +147,16 @@ async def openalex_works(profile: Profile, log) -> tuple[list[dict], dict | None
                 out.append(record(
                     "openalex", source_id=w["id"], title=w.get("display_name"), year=w.get("publication_year"),
                     doi=w.get("doi"), venue=((loc.get("source") or {}).get("display_name")),
-                    authors=[a["author"]["display_name"] for a in w.get("authorships", [])][:25],
+                    authors=[n for a in w.get("authorships") or [] if (n := (a.get("author") or {}).get("display_name"))][:25],
                     abstract=_abstract(w.get("abstract_inverted_index")), url=w.get("doi") or loc.get("landing_page_url") or w["id"],
                     citations=w.get("cited_by_count"), type=w.get("type"),
                     labels=[t["display_name"] for t in (w.get("topics") or [])[:3]],
+                    orgs=[{"name": i.get("display_name"), "type": i.get("type"), "country": i.get("country_code")}
+                          for a in w.get("authorships") or [] if not ((a.get("author") or {}).get("id") or "").endswith(aid)
+                          for i in a.get("institutions") or [] if i.get("type") == "company" and i.get("display_name")],
                 ))
-            cursor = data.get("meta", {}).get("next_cursor")
+            more = len(data.get("results") or []) == 200
+            page += 1
         topics = author.get("topics") or author.get("x_concepts") or []
         meta = {"id": aid, "display_name": author.get("display_name"), "works_count": author.get("works_count"),
                 "cited_by_count": author.get("cited_by_count"),
@@ -388,6 +393,115 @@ def _yok_parse_profile(sel) -> dict:
 YOK_TITLES = {"PROFESÖR": "Prof. Dr.", "DOÇENT": "Doç. Dr.", "DOKTOR ÖĞRETİM ÜYESİ": "Dr. Öğr. Üyesi",
               "ÖĞRETİM GÖREVLİSİ": "Öğr. Gör.", "ARAŞTIRMA GÖREVLİSİ": "Arş. Gör."}
 
+# YÖK profil menüsündeki yayın dışı bölümler → sonuçtaki anahtar
+YOK_SECTIONS = {"Projeler": "projects", "Dersler": "courses", "Yönetilen Tezler": "theses", "Ödüller": "awards",
+                "Patentler": "patents", "Üyelikler": "memberships", "Sanatsal faaliyetler": "art",
+                "İdari Görevler": "admin", "Üniversite Dışı Deneyim": "experience"}
+_NODE_RE = re.compile(r"graph\.addNode\('([^']+)',\s*\{url\s*:\s*'([^']*)',\s*name:\s*'([^']*)'"
+                      r"(?:,\s*unvan:\s*'([^']*)')?(?:,\s*universite:\s*'([^']*)')?")
+
+
+def _text_of(node, css: str) -> str:
+    found = node.css(css)
+    return clean(" ".join(x.get_all_text(separator=" ") for x in found)) if found else ""
+
+
+def _yok_timelines(sel) -> dict[str, list[dict]]:
+    """`ul.timeline` listeleri (görev, öğrenim, idari görev): başlık → [dönem, rol, kurum, birim, not]."""
+    out = {}
+    for ul in sel.css("ul.timeline"):
+        heading, period, items = "", "", []
+        for li in ul.css("li"):
+            if "time-label" in (li.attrib.get("class") or ""):
+                text = clean(li.get_all_text(separator=" "))
+                if re.search(r"\d{4}", text):
+                    period = text
+                elif text:
+                    heading = text
+                continue
+            if not li.css(".timeline-item"):
+                continue
+            items.append({"period": period, "role": _text_of(li, ".timeline-footer"),
+                          "place": tr_title(_text_of(li, ".timeline-item h4")),
+                          "unit": tr_title(_text_of(li, ".timeline-body h5")),
+                          "note": _text_of(li, ".timeline-body h6")})
+        if items:
+            out[heading or f"liste{len(out) + 1}"] = items
+    return out
+
+
+def _yok_section(sel) -> list[dict]:
+    """Bölüm sayfaları üç düzenden birini kullanır: sekmeli tablo, zaman çizelgesi ya da liste satırı."""
+    rows = []
+    for panel in sel.css(".panel-group .panel"):
+        group = _text_of(panel, ".panel-title")
+        heads = [clean(th.get_all_text(separator=" ")) for th in panel.css("thead th")]
+        for tr in panel.css("tbody tr"):
+            cells = [clean(td.get_all_text(separator=" ")) for td in tr.css("td")]
+            row = {"group": group, **dict(zip(heads, cells))}
+            link = tr.css("a[href^='http']")
+            if link:
+                row["url"] = link[0].attrib.get("href", "")
+            rows.append(row)
+    if rows:
+        return rows
+    timelines = _yok_timelines(sel)
+    if timelines:
+        return [item for items in timelines.values() for item in items]
+    for r in sel.css(".listrow"):
+        rows.append({"labels": [clean(x.get_all_text(separator=" ")) for x in r.css(".listRowType .label")],
+                     "title": _text_of(r, ".listRowTitle"), "detail": _text_of(r, ".listRowAuthor"),
+                     "extra": _text_of(r, ".listRowExtra, .listRowDescription")})
+    return [r for r in rows if r["title"] or r["detail"]]
+
+
+def _yok_collaborators(html: str, self_id: str) -> list[dict]:
+    out = []
+    for aid, photo, name, title, unit in _NODE_RE.findall(html):
+        if aid == self_id:
+            continue
+        path = [p.strip() for p in unit.split("/") if p.strip()]
+        out.append({"yok_id": aid, "name": tr_title(name), "title": YOK_TITLES.get(title, tr_title(title)),
+                    "institution": tr_title(path[0]) if path else "", "unit": tr_title(" / ".join(path[1:3])),
+                    "photo": photo if photo.startswith("data:image") else "",
+                    "url": f"{YOK}AkademisyenGorevOgrenimBilgileri?islem=direct&authorId={aid}"})
+    return out[:60]
+
+
+def _yok_extra(bridge, page, link: str, emit) -> dict:
+    """Profilin yayın dışı her şeyi: fotoğraf, e-posta, görev/öğrenim, bölümler ve birlikte çalıştığı kişiler."""
+    photo = next((img.attrib.get("src", "") for img in page.css("img.img-circle")
+                  if (img.attrib.get("src") or "").startswith("data:image")), "")
+    mail = next((a.attrib.get("href", "")[7:] for a in page.css("#authorlistTb a[href^='mailto:']")), "")
+    updated = re.search(r"Son güncelleme:\s*([\d.]+)", page.get_all_text(separator=" "))
+    timelines = _yok_timelines(page)
+    extra = {"photo": photo, "email": clean(mail), "updated": updated.group(1) if updated else "",
+             "career": next((v for k, v in timelines.items() if "Görev" in k), []),
+             "education": next((v for k, v in timelines.items() if "Öğrenim" in k), []),
+             "sections": {}, "collaborators": []}
+    self_id = (re.search(r"authorId=([A-Z0-9]+)", link) or [None, ""])[1]
+    try:  # graf sayfası oturumdaki son profile göre oluşur; profil açıldıktan hemen sonra okunmalı
+        graph = bridge.fetch(urljoin(YOK, "view/viewAuthorGraphs.jsp"), network_idle=False)
+        extra["collaborators"] = _yok_collaborators(graph.html_content or "", self_id)
+    except Exception as exc:  # noqa: BLE001
+        emit(f"YÖK birlikte çalıştığı kişiler okunamadı ({type(exc).__name__}).")
+    menu = {clean(a.get_all_text()): urljoin(YOK, a.attrib.get("href", "")) for a in page.css("a[href]")}
+    for label, key in YOK_SECTIONS.items():
+        if label not in menu:
+            continue
+        try:
+            rows = _yok_section(bridge.fetch(menu[label], network_idle=False))
+        except Exception as exc:  # noqa: BLE001
+            emit(f"YÖK {label} okunamadı ({type(exc).__name__}).")
+            continue
+        if rows:
+            extra["sections"][key] = rows
+    counts = ", ".join(f"{label} {len(extra['sections'][key])}" for label, key in YOK_SECTIONS.items()
+                       if key in extra["sections"])
+    emit(f"YÖK profil ayrıntıları: görev {len(extra['career'])}, öğrenim {len(extra['education'])}, "
+         f"birlikte çalıştığı {len(extra['collaborators'])} kişi" + (f", {counts}" if counts else "") + ".")
+    return extra
+
 
 def _yok_pubs(sel, kind: str, profile_url: str = "") -> list[dict]:
     out = []
@@ -612,6 +726,7 @@ def yok_sync(name: str, institution: str, link: str, emit) -> dict:
         result["profile_url"] = link
         emit(f"YÖK profili: {prof.get('title_raw')} · {' / '.join(prof.get('path', [])[:3])}"
              + (f" · ORCID {prof['orcid']}" if prof.get("orcid") else ""))
+        result["extra"] = _yok_extra(bridge, page, link, emit)
         pub_links = [(clean(a.get_all_text()), urljoin(YOK, a.attrib.get("href", ""))) for a in page.css("a")
                      if "AkademisyenYayinBilgileri" in (a.attrib.get("href") or "")]
         for label, url in pub_links:
@@ -651,5 +766,6 @@ async def yok_works(profile: Profile, log) -> tuple[list[dict], dict | None]:
         if prof.get("orcid"):
             profile.links.setdefault("orcid", prof["orcid"])
             profile.observe("orcid", prof["orcid"], "yok", src)
+        profile.yok = res.get("extra") or {}
         profile.found = True
     return res.get("records", []), res.get("rea")

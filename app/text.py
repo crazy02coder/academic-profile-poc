@@ -14,6 +14,10 @@ _ASCII_MAP = str.maketrans({"ı": "i", "ş": "s", "ğ": "g", "ü": "u", "ö": "o
 
 ACADEMIC_TITLES = [
     # (regex, normalize edilmiş Türkçe unvan) — uzun olan önce
+    # İngilizce birleşik unvanlar önce: yoksa "Assist. Prof. Dr." içindeki "Prof. Dr." silinir, "Assist." ada kalır
+    (r"assoc(?:iate)?\.?\s*prof(?:essor)?\.?(?:\s*dr\.?)?", "Doç. Dr."),
+    (r"assist(?:ant)?\.?\s*prof(?:essor)?\.?(?:\s*dr\.?)?|asst\.?\s*prof\.?(?:\s*dr\.?)?", "Dr. Öğr. Üyesi"),
+    (r"res(?:earch)?\.?\s*ass(?:ist(?:ant)?|t)\.?", "Arş. Gör."),
     (r"prof(?:es[öo]r)?\.?\s*dr\.?", "Prof. Dr."),
     (r"do[çc](?:ent)?\.?\s*dr\.?", "Doç. Dr."),
     (r"dr\.?\s*[öo]ğ?r(?:etim)?\.?\s*[üu]y(?:esi)?\.?", "Dr. Öğr. Üyesi"),
@@ -24,8 +28,6 @@ ACADEMIC_TITLES = [
     (r"ar[şs](?:t[ıi]rma)?\.?\s*g[öo]r(?:evlisi)?\.?", "Arş. Gör."),
     (r"profes[öo]r", "Prof. Dr."),
     (r"do[çc]ent", "Doç. Dr."),
-    (r"assoc(?:iate)?\.?\s*prof(?:essor)?\.?(?:\s*dr\.?)?", "Doç. Dr."),
-    (r"assist(?:ant)?\.?\s*prof(?:essor)?\.?(?:\s*dr\.?)?|asst\.?\s*prof\.?(?:\s*dr\.?)?", "Dr. Öğr. Üyesi"),
     (r"prof(?:essor)?\.?(?:\s*dr\.?)?", "Prof. Dr."),
     (r"research\s+assistant", "Arş. Gör."),
     (r"lecturer|instructor", "Öğr. Gör."),

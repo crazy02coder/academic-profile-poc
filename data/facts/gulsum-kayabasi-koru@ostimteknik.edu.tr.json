@@ -43,6 +43,50 @@
     "mobil uygulamalarin siniflandirilmasinda kullanilan makine ogrenmesi algoritmalarinin guvenirlilik tespiti",
     "yapay zeka destekli siber guvenlik sistemleri"
    ]
+  },
+  {
+   "at": "2026-10-30 22:08:19",
+   "fields": {
+    "title": [
+     "dr ogr uyesi"
+    ],
+    "department": [
+     "yapay zeka muhendisligi"
+    ],
+    "institution": [
+     "ostim teknik"
+    ],
+    "orcid": [
+     "0000 0002 1749 900x"
+    ],
+    "interest": [
+     "adli bilisim",
+     "yapay zeka",
+     "veri madenciligi",
+     "data science",
+     "dogal dil isleme",
+     "siber guvenlik"
+    ]
+   },
+   "papers": [
+    "10.1109/access.2024.3354165",
+    "10.29109/gujsc.1145516",
+    "10.54637/vizetek.9786253822200",
+    "10.55525/tjst.1681334",
+    "10.71340/ubsud.1846061",
+    "10.71350/a5journal.7",
+    "a research on deep learning models used in turkish text analysis",
+    "a research on system and data sets used for fake news detection",
+    "dogal dil islemede yerel dil zenginligi azbert ile azerbaycan turkcesi metinlerinin anlamsal analizi",
+    "fake news detection in turkish using machine learning algorithms and fasttext with word embedding",
+    "finai ai driven web platform for stock price forecasting using ensemble machine learning models",
+    "izin tabanli statik analiz yontemi ile android uygulamalarin siniflandirilmasi",
+    "mobil cihazlarda zararli yazilim tespitinde kullanilan statik analiz araclari",
+    "mobil uygulamalarin siniflandirilmasinda kullanilan makine ogrenmesi algoritmalarinin guvenirlilik tespiti",
+    "sosyal medyadaki turkce sahte haberlerin derin ogrenme yaklasimiyla tespiti ve siniflandirilmasi",
+    "yapay zeka destekli siber guvenlik sistemleri",
+    "zararli insan tespiti yapabilen tam otonom dron"
+   ]
   }
  ]
 }

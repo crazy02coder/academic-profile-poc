@@ -35,6 +35,18 @@ LLM_MODE = os.getenv("LLM_MODE", "auto")  # auto | mock
 
 USER_AGENT = "AkademikIz/2.0 (academic research PoC; mailto:akademik-iz@example.org)"
 CONTACT_MAIL = os.getenv("OPENALEX_MAILTO", "akademik-iz@example.org")
+# OpenAlex ücretsiz anahtarı (.env: OPENALEX_API_KEY=…). Anahtarsız istekler IP başına günlük ortak bütçeyi
+# (~1000 istek) paylaşır; anahtarla kişisel bütçe kullanılır. Yalnızca OpenAlex isteklerine eklenir.
+OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "")
+OPENALEX_PARAMS = {"mailto": CONTACT_MAIL} | ({"api_key": OPENALEX_API_KEY} if OPENALEX_API_KEY else {})
+
+
+def redact(text: str) -> str:
+    """Kullanıcıya gösterilen hata metinlerinden (istek URL'leri) anahtarları siler."""
+    for secret in (OPENALEX_API_KEY, GEMINI_API_KEY):
+        if secret:
+            text = text.replace(secret, "***")
+    return text
 
 # Crawler sınırları: kibar ve sınırlı.
 CRAWL_MAX_PAGES = int(os.getenv("CRAWL_MAX_PAGES", "90"))

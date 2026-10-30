@@ -26,10 +26,13 @@ Ardından **http://127.0.0.1:8000** adresini aç.
 
 ```
 GEMINI_API_KEY=...
+OPENALEX_API_KEY=...   # isteğe bağlı, ücretsiz: https://openalex.org (hesap → API key)
 ```
 
-`.env` git'e girmez. Anahtar yoksa analiz ve sohbet basit kural tabanlı yedeğe (mock) düşer.
+OpenAlex anahtarsız da çalışır ama IP başına günlük ortak bütçe (~1000 istek) çabuk dolar; kendi anahtarınla kişisel bütçe kullanılır.
 
+`.env` git'e girmez. Anahtar yoksa analiz ve sohbet basit kural tabanlı yedeğe (mock) düşer.
+![alt text](image.png)
 **Gerekenler**
 
 | Araç | Sürüm | Not |

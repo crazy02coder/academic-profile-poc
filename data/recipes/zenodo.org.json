@@ -6,6 +6,11 @@
  "events": [],
  "access": {
   "tier": "scrapling.fetcher",
-  "at": "2026-10-19 08:00:23"
+  "at": "2026-10-30 18:17:29"
+ },
+ "abstract_source": {
+  "kind": "xhr",
+  "url_pattern": "https://zenodo.org/api/records/19655240/versions?size=5&sort=version&allversions=true",
+  "at": "2026-10-30 18:17:41"
  }
 }

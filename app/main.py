@@ -24,18 +24,28 @@ from .paper import detail as paper_detail
 import os
 from urllib.parse import urlparse
 
-from .config import ROOT, chromium_executable
+from .config import ROOT, chromium_executable, redact
 from .text import detect_title
 from .dedup import resolve
 from .discover import llm_enrich, locate, registrable
 from .llm import LLM
 from .sources import crossref_works, openalex_works, orcid_works, scholar_works, yok_works
+from . import directory, firms, industry, library, trsources
 
 app = FastAPI(title="Akademik İz")
 logger = logging.getLogger(__name__)
 app.add_middleware(CORSMiddleware, allow_origin_regex=r"http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?",
                    allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+
+
+@app.middleware("http")
+async def no_stale_assets(request: Request, call_next):
+    """Arayüz dosyaları her açılışta ETag ile doğrulanır: güncelleme sonrası tarayıcı eski app.js'i kullanmaz."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 JOBS: dict[str, dict] = {}
 
 STEPS = [  # arayüz kendi sade aşamalarını gösterir; bu liste /api/jobs yanıtında bilgi amaçlı döner
@@ -84,9 +94,11 @@ async def pipeline(job: dict, data: JobIn):
                   f"{profile.get('department', 'bölüm ?')}")
         if not any(e.get("step") == "crawl" for e in job["events"]):
             await log("crawl", "done", "Gezinmeye gerek kalmadı: kişi başlangıç sayfasında veya hafızada bulundu.")
-        await llm_enrich(profile, llm, log)
         if profile.links.get("orcid"):
             profile.observe("orcid", profile.links["orcid"], "university", profile.source_url)
+
+        # Scholar ORCID'e ihtiyaç duymaz ve en yavaş kaynaktır: YÖK'le aynı anda başlar.
+        scholar_task = asyncio.create_task(scholar_works(profile, log))
 
         # Faz A: kimlik çözümleme + YÖK yayınları (ORCID burada netleşebilir)
         await log("yok", "running", "YÖK Akademik: Scrapling StealthySession açılıyor, REA CDP ile bağlanacak.")
@@ -98,12 +110,20 @@ async def pipeline(job: dict, data: JobIn):
             await log("yok", "warning", f"YÖK atlandı ({type(exc).__name__}); akış devam ediyor.")
 
         # Faz B: açık API'ler + Scholar paralel
-        await log("publications", "running", "Öncelik: OpenAlex → Crossref → ORCID; Scholar best-effort (paralel).")
+        await log("publications", "running", "Paralel: OpenAlex, Crossref, ORCID, TR Dizin, OpenAIRE (DergiPark, üniversite "
+                                             "arşivleri), YÖK Tez Merkezi; Scholar best-effort.")
+        # YÖK unvan/bölümü çoğu zaman verir; sayfa metninden LLM tamamlaması yalnız hâlâ eksik kalanlar için,
+        # API sorgularıyla paralel çalışır.
+        labels = ("OpenAlex", "Crossref", "ORCID", "Scholar", "TR Dizin", "OpenAIRE", "Tez Merkezi")
         tasks = await asyncio.gather(openalex_works(profile, log), crossref_works(profile, log),
-                                     orcid_works(profile, log), scholar_works(profile, log), return_exceptions=True)
+                                     orcid_works(profile, log), scholar_task,
+                                     trsources.trdizin_works(profile, log), trsources.openaire_works(profile, log),
+                                     trsources.tez_works(profile, log), llm_enrich(profile, llm, log),
+                                     return_exceptions=True)
+        tasks = tasks[:len(labels)]
         records = list(yok_records)
         meta = {}
-        for label, res in zip(("OpenAlex", "Crossref", "ORCID", "Scholar"), tasks):
+        for label, res in zip(labels, tasks):
             if isinstance(res, Exception):
                 msg = "Scholar erişilemedi, OpenAlex kullanıldı." if label == "Scholar" else \
                     f"{label} erişilemedi ({type(res).__name__})."
@@ -150,9 +170,9 @@ async def pipeline(job: dict, data: JobIn):
         save_run(fact_key, history, verification, papers)
 
         prof = profile.to_dict()
-        analysis = await analyze(papers, prof, llm, log)
-        await log("analysis", "done" if papers else "warning",
-                  "Analiz tamamlandı." if papers else "Yayın yok; analiz üretilmedi.")
+        # Yapay zekâ analizi isteğe bağlı: profil hemen açılır, kullanıcı "Analiz et" deyince /analyze çalışır.
+        analysis = {"mode": "pending" if papers else "unavailable", "summary": "", "areas": [], "methods": [],
+                    "timeline": []}
         langs = {}
         for p in papers:
             for name in p["language_names"]:
@@ -164,18 +184,23 @@ async def pipeline(job: dict, data: JobIn):
             "profile": prof, "publications": papers, "raw_count": stats["raw"], "unique_count": stats["unique"],
             "dedup": stats, "analysis": analysis, "paper_verification": paper_ver, "languages": langs, "by_source": by_source,
             "recon": {**report, "yok_rea": yok_rea}, "llm": llm.label(),
-            "summary": (f"{prof['name']} için {stats['raw']} ham kayıt, {stats['unique']} benzersiz yayın ve "
-                        f"{len(analysis['areas'])} araştırma alanı derlendi.") if papers else
+            "summary": f"{prof['name']} için {stats['raw']} ham kayıt ve {stats['unique']} benzersiz yayın derlendi."
+                       if papers else
                        "Akış tamamlandı ancak kimliği doğrulanabilen yayın bulunamadı.",
             "elapsed": round(time.time() - job["started"], 1),
         }
+        result["industry"] = industry.collaborations(papers, prof)
+        result["industry_v"] = industry.VERSION
+        if result["industry"]:
+            await log("verify", "done", f"Sanayi iş birlikleri: {len(result['industry'])} firma "
+                                        f"({sum(e['official'] for e in result['industry'])} resmi Ar-Ge/Tasarım Merkezi).")
         result["job_id"] = job["id"]
         result["chat_id"] = history_store.create(job["id"], result)["id"]
         job["result"] = result
         history_store.save_result(job["id"], result)
         _emit(job, {"type": "result", "data": result})
     except Exception as exc:  # noqa: BLE001
-        _emit(job, {"type": "error", "message": f"İş tamamlanamadı: {type(exc).__name__}: {str(exc)[:200]}"})
+        _emit(job, {"type": "error", "message": f"İş tamamlanamadı: {type(exc).__name__}: {redact(str(exc))[:200]}"})
     finally:
         job["done"] = True
         _emit(job, {"type": "end"})
@@ -204,6 +229,40 @@ async def create_job(data: JobIn):
     JOBS[jid] = job
     job["task"] = asyncio.create_task(pipeline(job, data))
     return {"id": jid, "steps": STEPS}
+
+
+@app.post("/api/jobs/{jid}/industry")
+async def industry_job(jid: str):
+    """Sanayi iş birliklerini kayıtlı profilden yeniden hesaplar (Ar-Ge listesi güncellenince ya da eski profillerde)."""
+    result = _result_for(jid)
+    if not result:
+        raise HTTPException(404, "Profil sonucu bulunamadı.")
+    result["industry"] = industry.collaborations(result["publications"], result["profile"])
+    result["industry_v"] = industry.VERSION
+    history_store.save_result(jid, result)
+    KB_CACHE.pop(jid, None)
+    return {"industry": result["industry"], "industry_v": industry.VERSION, "centers": industry.centers_info()}
+
+
+@app.post("/api/jobs/{jid}/analyze")
+async def analyze_job(jid: str):
+    """Yapay zekâ araştırma analizi (isteğe bağlı; sonuç profil kaydına yazılır)."""
+    result = _result_for(jid)
+    if not result:
+        raise HTTPException(404, "Profil sonucu bulunamadı.")
+    if not result["publications"]:
+        raise HTTPException(422, "Yayın olmadığı için analiz yapılamaz.")
+
+    async def quiet(*_):
+        return None
+
+    analysis = await analyze(result["publications"], result["profile"], await _llm(), quiet)
+    result["analysis"] = analysis
+    history_store.save_result(jid, result)
+    if jid in JOBS and JOBS[jid].get("result") is not None:
+        JOBS[jid]["result"] = result
+    KB_CACHE.pop(jid, None)  # asistanın bilgi tabanı yeni analizle yeniden kurulsun
+    return analysis
 
 
 @app.get("/api/jobs/{jid}/events")
@@ -362,7 +421,7 @@ async def chat(jid: str, body: ChatIn):
                 logger.warning("Profil sohbeti zaman aşımına uğradı: iş %s", jid)
                 await queue.put({"error": meta["error"]})
             except Exception as exc:  # noqa: BLE001
-                meta["error"] = f"Sohbet tamamlanamadı: {type(exc).__name__}: {str(exc)[:200]}"
+                meta["error"] = f"Sohbet tamamlanamadı: {type(exc).__name__}: {redact(str(exc))[:200]}"
                 logger.exception("Profil sohbeti tamamlanamadı: iş %s", jid)
                 await queue.put({"error": meta["error"]})
             try:
@@ -408,22 +467,24 @@ async def paper(jid: str, pid: str):
     if not item:
         raise HTTPException(404)
     job = JOBS.get(jid) or {}
-    llm = job.get("llm") or await LLM().probe()
-    cache = PAPER_CACHE.setdefault(jid, {})
+    llm = job.get("llm") or await _llm()
+    return _paper_stream(item, llm, PAPER_CACHE.setdefault(jid, {}), result.get("profile"), f"iş {jid}, yayın {pid}")
 
+
+def _paper_stream(item: dict, llm, cache: dict, profile: dict | None, label: str) -> StreamingResponse:
     async def stream():
         queue: asyncio.Queue = asyncio.Queue(maxsize=64)
 
         async def produce():
             try:
                 async with asyncio.timeout(180):
-                    async for event in paper_detail(item, llm, cache, result.get("profile")):
+                    async for event in paper_detail(item, llm, cache, profile):
                         await queue.put(event)
             except TimeoutError:
                 await queue.put({"error": "Yayın ayrıntısı 180 saniye içinde tamamlanamadı."})
             except Exception as exc:  # noqa: BLE001
-                logger.exception("Yayın ayrıntısı alınamadı: iş %s, yayın %s", jid, pid)
-                await queue.put({"error": f"Yayın ayrıntısı alınamadı: {type(exc).__name__}: {str(exc)[:200]}"})
+                logger.exception("Yayın ayrıntısı alınamadı: %s", label)
+                await queue.put({"error": f"Yayın ayrıntısı alınamadı: {type(exc).__name__}: {redact(str(exc))[:200]}"})
             await queue.put({"done": True})
 
         task = asyncio.create_task(produce())
@@ -484,3 +545,190 @@ async def chats_delete_all():
         history_store.delete_result(c["job_id"])
     KB_CACHE.clear()
     return {"deleted": "all"}
+
+
+# ------------------------------------------------------------------ ortak LLM (kısa süreli önbellek)
+_LLM_CACHE: dict = {"at": 0.0, "llm": None}
+
+
+async def _llm() -> LLM:
+    if _LLM_CACHE["llm"] is None or time.time() - _LLM_CACHE["at"] > 300:
+        _LLM_CACHE.update(llm=await LLM().probe(), at=time.time())
+    return _LLM_CACHE["llm"]
+
+
+# --------------------------------------------------------------- kurum dizini
+class UnitIn(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
+    refresh: bool = False
+
+
+class UnitPapersIn(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
+    level: str = Field(default="department", pattern="^(department|faculty)$")
+    name: str = Field(default="", max_length=300)
+
+
+def _check_url(url: str):
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(422, "Geçerli bir http(s) adresi girin.")
+
+
+async def _directory_call(coro):
+    try:
+        return await asyncio.wait_for(coro, timeout=150)
+    except TimeoutError:
+        raise HTTPException(504, "Site zamanında yanıt vermedi; biraz sonra tekrar deneyin.") from None
+    except RuntimeError as exc:
+        raise HTTPException(502, redact(str(exc))) from None
+
+
+@app.post("/api/directory/faculties")
+async def directory_faculties(body: UnitIn):
+    _check_url(body.url)
+    return await _directory_call(directory.faculties(body.url, await _llm(), body.refresh))
+
+
+@app.post("/api/directory/departments")
+async def directory_departments(body: UnitIn):
+    _check_url(body.url)
+    return await _directory_call(directory.departments(body.url, await _llm(), body.refresh))
+
+
+@app.post("/api/directory/staff")
+async def directory_staff(body: UnitIn):
+    _check_url(body.url)
+    return await _directory_call(directory.staff(body.url, await _llm(), body.refresh))
+
+
+@app.post("/api/directory/papers")
+async def directory_papers(body: UnitPapersIn):
+    """Bölüm ya da fakültedeki akademisyenlerin yayınları (OpenAlex hızlı liste)."""
+    _check_url(body.url)
+    llm = await _llm()
+    domain = registrable(urlparse(body.url).hostname or "")
+
+    async def run():
+        people = (await directory.faculty_people(body.url, llm) if body.level == "faculty"
+                  else (await directory.staff(body.url, llm))["items"])
+        if not people:
+            raise RuntimeError("Bu birimde akademisyen listesi bulunamadı.")
+        out = await directory.unit_papers(people, domain, directory.load(domain).get("name", ""))
+        return {**out, "people": len(people), "unit": body.name}
+
+    return await _directory_call(run())
+
+
+@app.get("/api/firms")
+async def firm_list(q: str = "", sector: str = "", city: str = ""):
+    """Resmi Ar-Ge / Tasarım Merkezi listesindeki firmalar (marka bazında gruplu)."""
+    return firms.firm_list(q[:100], sector[:120], city[:60])
+
+
+@app.get("/api/firms/{fid}")
+async def firm_detail(fid: str, refresh: bool = False):
+    """Firma → akademisyenler: OpenAlex/TR Dizin ortak yayınları ve çıkarılmış profillerdeki iş birlikleri."""
+    if not re.fullmatch(r"[a-z0-9-]{1,80}", fid):
+        raise HTTPException(422, "Geçersiz firma kimliği.")
+    d = await firms.firm_detail(fid, refresh)
+    if not d:
+        raise HTTPException(404, "Firma resmi listede bulunamadı.")
+    return d
+
+
+@app.get("/api/firms/{fid}/teydeb")
+async def firm_teydeb(fid: str, refresh: bool = False):
+    """Firmanın TÜBİTAK TEYDEB tamamlanmış projeleri (PRODİS, Açık Bilim)."""
+    if not re.fullmatch(r"[a-z0-9-]{1,80}", fid):
+        raise HTTPException(422, "Geçersiz firma kimliği.")
+    d = await firms.firm_teydeb(fid, refresh)
+    if d is None:
+        raise HTTPException(404, "Firma resmi listede bulunamadı.")
+    return d
+
+
+@app.get("/api/tubitak/ardeb")
+async def tubitak_ardeb(q: str = ""):
+    if len(q.strip()) < 3:
+        raise HTTPException(422, "En az 3 karakter yazın.")
+    return await firms.tubitak_ardeb(q.strip()[:120])
+
+
+@app.get("/api/tubitak/teydeb")
+async def tubitak_teydeb(q: str = ""):
+    if len(q.strip()) < 3:
+        raise HTTPException(422, "En az 3 karakter yazın.")
+    return await firms.tubitak_teydeb(q.strip()[:120])
+
+
+@app.get("/api/universities")
+async def universities():
+    known = {u["domain"]: u for u in directory.all_stores()}
+    seen_people: dict[str, list] = {}
+    for c in history_store.list_all():
+        if c.get("institution"):
+            seen_people.setdefault(c["institution"], []).append({"name": c["name"], "chat_id": c["id"],
+                                                                 "title": c.get("title")})
+    return {"directory": sorted(known.values(), key=lambda u: u["updated"], reverse=True),
+            "from_profiles": [{"institution": k, "people": v} for k, v in sorted(seen_people.items())]}
+
+
+# ------------------------------------------------------------------ favoriler
+class FavIn(BaseModel):
+    item: dict
+
+
+@app.get("/api/favorites")
+async def favorites_get():
+    return library.favorites()
+
+
+@app.post("/api/favorites/papers")
+async def favorites_add_paper(body: FavIn):
+    if not body.item.get("title"):
+        raise HTTPException(422, "Başlık gerekli.")
+    return library.add_paper(body.item)
+
+
+@app.delete("/api/favorites/papers/{key:path}")
+async def favorites_del_paper(key: str):
+    return {"deleted": library.remove_paper(key)}
+
+
+@app.post("/api/favorites/people")
+async def favorites_add_person(body: FavIn):
+    if not body.item.get("name"):
+        raise HTTPException(422, "Ad gerekli.")
+    return library.add_person(body.item)
+
+
+@app.delete("/api/favorites/people/{key:path}")
+async def favorites_del_person(key: str):
+    return {"deleted": library.remove_person(key)}
+
+
+# ------------------------------------------------------------------ konu araması
+@app.get("/api/search")
+async def topic_search(q: str = ""):
+    if len(q.strip()) < 3:
+        raise HTTPException(422, "En az 3 karakterlik bir konu yazın.")
+    return await library.topic_search(q[:200], await _llm())
+
+
+class PaperIn(BaseModel):
+    paper: dict
+
+
+GENERIC_PAPER_CACHE: dict = {}
+
+
+@app.post("/api/paper")
+async def paper_any(body: PaperIn):
+    """Arama sonucu ya da favorideki bir yayının ayrıntısı (profil işine bağlı olmadan)."""
+    p = body.paper
+    if not p.get("title"):
+        raise HTTPException(422, "Başlık gerekli.")
+    item = {"id": library.paper_key(p), "title": p["title"], "doi": p.get("doi") or "", "url": p.get("url") or "",
+            "year": p.get("year"), "venue": p.get("venue") or "", "authors": p.get("authors") or [],
+            "abstract": p.get("abstract") or "", "source": p.get("source") or "akademik kaynak"}
+    return _paper_stream(item, await _llm(), GENERIC_PAPER_CACHE, None, f"yayın {item['id']}")
