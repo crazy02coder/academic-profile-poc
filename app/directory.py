@@ -18,6 +18,7 @@ from urllib.parse import urldefrag, urljoin, urlparse
 
 import httpx
 
+from . import yokdir
 from .config import OPENALEX_PARAMS, ROOT, USER_AGENT
 from .discover import registrable, tr_title
 from .net import fetch_smart, parse
@@ -31,6 +32,8 @@ FACULTY_RX = re.compile(r"fak[üu]lte|faculty|y[üu]ksekokul|meslek y[üu]ksekok
                         r"konservatuva?r|conservatory|graduate school", re.I)
 DEPT_RX = re.compile(r"b[öo]l[üu]m|department|m[üu]hendisli[ğg]i|anabilim|program[ıi]?\b|dept\b|"
                      r"[öo][ğg]retmenli[ğg]i|bilimleri\b|engineering", re.I)
+# Ad sonuna eklenen durum etiketleri ve ayrı satırdaki unvan kalıntısı ("Didem Gökçay Misafir", "Melih Kandemir Dr.")
+STATUS_RX = re.compile(r"\s(misafir|konuk|emekli|guest|visiting|emeritus|dr\.?)$", re.I)
 ROLE_RX = re.compile(r"\s(dekan|rekt[öo]r|m[üu]d[üu]r|b[öo]l[üu]m ba[şs]kan|ba[şs]kan|koordinat[öo]r|"
                      r"sekreter|head\b|dean\b|chair\b|director\b|vice\b)", re.I)
 HUB_RX = re.compile(r"fak[üu]lteler|akademik birim|birimler|akademik$|academic units|faculties|schools|"
@@ -84,8 +87,12 @@ def all_stores() -> list[dict]:
     return out
 
 
-def _fresh(entry: dict | None) -> bool:
-    return bool(entry) and time.time() - entry.get("ts", 0) < TTL
+# Kadro ayrıştırma kuralları değişince artar: eski kurallarla (ya da eski sunucuyla) kaydedilmiş listeler bayat sayılır.
+STAFF_V = 3
+
+
+def _fresh(entry: dict | None, version: int = 0) -> bool:
+    return bool(entry) and entry.get("v", 0) == version and time.time() - entry.get("ts", 0) < TTL
 
 
 def _entry(items: list, **extra) -> dict:
@@ -125,7 +132,8 @@ def _site_name(sel) -> str:
     title = clean((sel.css("title::text").get() or ""))
     # "OSTİM Teknik Üniversitesi: İş Tecrübeli Yeni Mezunlar" gibi slogan ekleri ayrılır
     parts = [p.strip() for p in re.split(r"\s*[|–—»:]\s+|\s-\s", title) if p.strip()]
-    uni = next((p for p in parts if re.search(r"[üu]niversite|university", p, re.I)), "")
+    # Birden çok parçada "üniversite" geçiyorsa en kısası kurum adıdır ("…Doğan Vakıf Üniversitesi | TED Üniversitesi")
+    uni = min((p for p in parts if re.search(r"[üu]niversite|university", p, re.I)), key=lambda p: len(p.split()), default="")
     return uni or (parts[-1] if parts else "")
 
 
@@ -248,23 +256,71 @@ def _container(node, max_up: int = 4):
     return cur
 
 
+NAV_CLASS = re.compile(r"^(menu|nav|navbar|breadcrumbs?|footer|site-footer|site-header|main-menu|dropdown-menu|"
+                       r"menu-[\w-]+|nav-[\w-]+)$", re.I)
+
+
+def _in_nav(el, depth: int = 10) -> bool:
+    """Menü/gezinti/alt bilgi içindeki metinler kişi değildir ("Yardımcı Öğretim Üyesi Pozisyonları")."""
+    node = el
+    for _ in range(depth):
+        if node is None or node.tag in ("body", "html"):
+            return False
+        if node.tag in ("nav", "header", "footer") or any(
+                NAV_CLASS.match(c) for c in f"{node.attrib.get('class', '')} {node.attrib.get('id', '')}".split()):
+            return True
+        node = node.parent
+    return False
+
+
+def _name_part(text: str) -> str:
+    return re.split(r"\s[|,(–-]\s?|\s{2,}|@", strip_titles(text))[0].strip()
+
+
+# Bölüm başlıkları: "Öğretim Görevlileri", "Araştırma Görevlileri", "Öğretim Üyeleri"
+GROUP_RX = re.compile(r"g[öo]revlileri|[üu]yeleri|elemanlar[ıi]|kadro|personel|staff|members|assistants|lecturers", re.I)
+
+
+def _looks_like_name(name: str) -> bool:
+    words = name.split()
+    return (2 <= len(words) <= 5 and all(w[:1].isupper() for w in words) and not detect_title(name)
+            and not DEPT_RX.search(name) and not FACULTY_RX.search(name) and not GROUP_RX.search(name))
+
+
 def _people(sel, base: str) -> list[dict]:
-    """Unvanla başlayan kısa metinlerden kişi listesi (ad, unvan, e-posta, fotoğraf, profil bağlantısı)."""
+    """Unvan geçen kısa metinlerden (kişi kartları) kişi listesi (ad, unvan, e-posta, fotoğraf, profil bağlantısı)."""
     out, seen = [], set()
     for el in sel.css("h2, h3, h4, h5, h6, a, strong, b, span, p, li, td, div"):
         text = clean(el.get_all_text(separator=" "))
-        if not (6 <= len(text) <= 90):
+        if not (6 <= len(text) <= 200):
             continue
         title = detect_title(text)
-        if not title:
+        if not title or _in_nav(el):
             continue
-        name = strip_titles(text)
-        name = re.split(r"\s[|,(–-]\s?|\s{2,}|@", name)[0].strip()
+        # Kartta yalnızca adı taşıyan başlık/bağlantı varsa ad oradan alınır: kartın tüm metni bölüm adı,
+        # görev ve düğme yazılarını da içerir ("Tansel Dökeroğlu Yazılım Mühendisliği Bölümü").
+        subs = [n for sub in el.css("a, strong, b, h1, h2, h3, h4, h5, h6")
+                if _looks_like_name(n := _name_part(clean(sub.get_all_text(separator=" "))))]
+        name = _name_part(text) if len(text) <= 90 else ""
+        if name:
+            prefix = [n for n in subs if fold(name) == fold(n) or fold(name).startswith(fold(n) + " ")]
+            name = max(prefix, key=len) if prefix else name
+        elif subs:
+            name = subs[0]  # uzun kart: ilk ad öğesi (kart başlığı)
+        else:
+            continue
+        # Kart içindeki düğme yazıları ada yapışır ("Hatice Köse Profil Mail"): kartın kendi bağlantı
+        # metinleri addan atılır. Kelime listesi kullanılmaz; "Atakan Site" gibi soyadlar korunur.
+        labels = sorted({t for a in el.css("a") if 0 < len((t := clean(a.get_all_text(separator=" "))).split()) <= 2},
+                        key=len, reverse=True)
+        while (cut := next((lb for lb in labels if name.endswith(" " + lb)), None)) and len(name.split()) > 2:
+            name = name[:-len(cut) - 1].rstrip()
+        while STATUS_RX.search(name) and len(name.split()) > 2:
+            name = STATUS_RX.sub("", name).strip()
         role = ROLE_RX.search(name)
         if role:  # "Serdar Müldür Dekan" → "Serdar Müldür"; görev ayrı tutulur
             name = name[:role.start()].strip()
-        words = name.split()
-        if not (2 <= len(words) <= 5) or not all(w[:1].isupper() for w in words) or detect_title(name):
+        if not _looks_like_name(name):
             continue
         key = fold(name)
         if key in seen:
@@ -306,7 +362,7 @@ async def staff(unit_url: str, llm=None, refresh: bool = False) -> dict:
     domain = registrable(urlparse(unit_url).hostname or "")
     store = load(domain)
     unit = store["units"].setdefault(unit_url, {})
-    if not refresh and _fresh(unit.get("staff")):
+    if not refresh and _fresh(unit.get("staff"), STAFF_V):
         return unit["staff"]
     sel, base = await _page(unit_url)
     candidates = [(sel, base)]
@@ -323,15 +379,58 @@ async def staff(unit_url: str, llm=None, refresh: bool = False) -> dict:
         found = _people(s, u)
         if len(found) > len(best):
             best, best_url = found, u
+    # YÖK Akademik kadrosu esas alınır (tüm üniversitelerde aynı yapı, ORCID'li); site listesi fotoğraf/bağlantı
+    # ve YÖK'e ulaşılamadığında yedek içindir.
+    unit_name, faculty_name = _unit_context(store, unit_url)
+    yok = await _yok_unit(store, domain, faculty_name, unit_name, best)
     method = "kural"
-    if len(best) < 2:
+    if yok:
+        best, method = yokdir.merge_site(yok, best), "yök"
+    elif len(best) < 2:
         for s, u in candidates[1:] + candidates[:1]:
             found = await _llm_people(s, llm)
             if len(found) > len(best):
                 best, best_url, method = found, u, "gemini"
-    unit["staff"] = _entry(best, page=best_url, method=method)
+    unit["staff"] = _entry(best, page=best_url, method=method, v=STAFF_V)
     save(store)
     return unit["staff"]
+
+
+def _unit_context(store: dict, unit_url: str) -> tuple[str, str]:
+    """(birim adı, fakülte adı): dizin ağacından. Birim fakültenin kendisiyse ikisi aynıdır."""
+    facs = {f["url"]: f["name"] for f in (store.get("faculties") or {}).get("items") or []}
+    if unit_url in facs:
+        return facs[unit_url], facs[unit_url]
+    for fac_url, unit in (store.get("units") or {}).items():
+        for d in (unit.get("departments") or {}).get("items") or []:
+            if d["url"] == unit_url:
+                return d["name"], facs.get(fac_url, "")
+    return "", ""
+
+
+async def _yok_unit(store: dict, domain: str, faculty_name: str, unit_name: str, site_people: list[dict]) -> list[dict]:
+    """Birimin YÖK kadrosu; fakülte düzeyindeyse tüm fakülte, bölümse kurum yolundaki bölüm. Bulunamazsa []."""
+    if not faculty_name:
+        return []
+    names = [store.get("name") or ""]
+    if not yokdir.match_university(await _yok_unis(), names):  # site adı İngilizce olabilir: OpenAlex adları
+        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}) as client:
+            inst = await _institution(client, domain, store.get("name") or "")
+        if inst:
+            names += [inst.get("display_name") or ""] + list(inst.get("display_name_alternatives") or [])
+    fac = await yokdir.faculty_staff(names, faculty_name)
+    if not fac:
+        return []
+    people = fac["people"] if unit_name == faculty_name else yokdir.pick_department(fac["people"], unit_name, site_people)
+    return [p | {"department": tr_title(re.sub(r"\s*B[ÖO]L[ÜU]M[ÜU]$", "", p["department"]))} for p in people]
+
+
+async def _yok_unis() -> list[dict]:
+    try:
+        async with yokdir._client() as client:
+            return await yokdir.universities(client)
+    except httpx.HTTPError:
+        return []
 
 
 # ------------------------------------------------------------------- birim yayınları
@@ -367,11 +466,23 @@ async def unit_papers(people: list[dict], domain: str, institution: str = "", pe
                           key=lambda s: (s[0], s[1]), reverse=True)
 
         async def author(person):
+            if person.get("orcid"):  # YÖK'ten gelen ORCID: ad benzerliğinden kesin
+                async with sem:
+                    r = await client.get(f"{OPENALEX}/authors", params={"filter": f"orcid:{person['orcid']}", **OPENALEX_PARAMS})
+                hits = r.json().get("results", []) if r.status_code == 200 else []
+                if hits:
+                    return max(hits, key=lambda a: a.get("works_count") or 0)
             scored = await search(person["name"], f"affiliations.institution.id:{inst_id}" if inst_id else "")
             if scored and scored[0][0] >= 0.75:
                 return scored[0][2]
             if not inst_id:
                 return None
+            # Evlilik soyadı: "Sanem Sarıel Uzer" yayınlarda "Sanem Sarıel". Yalnızca aynı kurumda, son soyad atılarak.
+            words = person["name"].split()
+            if len(words) >= 3:
+                scored = await search(" ".join(words[:-1]), f"affiliations.institution.id:{inst_id}")
+                if scored and scored[0][0] >= 0.75:
+                    return scored[0][2]
             # Kurumda hiç yayını yoksa (önceki kurumlarında yayın yapmış): OpenAlex'te o adla tek yazar varsa kabul,
             # ama "yalnızca adla" işaretlenir. Aynı adlı birden çok yazar varsa (yaygın ad) eşleştirilmez.
             scored = [x for x in await search(person["name"]) if x[0] >= 0.9]
@@ -433,7 +544,13 @@ async def unit_papers(people: list[dict], domain: str, institution: str = "", pe
 
 
 async def faculty_people(unit_url: str, llm=None, limit: int = 30) -> list[dict]:
-    """Fakülte yayınları için: bölümlerin kadrolarını toplar (önbellekli, sınırlı eşzamanlılık)."""
+    """Fakülte yayınları için: YÖK fakülte kadrosu; yoksa bölümlerin site kadrolarını toplar (önbellekli)."""
+    domain = registrable(urlparse(unit_url).hostname or "")
+    store = load(domain)
+    unit_name, faculty_name = _unit_context(store, unit_url)
+    yok = await _yok_unit(store, domain, faculty_name or unit_name, faculty_name or unit_name, [])
+    if yok:
+        return yok
     deps = (await departments(unit_url, llm))["items"][:limit]
     sem = asyncio.Semaphore(3)
 

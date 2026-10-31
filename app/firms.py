@@ -16,7 +16,7 @@ import time
 import httpx
 
 from . import history as history_store
-from . import industry, trsources
+from . import industry, patents, trsources
 from .config import OPENALEX_PARAMS, ROOT, USER_AGENT
 from .text import clean, fold, name_tokens
 
@@ -344,6 +344,29 @@ async def firm_teydeb(fid: str, refresh: bool = False) -> dict | None:
         FIRMS_DIR.mkdir(parents=True, exist_ok=True)
         _path(fid, "teydeb").write_text(json.dumps({"v": CACHE_V, "ts": time.time(), "projects": projects}, ensure_ascii=False))
     return {"projects": projects, "error": error}
+
+
+async def firm_patents(fid: str, refresh: bool = False) -> dict | None:
+    """Firmanın patentleri (EPO); buluş sahipleri arasında firma sayfasındaki akademisyenler işaretlenir."""
+    g = _groups().get(fid)
+    if not g:
+        return None
+    if not patents.enabled():
+        return {"enabled": False, "items": [], "total": 0, "error": ""}
+    cached = None if refresh else _cached(fid, "patents")
+    if cached:
+        return {"enabled": True, "items": cached["items"], "total": cached["total"], "error": ""}
+    detail = _cached(fid) or {}
+    academics = sorted({r["name"] for r in detail.get("rows", [])} | {p["name"] for p in _profile_links().get(g["name"], [])})
+    try:
+        d = await patents.firm_patents(_names(g), academics)
+    except patents.PatentError as exc:
+        return {"enabled": True, "items": [], "total": 0, "error": str(exc)}
+    except httpx.HTTPError as exc:
+        return {"enabled": True, "items": [], "total": 0, "error": f"EPO'ya ulaşılamadı ({type(exc).__name__})"}
+    FIRMS_DIR.mkdir(parents=True, exist_ok=True)
+    _path(fid, "patents").write_text(json.dumps({"v": CACHE_V, "ts": time.time(), **d}, ensure_ascii=False))
+    return {"enabled": True, **d, "error": ""}
 
 
 # ------------------------------------------------------------------ TÜBİTAK proje araması (Firmalar → TÜBİTAK)

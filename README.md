@@ -27,6 +27,8 @@ Ardından **http://127.0.0.1:8000** adresini aç.
 ```
 GEMINI_API_KEY=...
 OPENALEX_API_KEY=...   # isteğe bağlı, ücretsiz: https://openalex.org (hesap → API key)
+EPO_KEY=...            # isteğe bağlı, ücretsiz: https://developers.epo.org (My Apps → Consumer Key)
+EPO_SECRET=...         # patent sekmeleri yalnızca bu ikisi tanımlıysa görünür
 ```
 
 OpenAlex anahtarsız da çalışır ama IP başına günlük ortak bütçe (~1000 istek) çabuk dolar; kendi anahtarınla kişisel bütçe kullanılır.

@@ -30,6 +30,18 @@ def create(job_id: str, result: dict) -> dict:
     return chat
 
 
+def refresh(cid: str, job_id: str, result: dict) -> dict:
+    """Yenilenen profilin özet alanlarını mevcut sohbete yazar (mesajlar korunur); sohbet silinmişse yenisini açar."""
+    chat = load(cid) if cid else None
+    if not chat:
+        return create(job_id, result)
+    prof = result["profile"]
+    chat.update(name=prof.get("name"), title=prof.get("title"), institution=prof.get("institution"),
+                papers=result.get("unique_count", 0))
+    save(chat)
+    return chat
+
+
 def save(chat: dict):
     CHATS_DIR.mkdir(parents=True, exist_ok=True)
     chat["updated"] = _now()

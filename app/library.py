@@ -86,6 +86,15 @@ def add_person(p: dict) -> dict:
     return item
 
 
+def update_person(key: str, p: dict):
+    """Favorideki akademisyenin özetini (fotoğraf, yayın sayısı…) yenilenen profile göre günceller."""
+    data = _load()
+    for x in data["people"]:
+        if x["key"] == key:
+            x.update({k: p[k] for k in PERSON_FIELDS if p.get(k) not in (None, "", [])})
+            _save(data)
+
+
 def remove_person(key: str) -> bool:
     data = _load()
     before = len(data["people"])

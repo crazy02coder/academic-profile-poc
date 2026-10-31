@@ -39,11 +39,14 @@ CONTACT_MAIL = os.getenv("OPENALEX_MAILTO", "akademik-iz@example.org")
 # (~1000 istek) paylaşır; anahtarla kişisel bütçe kullanılır. Yalnızca OpenAlex isteklerine eklenir.
 OPENALEX_API_KEY = os.getenv("OPENALEX_API_KEY", "")
 OPENALEX_PARAMS = {"mailto": CONTACT_MAIL} | ({"api_key": OPENALEX_API_KEY} if OPENALEX_API_KEY else {})
+# EPO Open Patent Services (patentler): ücretsiz kayıt, developers.epo.org → My Apps → Consumer Key/Secret
+EPO_KEY = os.getenv("EPO_KEY", "")
+EPO_SECRET = os.getenv("EPO_SECRET", "")
 
 
 def redact(text: str) -> str:
     """Kullanıcıya gösterilen hata metinlerinden (istek URL'leri) anahtarları siler."""
-    for secret in (OPENALEX_API_KEY, GEMINI_API_KEY):
+    for secret in (OPENALEX_API_KEY, GEMINI_API_KEY, EPO_KEY, EPO_SECRET):
         if secret:
             text = text.replace(secret, "***")
     return text

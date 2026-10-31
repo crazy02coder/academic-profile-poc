@@ -24,8 +24,9 @@ ACADEMIC_TITLES = [
     (r"doktor\s+[öo]ğretim\s+[üu]yesi", "Dr. Öğr. Üyesi"),
     (r"[öo]ğ?r(?:etim)?\.?\s*g[öo]r(?:evlisi)?\.?\s*dr\.?", "Öğr. Gör. Dr."),
     (r"[öo]ğ?r(?:etim)?\.?\s*g[öo]r(?:evlisi)?\.?", "Öğr. Gör."),
-    (r"ar[şs](?:t[ıi]rma)?\.?\s*g[öo]r(?:evlisi)?\.?\s*dr\.?", "Arş. Gör. Dr."),
-    (r"ar[şs](?:t[ıi]rma)?\.?\s*g[öo]r(?:evlisi)?\.?", "Arş. Gör."),
+    # "Arş. Gör." ve tam yazım "Araştırma Görevlisi"
+    (r"ar(?:a[şs]t[ıi]rma|[şs])\.?\s*g[öo]r(?:evlisi)?\.?\s*dr\.?", "Arş. Gör. Dr."),
+    (r"ar(?:a[şs]t[ıi]rma|[şs])\.?\s*g[öo]r(?:evlisi)?\.?", "Arş. Gör."),
     (r"profes[öo]r", "Prof. Dr."),
     (r"do[çc]ent", "Doç. Dr."),
     (r"prof(?:essor)?\.?(?:\s*dr\.?)?", "Prof. Dr."),

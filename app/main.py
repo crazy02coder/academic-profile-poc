@@ -30,7 +30,9 @@ from .dedup import resolve
 from .discover import llm_enrich, locate, registrable
 from .llm import LLM
 from .sources import crossref_works, openalex_works, orcid_works, scholar_works, yok_works
-from . import directory, firms, industry, library, trsources
+import httpx
+
+from . import directory, firms, industry, library, patents, trsources
 
 app = FastAPI(title="Akademik İz")
 logger = logging.getLogger(__name__)
@@ -194,10 +196,24 @@ async def pipeline(job: dict, data: JobIn):
         if result["industry"]:
             await log("verify", "done", f"Sanayi iş birlikleri: {len(result['industry'])} firma "
                                         f"({sum(e['official'] for e in result['industry'])} resmi Ar-Ge/Tasarım Merkezi).")
-        result["job_id"] = job["id"]
-        result["chat_id"] = history_store.create(job["id"], result)["id"]
+        result["input"] = {"url": data.url, "name": data.name}
+        prev = job.get("refresh")
+        if prev:  # yenileme: kayıt kimliği, sohbet geçmişi ve favori korunur
+            result["job_id"] = prev["job_id"]
+            result["chat_id"] = history_store.refresh(prev.get("chat_id") or "", prev["job_id"], result)["id"]
+            if prev["job_id"] in JOBS:
+                JOBS[prev["job_id"]]["result"] = result
+            KB_CACHE.pop(prev["job_id"], None)
+            y = prof.get("yok") or {}
+            library.update_person(prev["job_id"], {
+                "name": prof.get("name"), "title": prof.get("title"), "institution": prof.get("institution"),
+                "department": prof.get("department"), "photo": y.get("photo"), "email": y.get("email"),
+                "chat_id": result["chat_id"], "papers": result["unique_count"]})
+        else:
+            result["job_id"] = job["id"]
+            result["chat_id"] = history_store.create(job["id"], result)["id"]
         job["result"] = result
-        history_store.save_result(job["id"], result)
+        history_store.save_result(result["job_id"], result)
         _emit(job, {"type": "result", "data": result})
     except Exception as exc:  # noqa: BLE001
         _emit(job, {"type": "error", "message": f"İş tamamlanamadı: {type(exc).__name__}: {redact(str(exc))[:200]}"})
@@ -222,10 +238,32 @@ async def health():
 async def create_job(data: JobIn):
     if not data.url.startswith(("http://", "https://")):
         raise HTTPException(422, "Geçerli bir http(s) akademik kadro linki girin.")
+    return _start(data)
+
+
+@app.post("/api/jobs/{jid}/refresh", status_code=202)
+async def refresh_job(jid: str):
+    """Kayıtlı profili kaynaklardan baştan toplar (yeni yayınlar, eksik fotoğraf, güncellenen ayrıştırma kodu)."""
+    old = _result_for(jid)
+    if not old:
+        raise HTTPException(404, "Profil sonucu bulunamadı.")
+    running = next((j for j in JOBS.values() if (j.get("refresh") or {}).get("job_id") == jid and not j["done"]), None)
+    if running:
+        return {"id": running["id"], "steps": STEPS}
+    inp, prof = old.get("input") or {}, old["profile"]
+    url = next((u for u in (inp.get("url"), prof.get("source_url"), (old.get("recon") or {}).get("start_url"))
+                if isinstance(u, str) and u.startswith(("http://", "https://"))), "")
+    if not url:
+        raise HTTPException(422, "Bu kayıtta başlangıç bağlantısı yok; akademisyeni yeniden arayın.")
+    data = JobIn(url=url, name=inp.get("name") or prof.get("name") or prof.get("query_name") or "")
+    return _start(data, {"job_id": jid, "chat_id": old.get("chat_id")})
+
+
+def _start(data: JobIn, refresh: dict | None = None) -> dict:
     for jid in [k for k, v in JOBS.items() if v["done"] and time.time() - v["started"] > 3600]:
         JOBS.pop(jid, None)
     jid = uuid.uuid4().hex[:12]
-    job = {"id": jid, "events": [], "done": False, "started": time.time(), "result": None}
+    job = {"id": jid, "events": [], "done": False, "started": time.time(), "result": None, "refresh": refresh}
     JOBS[jid] = job
     job["task"] = asyncio.create_task(pipeline(job, data))
     return {"id": jid, "steps": STEPS}
@@ -263,6 +301,27 @@ async def analyze_job(jid: str):
         JOBS[jid]["result"] = result
     KB_CACHE.pop(jid, None)  # asistanın bilgi tabanı yeni analizle yeniden kurulsun
     return analysis
+
+
+@app.post("/api/jobs/{jid}/patents")
+async def patents_job(jid: str):
+    """Akademisyenin patentleri (EPO); sonuç profil kaydına yazılır. Anahtar yoksa {"enabled": false}."""
+    if not patents.enabled():
+        return {"enabled": False}
+    result = _result_for(jid)
+    if not result:
+        raise HTTPException(404, "Profil sonucu bulunamadı.")
+    prof = result["profile"]
+    places = [prof.get("institution")] + [c.get("place") for c in (prof.get("yok") or {}).get("career") or []]
+    try:
+        found = await patents.person_patents(prof.get("name") or "", places)
+    except patents.PatentError as exc:
+        raise HTTPException(503, str(exc)) from None
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"EPO'ya ulaşılamadı ({type(exc).__name__}).") from None
+    result["patents"], result["patents_v"] = found, patents.VERSION
+    history_store.save_result(jid, result)
+    return {"enabled": True, "patents": found, "patents_v": patents.VERSION}
 
 
 @app.get("/api/jobs/{jid}/events")
@@ -632,6 +691,17 @@ async def firm_detail(fid: str, refresh: bool = False):
         raise HTTPException(422, "Geçersiz firma kimliği.")
     d = await firms.firm_detail(fid, refresh)
     if not d:
+        raise HTTPException(404, "Firma resmi listede bulunamadı.")
+    return d
+
+
+@app.get("/api/firms/{fid}/patents")
+async def firm_patents(fid: str, refresh: bool = False):
+    """Firmanın başvuru sahibi olduğu patentler (EPO Open Patent Services)."""
+    if not re.fullmatch(r"[a-z0-9-]{1,80}", fid):
+        raise HTTPException(422, "Geçersiz firma kimliği.")
+    d = await firms.firm_patents(fid, refresh)
+    if d is None:
         raise HTTPException(404, "Firma resmi listede bulunamadı.")
     return d
 

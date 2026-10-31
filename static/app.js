@@ -410,12 +410,12 @@ function phaseOf(ev) {
   return { rea: "reverse", scrape: "scrape", crawl: "scrape", yok: "collect", publications: "collect", dedup: "merge", verify: "merge", analysis: "ai" }[ev.step] || "scrape";
 }
 
-async function startJob(url, name) {
+async function startJob(url, name, create) {
   let job;
-  try { job = await post("/api/jobs", { url, name }); } catch (e) { toast(esc(e.message)); return; }
+  try { job = await (create ? create() : post("/api/jobs", { url, name })); } catch (e) { toast(esc(e.message)); return; }
   const node = document.createElement("div");
   node.className = "card job enter";
-  node.innerHTML = `<div class="m-kicker"><span class="spinner"></span>Profil hazırlanıyor</div>
+  node.innerHTML = `<div class="m-kicker"><span class="spinner"></span>Profil ${create ? "yenileniyor" : "hazırlanıyor"}</div>
     <h2 style="margin-top:10px">${esc(name)}</h2><div class="job-sub">${esc(url)}</div>
     <div class="progress"><div></div></div>
     <div class="steps">${PHASES.map(([k, l]) => `<div class="step" data-phase="${k}" ${k === "bot" ? "hidden" : ""}><span class="dot"></span>${esc(l)}</div>`).join("")}</div>
@@ -456,8 +456,13 @@ async function startJob(url, name) {
     $(".progress div", node).style.width = "100%";
     $$(".step:not([hidden])", node).forEach((x) => { x.className = "step done"; $(".dot", x).textContent = "✓"; });
     loadChats();
-    if (location.hash === `#/is/${job.id}`) { S.result = r; S.chatId = r.chat_id; location.hash = `#/profil/${r.chat_id}`; }
-    else toast(`${icon("user")} <span><b>${esc(r.profile.name)}</b> profili hazır. <a href="#/profil/${esc(r.chat_id)}">Aç</a></span>`, 8000);
+    if (create) loadFav();
+    if (location.hash === `#/is/${job.id}`) { S.result = r; S.chatId = r.chat_id; location.hash = `#/profil/${r.chat_id}`; return; }
+    if (S.result?.chat_id === r.chat_id) {  // yenilenen profil o sırada açıksa yerinde güncellenir
+      S.result = r;
+      if (location.hash === `#/profil/${r.chat_id}`) renderProfile(r, null);
+    }
+    toast(`${icon("user")} <span><b>${esc(r.profile.name)}</b> profili hazır. <a href="#/profil/${esc(r.chat_id)}">Aç</a></span>`, 8000);
   }
   // Telefon ekranı kapanınca ya da tünel bağlantıyı kesince canlı akış kopar; iş sunucuda sürer.
   // Bu durumda sonuç hazır olana kadar birkaç saniyede bir sorulur (en fazla 10 dk).
@@ -592,9 +597,9 @@ function renderStaff() {
       <div class="p-main"><b>${esc(p.name)}</b><span>${esc(p.title || "")}</span></div>
       <div class="p-act">
         ${p.email ? `<a class="icon-btn" href="mailto:${esc(p.email)}" title="${esc(p.email)}">${icon("mail")}</a>` : ""}
-        ${safeUrl(p.url) ? `<a class="icon-btn" href="${esc(safeUrl(p.url))}" target="_blank" rel="noopener" title="Kurum sayfası">${icon("external")}</a>` : ""}
+        ${safeUrl(p.site_url || p.url) ? `<a class="icon-btn" href="${esc(safeUrl(p.site_url || p.url))}" target="_blank" rel="noopener" title="${p.source === "yok" && !p.site_url ? "YÖK Akademik" : "Kurum sayfası"}">${icon("external")}</a>` : ""}
         <button class="btn sm primary" data-profile="${i}" type="button">Profil</button></div></div>`).join("")}</div>
-    <div class="faint" style="padding:10px 12px">Kaynak: <a href="${esc(safeUrl(d.staff.page))}" target="_blank" rel="noopener">${esc((d.staff.page || "").replace(/^https?:\/\//, ""))}</a></div>`
+    <div class="faint" style="padding:10px 12px">Kaynak: ${d.staff.method === "yök" ? "YÖK Akademik kadrosu (ORCID'li) + " : ""}<a href="${esc(safeUrl(d.staff.page))}" target="_blank" rel="noopener">${esc((d.staff.page || "").replace(/^https?:\/\//, ""))}</a></div>`
     : `<div class="col-empty">Bu birimde akademisyen listesi bulunamadı.${safeUrl(d.staff.page) ? `<br><a href="${esc(safeUrl(d.staff.page))}" target="_blank" rel="noopener">Sayfayı aç</a>` : ""}</div>`;
   hydrateIcons($("#colStaff"));
 }
@@ -720,7 +725,8 @@ function renderProfile(r, chat) {
     ["courses", "Dersler", (sec.courses || []).length], ["theses", "Tezler", nTheses],
     ["more", "Projeler ve diğer", ["projects", "awards", "patents", "memberships", "art"].reduce((s, k) => s + (sec[k] || []).length, 0)],
     ["collab", "İş birlikleri", (y.collaborators || []).length + (r.industry || []).length],
-    ...(trProjects.length ? [["tubitak", "TÜBİTAK", trProjects.length]] : []), ["chat", "Asistan", ""],
+    ...(trProjects.length ? [["tubitak", "TÜBİTAK", trProjects.length]] : []), ["patents", "Patentler", patentCount(r.patents)],
+    ["chat", "Asistan", ""],
   ];
   const otherSections = [["projects", "Projeler", "briefcase"], ["awards", "Ödüller", "award"], ["patents", "Patentler", "file"],
     ["memberships", "Üyelikler", "users"], ["art", "Sanatsal faaliyetler", "sparkle"]];
@@ -743,6 +749,7 @@ function renderProfile(r, chat) {
         <div class="ph-actions">
           <button class="btn ${isFav ? "" : "primary"}" id="favPersonBtn" type="button">${icon("star")}${isFav ? "Favorilerde" : "Favorilere ekle"}</button>
           <button class="btn" data-tabgo="chat" type="button">${icon("message")}Asistana sor</button>
+          <button class="btn" id="refreshProfileBtn" type="button" title="Kaynaklardan baştan topla: yeni yayınlar, fotoğraf, güncel bilgiler. Sohbet ve favori korunur.">${icon("refresh")}Yenile</button>
         </div>
       </div>
       <div class="kpis">
@@ -755,7 +762,7 @@ function renderProfile(r, chat) {
       </div>
     </section>
 
-    <div class="tabs" role="tablist">${tabs.map(([k, l, n], i) => `<button class="tab ${i === 0 ? "active" : ""}" data-tab="${k}" type="button">${esc(l)}${n !== "" && n != null ? `<span class="n">${fmtNum(n)}</span>` : ""}</button>`).join("")}</div>
+    <div class="tabs" role="tablist">${tabs.map(([k, l, n], i) => `<button class="tab ${i === 0 ? "active" : ""}" data-tab="${k}" type="button" ${k === "patents" && !n ? "hidden" : ""}>${esc(l)}${n !== "" && n != null ? `<span class="n">${fmtNum(n)}</span>` : ""}</button>`).join("")}</div>
 
     <div class="panel active" data-panel="overview"><div class="stack">
       <div class="stack" id="analysisBox">${analysisHtml(a)}</div>
@@ -800,6 +807,7 @@ function renderProfile(r, chat) {
       : `<div class="card">${emptyState("users", "İş birliği bilgisi yok", "YÖK'te birlikte çalıştığı kişi kaydı bulunamadı ya da profil eski sürümle hazırlandı.")}</div>`}</div></div>
 
     <div class="panel" data-panel="tubitak"><div class="card card-pad" id="tubitakBox">${tubitakHtml(trProjects, r.industry)}</div></div>
+    <div class="panel" data-panel="patents"><div class="card card-pad" id="patentsBox">${r.patents ? personPatentsHtml(r.patents) : ""}</div></div>
 
     <div class="panel" data-panel="chat"><div class="card chat-wrap">
       <div class="thread" id="thread"><div class="msg bot">${avatar("İz", "")}<div class="bubble">Merhaba! <b>${esc(p.name)}</b> hakkında yayınlar, dersler, tezler, iş birlikleri ya da araştırma alanları üzerine soru sorabilirsiniz.
@@ -831,6 +839,7 @@ function renderProfile(r, chat) {
   };
   $("#pubFilter").oninput = drawPubs; $("#pubSort").onchange = drawPubs; drawPubs();
 
+  $("#refreshProfileBtn").onclick = () => startJob(p.source_url || "", p.name, () => post(`/api/jobs/${r.job_id}/refresh`, {}));
   $("#favPersonBtn").onclick = async () => {
     const btn = $("#favPersonBtn");
     try {
@@ -851,6 +860,7 @@ function renderProfile(r, chat) {
   }
   // eski profiller ya da değişen eşleştirme kuralı: kayıtlı veriden yeniden hesaplanır (dış istek yok)
   if (!r.industry || r.industry_v !== INDUSTRY_V) refreshIndustry(true);
+  if (r.patents_v !== PATENTS_V && !S.patentsOff) loadPatents();
   void root;
 }
 
@@ -883,6 +893,54 @@ function tubitakHtml(projects, industry) {
       ${firmsOf(x.title).map((f) => `<span class="chip teal">${icon("building")}${esc(f.name)}</span>`).join("")}
       <a class="chip" href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">TR Dizin ${icon("external")}</a></div>
       ${x.abstract ? `<details><summary>Proje özeti</summary><div class="abs">${esc(x.abstract)}</div></details>` : ""}</div>`).join("")}`;
+}
+
+// Patentler (EPO Open Patent Services). Anahtar (.env EPO_KEY/EPO_SECRET) yoksa sekme hiç görünmez.
+const PATENTS_V = 1;  // app/patents.py VERSION
+const patentCount = (d) => (d?.items?.length || 0) + (d?.possible?.length || 0);
+const UNI_RX = /[üu]n[iı]versit|university/i;
+function patentRow(x) {
+  return `<div class="thesis"><b>${esc(x.title)}</b>${x.title_en ? `<div class="faint">${esc(x.title_en)}</div>` : ""}
+    <div class="chips"><span class="chip">${esc(x.year || "?")}</span>
+      ${x.applicants.map((a) => `<span class="chip ${UNI_RX.test(a) ? "blue" : "teal"}">${icon(UNI_RX.test(a) ? "cap" : "building")}${esc(a)}</span>`).join("")}
+      ${(x.academics || []).map((a) => `<span class="chip gold">${icon("user")}${esc(a)}</span>`).join("")}
+      ${safeUrl(x.url) ? `<a class="chip" href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">${esc(x.numbers[0])} ${icon("external")}</a>` : ""}</div>
+    <div class="faint" style="margin-top:6px">Buluş sahipleri: ${esc(x.inventors.join(", ") || "—")}${x.numbers.length > 1 ? ` · diğer yayınları: ${esc(x.numbers.slice(1).join(", "))}` : ""}</div>
+    ${x.abstract ? `<details><summary>Özet</summary><div class="abs">${esc(x.abstract)}</div></details>` : ""}</div>`;
+}
+function personPatentsHtml(d) {
+  return `<div class="card-title">${icon("file")}Patentler<span class="spacer"></span><span class="count">${d.items.length}</span><span class="badge">EPO</span></div>
+    <p class="muted" style="margin:0 0 6px">Buluş sahibi olarak geçtiği patentler (Espacenet; TR, EP ve WO yayınları). Aynı buluşun farklı ülkelerdeki yayınları tek satırdadır.</p>
+    ${d.items.map(patentRow).join("") || (d.possible.length ? "" : `<p class="faint" style="margin:0">Patent bulunamadı.</p>`)}
+    ${d.possible.length ? `<details ${d.items.length ? "" : "open"} style="margin-top:10px"><summary class="faint" style="cursor:pointer">${d.possible.length} olası eşleşme: adı tutuyor ama başvuru sahibi kendi kurumu değil (aynı adlı başka biri olabilir)</summary>
+      ${d.possible.map(patentRow).join("")}</details>` : ""}`;
+}
+async function loadPatents() {
+  const r = S.result;
+  let d;
+  try { d = await post(`/api/jobs/${r.job_id}/patents`, {}); } catch { return; }  // EPO sınırı/ağ: sessizce sonra
+  if (!d.enabled) { S.patentsOff = true; return; }
+  r.patents = d.patents; r.patents_v = d.patents_v;
+  const box = $("#patentsBox"), tab = $(`.tab[data-tab="patents"]`);
+  if (S.result !== r || !box || !tab) return;
+  box.innerHTML = personPatentsHtml(d.patents); hydrateIcons(box);
+  const n = patentCount(d.patents);
+  tab.hidden = !n;
+  if ($(".n", tab)) $(".n", tab).textContent = fmtNum(n);
+}
+async function loadFirmPatents(fid, refresh) {
+  let d;
+  try { d = await api(`/api/firms/${encodeURIComponent(fid)}/patents${refresh ? "?refresh=1" : ""}`); } catch { return; }
+  const box = $("#firmPatentsBox"), tab = $(`.tab[data-tab="patents"]`);
+  if (!d.enabled || !box || !tab || !location.hash.startsWith(`#/firma/${fid}`)) return;
+  tab.hidden = !d.items.length && !d.error;
+  $("#patentsN").textContent = fmtNum(d.items.length);
+  box.innerHTML = `<div class="card-title">${icon("file")}Patentler<span class="spacer"></span><span class="count">${d.items.length}</span><span class="badge">EPO</span></div>
+    <p class="muted" style="margin:0 0 6px">Firmanın başvuru sahibi olduğu patentler (Espacenet; TR, EP ve WO). Mavi: ortak başvuru sahibi üniversite · sarı: buluş sahipleri arasında bu sayfadaki akademisyen.</p>
+    ${d.error ? `<div class="notice warn">${icon("info")}<div>${esc(d.error)}.</div></div>` : ""}
+    ${d.total > 200 ? `<p class="faint" style="margin:0 0 6px">EPO'da ${fmtNum(d.total)} yayın var; ilk 200 yayın gösteriliyor.</p>` : ""}
+    ${d.items.map(patentRow).join("")}`;
+  hydrateIcons(box);
 }
 
 async function refreshIndustry(quiet) {
@@ -1163,7 +1221,9 @@ async function viewFirm(fid, refresh = false) {
       <div class="stat"><b>${fmtNum(d.papers)}</b><span>ortak yayın ve proje</span></div>
       <div class="stat"><b>${Object.entries(d.by_source).map(([k, v]) => `${esc(k)} ${v}`).join(" · ") || "—"}</b><span>kaynak · ${esc(d.updated)}</span></div></div>
     <div class="tabs" role="tablist"><button class="tab active" data-tab="people" type="button">Akademisyenler<span class="n">${fmtNum(people.length)}</span></button>
-      <button class="tab" data-tab="tubitak" type="button">TÜBİTAK<span class="n" id="tubitakN">${fmtNum(d.ardeb.length)}</span></button></div>
+      <button class="tab" data-tab="tubitak" type="button">TÜBİTAK<span class="n" id="tubitakN">${fmtNum(d.ardeb.length)}</span></button>
+      <button class="tab" data-tab="patents" type="button" hidden>Patentler<span class="n" id="patentsN">0</span></button></div>
+    <div class="panel" data-panel="patents"><div class="card card-pad" id="firmPatentsBox"></div></div>
     <div class="panel" data-panel="tubitak"><div class="stack">
       <div class="card card-pad" id="teydebBox"><div class="card-title">${icon("briefcase")}TÜBİTAK TEYDEB projeleri</div>
         <div class="loading-line"><span class="spinner"></span>PRODİS'ten firmanın tamamlanmış sanayi Ar-Ge projeleri alınıyor (site yavaş, ~30 sn)…</div></div>
@@ -1191,6 +1251,7 @@ async function viewFirm(fid, refresh = false) {
         "Açık kaynaklarda bu firmayla ortak yayını olan akademisyen yok ya da firma yayınlarda farklı adla geçiyor. Gizli sözleşmeler ve yayına dönüşmeyen işler görünmez.")}</div>`}</div>`);
   $("#firmRefresh").onclick = () => viewFirm(fid, true);
   loadTeydeb(fid, refresh, d.ardeb.length);
+  loadFirmPatents(fid, refresh);
   const pq = $("#firmPeopleQ");
   if (pq) pq.oninput = () => { const q = fold(pq.value); $$("#firmPeople > [data-fold]").forEach((n) => { n.hidden = !!q && !n.dataset.fold.includes(q); }); };
 }
