@@ -8,9 +8,9 @@ import json
 import time
 import uuid
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -704,6 +704,53 @@ async def firm_patents(fid: str, refresh: bool = False):
     if d is None:
         raise HTTPException(404, "Firma resmi listede bulunamadı.")
     return d
+
+
+@app.get("/api/patents/description")
+async def patent_description(n: list[str] = Query(default=[])):
+    """Bir patent ailesinin açıklama metni (EP/WO tam metni); yayın numaraları: "WO2017030512 A1"."""
+    numbers = [x for x in n[:12] if re.fullmatch(r"[A-Z]{2}\d{4,14} ?[A-Z]\d?", x)]
+    if not numbers:
+        raise HTTPException(422, "Geçersiz patent numarası.")
+    if not patents.enabled():
+        raise HTTPException(503, "EPO anahtarı tanımlı değil.")
+    try:
+        return await patents.description(numbers)
+    except patents.PatentError as exc:
+        raise HTTPException(503, str(exc)) from None
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"EPO'ya ulaşılamadı ({type(exc).__name__}).") from None
+
+
+@app.get("/api/patents/document")
+async def patent_document(n: list[str] = Query(default=[])):
+    """Patent ailesinin özgün belgesi (taranmış sayfa sayısı); sayfalar /api/patents/page/… ile gelir."""
+    numbers = [x for x in n[:12] if re.fullmatch(r"[A-Z]{2}\d{4,14} ?[A-Z]\d?", x)]
+    if not numbers:
+        raise HTTPException(422, "Geçersiz patent numarası.")
+    if not patents.enabled():
+        raise HTTPException(503, "EPO anahtarı tanımlı değil.")
+    try:
+        return await patents.document(numbers)
+    except patents.PatentError as exc:
+        raise HTTPException(503, str(exc)) from None
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"EPO'ya ulaşılamadı ({type(exc).__name__}).") from None
+
+
+@app.get("/api/patents/page/{pub}/{n}.png")
+async def patent_page(pub: str, n: int):
+    if not re.fullmatch(r"[A-Z]{2}\d{4,14}[A-Z]\d?", pub) or not 1 <= n <= 500:
+        raise HTTPException(422, "Geçersiz sayfa.")
+    if not patents.enabled():
+        raise HTTPException(503, "EPO anahtarı tanımlı değil.")
+    try:
+        png = await patents.page(pub, n)
+    except patents.PatentError as exc:
+        raise HTTPException(404 if "bulunamadı" in str(exc) else 503, str(exc)) from None
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"EPO'ya ulaşılamadı ({type(exc).__name__}).") from None
+    return Response(png, media_type="image/png", headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.get("/api/firms/{fid}/teydeb")

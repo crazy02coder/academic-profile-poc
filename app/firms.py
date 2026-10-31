@@ -354,7 +354,7 @@ async def firm_patents(fid: str, refresh: bool = False) -> dict | None:
     if not patents.enabled():
         return {"enabled": False, "items": [], "total": 0, "error": ""}
     cached = None if refresh else _cached(fid, "patents")
-    if cached:
+    if cached and cached.get("pv") == patents.VERSION:
         return {"enabled": True, "items": cached["items"], "total": cached["total"], "error": ""}
     detail = _cached(fid) or {}
     academics = sorted({r["name"] for r in detail.get("rows", [])} | {p["name"] for p in _profile_links().get(g["name"], [])})
@@ -365,7 +365,7 @@ async def firm_patents(fid: str, refresh: bool = False) -> dict | None:
     except httpx.HTTPError as exc:
         return {"enabled": True, "items": [], "total": 0, "error": f"EPO'ya ulaşılamadı ({type(exc).__name__})"}
     FIRMS_DIR.mkdir(parents=True, exist_ok=True)
-    _path(fid, "patents").write_text(json.dumps({"v": CACHE_V, "ts": time.time(), **d}, ensure_ascii=False))
+    _path(fid, "patents").write_text(json.dumps({"v": CACHE_V, "pv": patents.VERSION, "ts": time.time(), **d}, ensure_ascii=False))
     return {"enabled": True, **d, "error": ""}
 
 

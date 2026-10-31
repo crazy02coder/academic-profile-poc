@@ -896,18 +896,59 @@ function tubitakHtml(projects, industry) {
 }
 
 // Patentler (EPO Open Patent Services). Anahtar (.env EPO_KEY/EPO_SECRET) yoksa sekme hiç görünmez.
-const PATENTS_V = 1;  // app/patents.py VERSION
+const PATENTS_V = 2;  // app/patents.py VERSION
 const patentCount = (d) => (d?.items?.length || 0) + (d?.possible?.length || 0);
 const UNI_RX = /[üu]n[iı]versit|university/i;
+const PAT = [];  // modalda açılacak patentler (data-patent dizini)
 function patentRow(x) {
-  return `<div class="thesis"><b>${esc(x.title)}</b>${x.title_en ? `<div class="faint">${esc(x.title_en)}</div>` : ""}
+  PAT.push(x);
+  return `<div class="thesis"><b><a href="#" data-patent="${PAT.length - 1}" title="Özgün belgeyi aç">${esc(x.title)}</a></b>${x.title_en ? `<div class="faint">${esc(x.title_en)}</div>` : ""}
     <div class="chips"><span class="chip">${esc(x.year || "?")}</span>
       ${x.applicants.map((a) => `<span class="chip ${UNI_RX.test(a) ? "blue" : "teal"}">${icon(UNI_RX.test(a) ? "cap" : "building")}${esc(a)}</span>`).join("")}
       ${(x.academics || []).map((a) => `<span class="chip gold">${icon("user")}${esc(a)}</span>`).join("")}
       ${safeUrl(x.url) ? `<a class="chip" href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">${esc(x.numbers[0])} ${icon("external")}</a>` : ""}</div>
     <div class="faint" style="margin-top:6px">Buluş sahipleri: ${esc(x.inventors.join(", ") || "—")}${x.numbers.length > 1 ? ` · diğer yayınları: ${esc(x.numbers.slice(1).join(", "))}` : ""}</div>
-    ${x.abstract ? `<details><summary>Özet</summary><div class="abs">${esc(x.abstract)}</div></details>` : ""}</div>`;
+    ${x.abstract || hasFulltext(x) ? `<details class="pat-text" data-pnums="${esc(x.numbers.join("|"))}"><summary>${hasFulltext(x) ? "Özet ve açıklama" : "Özet"}</summary>
+      ${x.abstract ? `<div class="abs">${esc(x.abstract)}</div>` : ""}${hasFulltext(x) ? `<div class="pat-desc"></div>` : ""}</details>` : ""}</div>`;
 }
+// Patent modalı: künye, özet ve özgün belgenin taranmış sayfaları (EPO; sayfalar kaydırdıkça yüklenir).
+async function openPatent(x) {
+  openModal(`<div class="pat-modal"><h2 style="padding-right:44px">${esc(x.title)}</h2>${x.title_en ? `<div class="faint">${esc(x.title_en)}</div>` : ""}
+    <div class="chips" style="margin:12px 0 8px"><span class="chip">${esc(x.year || "?")}</span>${x.numbers.map((n) => `<span class="chip">${esc(n)}</span>`).join("")}
+      ${x.applicants.map((a) => `<span class="chip ${UNI_RX.test(a) ? "blue" : "teal"}">${icon(UNI_RX.test(a) ? "cap" : "building")}${esc(a)}</span>`).join("")}
+      ${safeUrl(x.url) ? `<a class="chip" href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">Espacenet ${icon("external")}</a>` : ""}</div>
+    <div class="faint">Buluş sahipleri: ${esc(x.inventors.join(", ") || "—")}</div>
+    ${x.abstract ? `<div class="group-title" style="margin-top:16px">Özet</div><div class="abs">${esc(x.abstract)}</div>` : ""}
+    <div class="group-title" style="margin-top:18px">Özgün belge</div>
+    <div id="patPages"><div class="loading-line"><span class="spinner"></span>Belge EPO'dan alınıyor…</div></div></div>`);
+  let d;
+  try { d = await api(`/api/patents/document?${x.numbers.map((n) => `n=${encodeURIComponent(n)}`).join("&")}`); }
+  catch (err) { d = { pages: 0, error: err.message }; }
+  const box = $("#patPages");
+  if (!box || $("#modal").hidden) return;
+  box.innerHTML = d.pages ? `<div class="faint">${esc(d.source)} · ${d.pages} sayfa</div>
+    ${Array.from({ length: d.pages }, (_, i) => `<img class="pat-page" loading="lazy" alt="Sayfa ${i + 1}" src="/api/patents/page/${encodeURIComponent(d.source)}/${i + 1}.png">`).join("")}`
+    : `<p class="faint">${esc(d.error || "Bu patentin taranmış belgesi EPO'da yok.")}</p>`;
+}
+
+// Açıklama (tam metin) yalnız EP/WO yayınlarında var; detay açılınca istenir, sunucuda süresiz saklanır.
+const hasFulltext = (x) => x.numbers.some((n) => /^(EP|WO)/.test(n));
+document.addEventListener("toggle", async (e) => {
+  const det = e.target;
+  if (!det.matches?.("details.pat-text") || !det.open || det.dataset.loaded) return;
+  const box = $(".pat-desc", det);
+  if (!box) return;
+  det.dataset.loaded = "1";
+  box.innerHTML = `<div class="loading-line"><span class="spinner"></span>Açıklama EPO'dan alınıyor…</div>`;
+  try {
+    const q = det.dataset.pnums.split("|").map((n) => `n=${encodeURIComponent(n)}`).join("&");
+    const d = await api(`/api/patents/description?${q}`);
+    const text = d.text.length > 12000 ? `${d.text.slice(0, 12000)}…` : d.text;
+    box.innerHTML = d.text ? `<div class="group-title" style="margin-top:12px">Açıklama · ${esc(d.source)}${d.lang && d.lang !== "tr" ? ` (${esc(d.lang.toUpperCase())})` : ""}</div><div class="abs">${esc(text)}</div>
+      ${d.text.length > 12000 ? `<div class="faint" style="margin-top:6px">Metnin devamı Espacenet'te.</div>` : ""}`
+      : `<div class="faint" style="margin-top:10px">Bu patentin açıklama metni EPO'da yok.</div>`;
+  } catch (err) { delete det.dataset.loaded; box.innerHTML = `<div class="faint" style="margin-top:10px">${esc(err.message)}</div>`; }
+}, true);
 function personPatentsHtml(d) {
   return `<div class="card-title">${icon("file")}Patentler<span class="spacer"></span><span class="count">${d.items.length}</span><span class="badge">EPO</span></div>
     <p class="muted" style="margin:0 0 6px">Buluş sahibi olarak geçtiği patentler (Espacenet; TR, EP ve WO yayınları). Aynı buluşun farklı ülkelerdeki yayınları tek satırdadır.</p>
@@ -1319,6 +1360,8 @@ document.addEventListener("click", async (e) => {
   const t = e.target;
   const open = t.closest("[data-open]");
   if (open) { e.preventDefault(); openPaper(open.dataset.open); return; }
+  const pat = t.closest("[data-patent]");
+  if (pat) { e.preventDefault(); openPatent(PAT[+pat.dataset.patent]); return; }
   const star = t.closest("[data-star]");
   if (star) { toggleStar(star); return; }
   const del = t.closest("[data-delchat]");

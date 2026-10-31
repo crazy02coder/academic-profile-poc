@@ -6,3 +6,4 @@ scrapling[fetchers,rag]>=0.4.15,<0.5
 langdetect==1.0.9
 rapidfuzz>=3.9,<4
 ddgs>=9.0
+pillow>=10  # patent belgelerinin taranmış (TIFF) sayfalarını PNG'ye çevirir

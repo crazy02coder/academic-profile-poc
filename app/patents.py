@@ -10,18 +10,26 @@ Firma: başvuru sahibi adıyla aranır.
 """
 from __future__ import annotations
 
+import asyncio
+import io
+import json
 import re
 import time
 
 import httpx
 
 from . import yokdir
-from .config import EPO_KEY, EPO_SECRET
+from .config import EPO_KEY, EPO_SECRET, ROOT
 from .text import fold, lower_tr, name_score, name_tokens, strip_titles
 
 OPS = "https://ops.epo.org/3.2"
-VERSION = 1  # sonuç biçimi: değişince kayıtlı profillerin patentleri yeniden alınır
+VERSION = 2  # sonuç biçimi: değişince kayıtlı profillerin patentleri yeniden alınır
+TEXT_DIR = ROOT / "data" / "patents"  # açıklama metinleri (yayımlanmış belge değişmez: süresiz önbellek)
+FULLTEXT = ("EP", "WO")  # OPS tam metni (açıklama) yalnız bu yayınlarda var; TR'de yalnız özet
+PAGES_DIR = TEXT_DIR / "pages"  # özgün belgenin taranmış sayfaları (PNG)
+DOC_ORDER = ("TR", "WO", "EP")  # özgün belge önce Türkçe yayından
 _TOKEN = {"value": "", "exp": 0.0}
+UNI_WORDS = {"universitesi", "university", "univ", "universite"}  # EPODOC "ÜNİVERSİTESİ"ni "UNIV" diye kısaltır
 
 
 class PatentError(Exception):
@@ -106,7 +114,8 @@ def _doc(d: dict) -> dict:
     number = f"{d.get('@country') or _t(docdb.get('country'))}{d.get('@doc-number') or _t(docdb.get('doc-number'))}"
     kind = d.get("@kind") or _t(docdb.get("kind"))
     titles = {t.get("@lang", ""): _t(t) for t in _list(b.get("invention-title")) if _t(t)}
-    abstracts = {a.get("@lang", ""): " ".join(_t(p) for p in _list(a.get("p"))) for a in _list(b.get("abstract"))}
+    abstracts = {("tr" if a.get("@lang") == "ol" else a.get("@lang", "")): " ".join(_t(p) for p in _list(a.get("p")))
+                 for a in _list(d.get("abstract") or b.get("abstract"))}
     parties = b.get("parties") or {}
     return {"family": d.get("@family-id") or number, "number": number, "kind": kind, "date": _t(docdb.get("date")),
             "titles": titles, "abstracts": {k: v for k, v in abstracts.items() if v},
@@ -161,14 +170,14 @@ async def _universities() -> list[tuple[str, set]]:
             unis = await yokdir.universities(client)
     except httpx.HTTPError:
         return []
-    return [(u["name"], set(_norm(u["name"]).split()) - {"universitesi", "university"}) for u in unis]
+    return [(u["name"], set(_norm(u["name"]).split()) - UNI_WORDS) for u in unis]
 
 
 def _university_of(text: str, unis: list[tuple[str, set]]) -> str | None:
     """Metindeki üniversite: kelimeleri metinde bulunan en uzun ad ("Ankara Bilim", "Ankara"dan önce gelir).
     Kirli kurum adlarında da çalışır ("Social Media OSTİM Teknik Üniversitesi")."""
     words = set(_norm(text).split())
-    if "universitesi" not in words and "university" not in words:
+    if not words & UNI_WORDS:
         return None
     best = max((u for u in unis if u[1] and u[1] <= words), key=lambda u: len(u[1]), default=None)
     return best[0] if best else None
@@ -234,3 +243,111 @@ async def firm_patents(names: list[str], academics: list[str]) -> dict:
                 found = sorted({a for a in academics for inv in f["_inventors"] if same_person(a, inv)})
                 out.append(_public(f) | {"academics": found})
     return {"items": sorted(out, key=lambda f: f["year"], reverse=True), "total": total}
+
+
+# ------------------------------------------------------------------ açıklama (isteğe bağlı, tek patent)
+async def description(numbers: list[str]) -> dict:
+    """Patent ailesinin açıklama metni: EP/WO yayınından (OPS tam metin). TR yayınlarında tam metin yoktur.
+    Yalnız kullanıcı açınca istenir; sonuç süresiz saklanır."""
+    pubs = [n.replace(" ", "") for n in numbers]
+    for pub in sorted(pubs, key=lambda n: (n[:2] not in FULLTEXT, n[:2] != "WO")):
+        if pub[:2] not in FULLTEXT:
+            break
+        m = re.fullmatch(r"([A-Z]{2})(\d+)([A-Z]\d?)", pub)
+        if not m:
+            continue
+        path = TEXT_DIR / f"{pub}.json"
+        if path.exists():
+            return json.loads(path.read_text())
+        async with _client() as client:
+            r = await client.get(f"{OPS}/rest-services/published-data/publication/docdb/{'.'.join(m.groups())}/description",
+                                 headers={"Authorization": f"Bearer {await _token(client)}", "Accept": "application/json"})
+        if r.status_code == 404:
+            continue
+        if r.status_code in (403, 429):
+            raise PatentError("EPO istek sınırı doldu; biraz sonra tekrar deneyin")
+        r.raise_for_status()
+        doc = (r.json()["ops:world-patent-data"].get("ftxt:fulltext-documents") or {}).get("ftxt:fulltext-document") or {}
+        desc = _list(doc.get("description"))[0] if doc.get("description") else {}
+        out = {"text": "\n".join(_t(p) for p in _list(desc.get("p")) if _t(p)), "lang": desc.get("@lang", "").lower(),
+               "source": pub}
+        TEXT_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(out, ensure_ascii=False))
+        return out
+    return {"text": "", "lang": "", "source": ""}
+
+
+# ------------------------------------------------------------------ özgün belge (taranmış sayfalar)
+def _pub_parts(pub: str) -> tuple[str, str, str] | None:
+    m = re.fullmatch(r"([A-Z]{2})(\d{4,14})([A-Z]\d?)", pub.replace(" ", ""))
+    return m.groups() if m else None
+
+
+def _headers(token: str, accept: str) -> dict:
+    return {"Authorization": f"Bearer {token}", "Accept": accept}
+
+
+async def document(numbers: list[str]) -> dict:
+    """Ailenin özgün belgesi: {"source": yayın no, "pages": sayfa sayısı}; önce TR, sonra WO/EP. Yoksa pages 0."""
+    pubs = sorted({n.replace(" ", "") for n in numbers},
+                  key=lambda n: DOC_ORDER.index(n[:2]) if n[:2] in DOC_ORDER else len(DOC_ORDER))
+    async with _client() as client:
+        for pub in pubs[:4]:
+            parts = _pub_parts(pub)
+            if not parts:
+                continue
+            path = TEXT_DIR / f"{pub}.doc.json"
+            if path.exists():
+                info = json.loads(path.read_text())
+            else:
+                r = await client.get(f"{OPS}/rest-services/published-data/publication/docdb/{'.'.join(parts)}/images",
+                                     headers=_headers(await _token(client), "application/json"))
+                if r.status_code in (403, 429):
+                    raise PatentError("EPO istek sınırı doldu; biraz sonra tekrar deneyin")
+                pages = 0
+                if r.status_code == 200:
+                    inquiry = r.json()["ops:world-patent-data"]["ops:document-inquiry"]
+                    full = next((i for res in _list(inquiry.get("ops:inquiry-result"))
+                                 for i in _list(res.get("ops:document-instance")) if i.get("@desc") == "FullDocument"), None)
+                    pages = int((full or {}).get("@number-of-pages") or 0)
+                elif r.status_code != 404:
+                    r.raise_for_status()
+                info = {"source": pub, "pages": pages}
+                TEXT_DIR.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(info))
+            if info["pages"]:
+                return info
+    return {"source": "", "pages": 0}
+
+
+def _png(tiff: bytes) -> bytes:
+    """Faks (CCITT) TIFF sayfa → ekrana uygun gri tonlu PNG (1240 px genişlik)."""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(tiff)).convert("L")
+    img = img.resize((1240, round(img.height * 1240 / img.width)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+
+async def page(pub: str, n: int) -> bytes:
+    """Özgün belgenin n. sayfası (PNG); süresiz saklanır."""
+    parts = _pub_parts(pub)
+    if not parts:
+        raise PatentError("Geçersiz yayın numarası")
+    path = PAGES_DIR / f"{''.join(parts)}-{n}.png"
+    if path.exists():
+        return path.read_bytes()
+    async with _client() as client:
+        r = await client.get(f"{OPS}/rest-services/published-data/images/{'/'.join(parts)}/fullimage.tiff",
+                             params={"Range": str(n)}, headers=_headers(await _token(client), "image/tiff"))
+    if r.status_code == 404:
+        raise PatentError("Sayfa bulunamadı")
+    if r.status_code in (403, 429):
+        raise PatentError("EPO istek sınırı doldu; biraz sonra tekrar deneyin")
+    r.raise_for_status()
+    png = await asyncio.to_thread(_png, r.content)
+    PAGES_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png)
+    return png
