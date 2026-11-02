@@ -1,8 +1,8 @@
 # Akademik İz
 
-**Kurum sitesinden akademisyen araştırma profili çıkaran, kanıta dayalı bir asistan.**
+**Türkiye'deki akademisyenlerin kanıta dayalı araştırma profilini çıkaran asistan.**
 
-Bir akademik kadro linki ve akademisyen adı verirsin. Sistem kişiyi sitede bulur, yayınlarını açık kaynaklardan toplar, birleştirir, doğrular ve Gemini ile kaynak gösteren bir araştırma profili çıkarır. Sonra o kişi hakkında soru sorabilirsin.
+Akademisyenin adını yazarsın, YÖK'te bulunanlardan doğru kişiyi seçersin; ya da üniversite → fakülte → bölüm ağacından gidersin. Kurum sitesi otomatik bulunur, bulunamazsa profil YÖK ve açık kaynaklardan hazırlanır. YÖK'te olmayan biri için kadro linkiyle de başlatılabilir. Sistem yayınlarını açık kaynaklardan toplar, birleştirir, doğrular ve Gemini ile kaynak gösteren bir araştırma profili çıkarır. Sonra o kişi hakkında soru sorabilirsin.
 
 Tarama ve veri toplama senin bilgisayarında çalışır. Dil modeli olarak Gemini API'nin ücretsiz katmanı kullanılır; ücretli servis gerekmez.
 
@@ -57,7 +57,7 @@ OpenAlex anahtarsız da çalışır ama IP başına günlük ortak bütçe (~100
 ## Nasıl çalışır
 
 ```
- kadro linki + ad
+ ad (YÖK'ten seçilir) ya da kadro linki + ad
         │
         ▼
  ┌──────────────┐   arama motoru (site:) ─┐

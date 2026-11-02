@@ -1,10 +1,14 @@
-// Akademik İz — kurumsal arayüz (bağımlılıksız). Görünümler hash yönlendirmesiyle açılır:
-//   #/                      Keşfet (üniversite linki + isteğe bağlı akademisyen adı)
-//   #/kurum?u=<url>         Fakülte → bölüm → akademisyen dizini
-//   #/profil/<sohbet-id>    Akademisyen profili (YÖK + yayınlar + asistan)
-//   #/is/<iş-id>            Profil çıkarılırken canlı ilerleme
-//   #/ara?q=<konu>          Konu araması
-//   #/favori-makaleler, #/favori-akademisyenler, #/universiteler, #/firmalar, #/firma/<id>
+// Akademik İz — arayüz (bağımlılıksız). Görünümler hash yönlendirmesiyle açılır:
+//   #/                      Ana sayfa (tek arama kutusu)
+//   #/akademisyenler?q=     YÖK'te ad araması + incelenen profiller
+//   #/universiteler         YÖK'teki tüm üniversiteler
+//   #/universite/<id>       Fakülte → bölüm → akademisyen (YÖK kurum dizini)
+//   #/kurum?u=<url>         Kurum sitesinden okunan dizin (Scrapling + Gemini)
+//   #/firmalar, #/firma/<id>
+//   #/ara?q=<konu>          Konular
+//   #/kutuphane             Favori makaleler ve akademisyenler
+//   #/sistem                Servis durumu, REA site tarifleri
+//   #/profil/<sohbet-id>    Akademisyen profili; #/is/<iş-id> profil hazırlanırken canlı ilerleme
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -18,6 +22,10 @@ const fmtNum = (n) => (n == null ? "—" : Number(n).toLocaleString("tr-TR"));
 
 // ------------------------------------------------------------------- simgeler
 const ICONS = {
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+  home: '<path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v10h13V10"/><path d="M10 20v-6h4v6"/>',
+  arrow: '<line x1="5" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/>',
   compass: '<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
   search: '<circle cx="11" cy="11" r="7.5"/><line x1="21" y1="21" x2="16.6" y2="16.6"/>',
   building: '<path d="M3 21h18"/><path d="M5 21V10l7-5 7 5v11"/><path d="M9 21v-6h6v6"/><path d="M9 11h.01M15 11h.01"/>',
@@ -59,7 +67,9 @@ const S = {
   fav: { papers: [], people: [] }, chats: [],
   result: null, jobId: null, chatId: null, chatRequest: null, paperRequest: null,
   jobs: {},            // iş id → { node, es, name, done }
-  dir: null,           // kurum dizini durumu
+  dir: null,           // kurum sitesi dizini durumu
+  uni: null,           // YÖK üniversite dizini durumu
+  candidates: [],      // YÖK ad aramasında bulunan kişiler
   registry: new Map(), // ekrandaki yayınlar: id → { paper, source }
   lists: {},           // dışa aktarılabilir listeler
   listMeta: {},        // liste → { file: dosya adı kökü, person, title } (dışa aktarmada akademisyen adı)
@@ -73,15 +83,101 @@ function setView(html, cls = "") {
   const v = view();
   v.innerHTML = `<div class="enter ${cls}">${html}</div>`;
   hydrateIcons(v);
+  animateCounts(v);
   v.scrollTop = 0;
   return v.firstElementChild;
+}
+
+// ------------------------------------------------------------------- hareket
+const calmMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+const EASE = "cubic-bezier(.2,.7,.2,1)";
+// Sayılar sıfırdan yukarı sayar: count(n) ile yazılan her öğe için.
+const count = (n) => `<span data-count="${Number(n) || 0}">${fmtNum(n)}</span>`;
+function animateCounts(root = document) {
+  if (calmMotion()) return;
+  $$("[data-count]", root).forEach((el) => {
+    const end = +el.dataset.count;
+    delete el.dataset.count;
+    if (end < 2) return;
+    const start = performance.now(), ms = Math.min(1100, 450 + end * 4);
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / ms);
+      el.textContent = fmtNum(Math.round(end * (1 - (1 - t) ** 3)));
+      if (t < 1) requestAnimationFrame(tick);
+    };
+    el.textContent = "0";
+    requestAnimationFrame(tick);
+  });
+}
+// Sekme değişimi: alt çizgi eski sekmeden yeni sekmeye kayar, içerik gidiş yönünden gelir.
+function switchTab(tab) {
+  const tabs = $$(".tab", tab.parentElement), prev = tabs.find((x) => x.classList.contains("active"));
+  if (prev === tab) return;
+  const from = prev?.getBoundingClientRect(), to = tab.getBoundingClientRect();
+  const dir = tabs.indexOf(tab) > tabs.indexOf(prev) ? 1 : -1;
+  tabs.forEach((x) => x.classList.toggle("active", x === tab));
+  $$(".panel").forEach((x) => {
+    const on = x.dataset.panel === tab.dataset.tab;
+    x.classList.toggle("active", on);
+    if (on) x.style.setProperty("--dir", dir);
+  });
+  if (from && !calmMotion()) {
+    tab.animate({ transform: [`translateX(${from.left - to.left}px) scaleX(${from.width / to.width})`, "none"] },
+      { duration: 340, easing: EASE, pseudoElement: "::after" });
+  }
+}
+// Arama kutusunda yazılıp silinen örnekler; kutu odaklanınca ya da sayfa değişince durur.
+function typePlaceholder(input, phrases) {
+  input.placeholder = phrases[0];
+  if (calmMotion()) return;
+  let i = 0, n = phrases[0].length, back = true, wait = 26;
+  const tick = () => {
+    if (!input.isConnected || document.activeElement === input || input.value) { if (input.isConnected) setTimeout(tick, 600); return; }
+    if (wait > 0) { wait -= 1; setTimeout(tick, 60); return; }
+    n += back ? -1 : 1;
+    input.placeholder = phrases[i].slice(0, Math.max(0, n)) || " ";
+    if (back && n <= 0) { back = false; i = (i + 1) % phrases.length; n = 0; }
+    else if (!back && n >= phrases[i].length) { back = true; wait = 26; }
+    setTimeout(tick, back ? 26 : 52);
+  };
+  setTimeout(tick, 600);
+}
+
+// ------------------------------------------------------------------- tema (açık / koyu)
+const storedTheme = () => { try { return localStorage.getItem("theme"); } catch { return null; } };
+function applyTheme(next) {
+  document.documentElement.dataset.theme = next;
+  $('meta[name="theme-color"]')?.setAttribute("content", next === "dark" ? "#000000" : "#ffffff");
+  const btn = $("#themeBtn");
+  if (btn) { btn.title = next === "dark" ? "Açık temaya geç" : "Koyu temaya geç"; btn.setAttribute("aria-label", btn.title); }
+}
+// Yeni tema tıklanan noktadan dairesel açılır; desteklemeyen tarayıcıda renkler yumuşakça geçer.
+function toggleTheme(ev) {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try { localStorage.setItem("theme", next); } catch { /* tercih bu oturumla sınırlı kalır */ }
+  if (calmMotion()) { applyTheme(next); return; }
+  if (!document.startViewTransition) {
+    document.documentElement.classList.add("theme-fade");
+    applyTheme(next);
+    setTimeout(() => document.documentElement.classList.remove("theme-fade"), 360);
+    return;
+  }
+  const x = ev.clientX, y = ev.clientY, r = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
+  const vt = document.startViewTransition(() => applyTheme(next));
+  vt.ready.then(() => document.documentElement.animate({ clipPath: [`circle(0px at ${x}px ${y}px)`, `circle(${r}px at ${x}px ${y}px)`] },
+    { duration: 560, easing: EASE, pseudoElement: "::view-transition-new(root)" })).catch(() => {});
 }
 function setCrumbs(items) {
   $("#crumbs").innerHTML = items.map((c, i) => (i === items.length - 1 ? `<b>${esc(c.label)}</b>`
     : `<a href="${esc(c.href)}">${esc(c.label)}</a>${icon("chevron")}`)).join("");
 }
 function setNav(key) {
-  $$(".nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === key));
+  let active = null;
+  $$("[data-nav]").forEach((a) => { const on = a.dataset.nav === key; a.classList.toggle("active", on); if (on) active = a; });
+  const pill = $("#navPill");
+  if (active?.closest("#nav")) {
+    pill.style.opacity = 1; pill.style.height = `${active.offsetHeight}px`; pill.style.transform = `translateY(${active.offsetTop}px)`;
+  } else pill.style.opacity = 0;
   $("#app").classList.remove("menu-open");
 }
 
@@ -92,13 +188,18 @@ function toast(html, ms = 4200) {
   setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 320); }, ms);
 }
 
+let busyN = 0;
+function busy(d) { busyN += d; document.body.classList.toggle("is-busy", busyN > 0); }
 async function api(url, opts = {}) {
-  const res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(typeof err.detail === "string" ? err.detail : `İstek başarısız (HTTP ${res.status}).`);
-  }
-  return res.json();
+  busy(1);
+  try {
+    const res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(typeof err.detail === "string" ? err.detail : `İstek başarısız (HTTP ${res.status}).`);
+    }
+    return await res.json();
+  } finally { busy(-1); }
 }
 const post = (url, body) => api(url, { method: "POST", body: JSON.stringify(body) });
 
@@ -106,8 +207,9 @@ const skeleton = (n = 5) => Array.from({ length: n }, () => `<div class="skel-ro
 const emptyState = (ic, title, text, extra = "") => `<div class="empty"><div class="em-icon">${icon(ic)}</div><h3>${esc(title)}</h3><p>${text}</p>${extra}</div>`;
 function avatar(name, photo, cls = "av") {
   const img = safeImg(photo);
-  return `<div class="${cls}">${img ? `<img src="${esc(img)}" alt="" loading="lazy">` : esc(initials(name))}</div>`;
+  return `<div class="${cls}">${esc(initials(name))}${img ? `<img src="${esc(img)}" alt="" loading="lazy" onerror="this.remove()">` : ""}</div>`;
 }
+const profilePhoto = (c) => (c.job_id ? `/api/jobs/${encodeURIComponent(c.job_id)}/photo` : "");
 
 // ------------------------------------------------------------------- ortam, geçmiş, favoriler
 async function loadEnv() {
@@ -121,18 +223,12 @@ async function loadEnv() {
 
 async function loadChats() {
   try { S.chats = await api("/api/chats"); } catch { S.chats = []; }
-  $("#history").innerHTML = S.chats.length ? S.chats.slice(0, 40).map((c) => `
-    <div class="h-item ${c.id === S.chatId ? "active" : ""}" data-chat="${esc(c.id)}" title="${esc(c.name)} · ${esc(c.institution || "")}">
-      ${avatar(c.name, (S.fav.people.find((p) => p.chat_id === c.id) || {}).photo)}
-      <div class="h-main"><b>${esc(c.name || "?")}</b><span>${esc(c.institution || c.preview || "")}</span></div>
-      <button class="h-del" data-delchat="${esc(c.id)}" type="button" aria-label="Sil">${icon("x")}</button></div>`).join("")
-    : `<div class="empty-side">Henüz arama yok.</div>`;
+  $("#cntProfiles").textContent = S.chats.length || "";
 }
 
 async function loadFav() {
   try { S.fav = await api("/api/favorites"); } catch { /* sunucu yok */ }
-  $("#cntPapers").textContent = S.fav.papers.length || "";
-  $("#cntPeople").textContent = S.fav.people.length || "";
+  $("#cntLibrary").textContent = (S.fav.papers.length + S.fav.people.length) || "";
 }
 const favPaper = (p) => S.fav.papers.find((f) => (p.doi && f.doi && normDoi(f.doi) === normDoi(p.doi)) || fold(f.title) === fold(p.title));
 const favPerson = (key) => S.fav.people.find((f) => f.key === key);
@@ -146,7 +242,7 @@ async function toggleStar(btn) {
     if (hit) {
       await api(`/api/favorites/papers/${encodeURIComponent(hit.key)}`, { method: "DELETE" });
       btn.classList.remove("on"); toast("Favorilerden çıkarıldı.");
-      if (location.hash.startsWith("#/favori-makaleler")) { btn.closest(".paper")?.remove(); }
+      if (location.hash.startsWith("#/kutuphane")) { btn.closest(".paper")?.remove(); }
     } else {
       const src = entry.source || {};
       await post("/api/favorites/papers", { item: { ...p, sources: p.sources, job_id: src.jid, pid: src.pid, person: src.person } });
@@ -218,9 +314,17 @@ const exportButtons = (listKey) => `<button class="btn sm" data-export="csv" dat
 // ------------------------------------------------------------------- yayın ayrıntısı (modal)
 function openModal(html) {
   $("#modalBody").innerHTML = html; hydrateIcons($("#modalBody"));
+  $("#modal").classList.remove("closing");
   $("#modal").hidden = false;
 }
-function closeModal() { S.paperRequest?.abort(); S.paperRequest = null; $("#modal").hidden = true; }
+function closeModal() {
+  S.paperRequest?.abort(); S.paperRequest = null;
+  const m = $("#modal");
+  if (m.hidden) return;
+  if (calmMotion()) { m.hidden = true; return; }
+  m.classList.add("closing");
+  setTimeout(() => { if (m.classList.contains("closing")) { m.hidden = true; m.classList.remove("closing"); } }, 170);
+}
 
 function formatAnswer(text) {
   return esc(text).replace(/\[(P\d+)\]/g, (_, id) => `<span class="cite" data-pub="${id}">${id}</span>`)
@@ -299,89 +403,149 @@ async function openPaper(regId) {
   }
 }
 
-// =================================================================== KEŞFET
+// =================================================================== ANA SAYFA
 function viewHome() {
-  setCrumbs([{ label: "Keşfet" }]);
-  const recentUnis = [];
-  const people = S.chats.slice(0, 6);
+  setCrumbs([{ label: "Ana sayfa" }]);
+  const recent = S.chats.slice(0, 5);
+  const entries = [["#/akademisyenler", "users", "Akademisyenler", "cProfiles", "profil incelendi"], ["#/universiteler", "building", "Üniversiteler", "cUnis", "üniversite, YÖK'ten"],
+    ["#/firmalar", "briefcase", "Firmalar", "cFirms", "Ar-Ge ve tasarım firması"], ["#/ara", "book", "Konular", "", "Bir alanda yazılmış yayınlar"]];
   setView(`
     <section class="hero">
-      <div class="hero-inner">
-        <span class="eyebrow">${icon("sparkle")} Kurum ve akademisyen keşfi</span>
-        <h1>Bir üniversitenin akademik kadrosunu<br>dakikalar içinde keşfedin.</h1>
-        <p class="lead">Üniversite bağlantısını girin: fakülteler, bölümler ve akademisyenler önünüze gelsin. Bir isim de yazarsanız doğrudan
-          o akademisyenin YÖK profili, yayınları ve yapay zekâ analizi hazırlanır.</p>
+      <div class="hero-bg" aria-hidden="true"><span></span><span></span></div>
+      <h1 class="rise" style="--i:0">Akademisyen, üniversite, firma ya da konu.<br>Hepsi tek aramada.</h1>
+      <p class="lead rise" style="--i:1">YÖK, TR Dizin, OpenAlex, TÜBİTAK ve patent kayıtları kanıtlarıyla bir arada.</p>
+      <div class="omni rise" id="omni" style="--i:2">
+        <div class="input">${icon("search")}<input id="omniQ" autocomplete="off" aria-label="Ara" spellcheck="false"></div>
+        <div class="omni-pop" id="omniPop" hidden></div>
       </div>
-      <form class="discover-form" id="discoverForm" autocomplete="off">
-        <div class="field"><label for="dUrl">Üniversite bağlantısı</label>
-          <div class="input">${icon("globe")}<input id="dUrl" type="url" required placeholder="https://www.ankarabilim.edu.tr"></div></div>
-        <div class="field"><label for="dName">Akademisyen adı <small>(isteğe bağlı)</small></label>
-          <div class="input">${icon("user")}<input id="dName" placeholder="Ad Soyad"></div></div>
-        <button class="btn primary" type="submit">${icon("compass")}Keşfet</button>
-      </form>
-      <div class="form-hint">
-        <span>${icon("layers")} Fakülte → bölüm → akademisyen</span>
-        <span>${icon("file")} Bölüm ve fakülte yayın listeleri</span>
-        <span>${icon("cap")} YÖK profili, dersler, tezler, iş birlikleri</span>
-      </div>
+      <div class="hero-try rise" style="--i:3"><span>Dene:</span>${["Şimşek Demir", "TED Üniversitesi", "Aselsan", "derin öğrenme"].map((x) => `<button class="chip" type="button" data-try="${esc(x)}">${esc(x)}</button>`).join("")}</div>
     </section>
-
-    <form class="card quick-search" id="quickSearch">
-      <span class="label">veya konu arayın</span>
-      <div class="input">${icon("search")}<input id="qsInput" placeholder="ör. göğüs hastalıkları, derin öğrenme, uzaktan eğitim"></div>
-      <button class="btn" type="submit">Ara</button>
-    </form>
-
-    <div class="home-cols">
-      <div class="card list-card">
-        <div class="lc-head"><h3>Son incelenen akademisyenler</h3><a href="#/favori-akademisyenler" class="faint">Favoriler →</a></div>
-        <div class="stagger">${people.length ? people.map((c, i) => `<div class="person-row" style="--i:${i}" data-chat="${esc(c.id)}">
-            ${avatar(c.name, (S.fav.people.find((p) => p.chat_id === c.id) || {}).photo)}
-            <div class="pr-main"><b>${esc(c.name)}</b><span>${esc(c.title || "")} ${c.institution ? "· " + esc(c.institution) : ""}</span></div>
-            <span class="chip">${fmtNum(c.papers)} yayın</span></div>`).join("")
-          : `<div class="empty-side" style="padding:14px">Henüz bir akademisyen incelenmedi.</div>`}</div>
-      </div>
-      <div class="card list-card" id="homeUnis">
-        <div class="lc-head"><h3>Keşfedilen üniversiteler</h3><a href="#/universiteler" class="faint">Tümü →</a></div>
-        <div>${skeleton(3)}</div>
-      </div>
-    </div>
-
-    <div class="grid-3" style="margin-top:18px">
-      <div class="card feature"><div class="fi">${icon("layers")}</div><div><h4>Kurum dizini</h4><p>Sitenin menüsünden fakülte ve bölümleri Gemini seçer, Scrapling okur; her bağlantı sayfada doğrulanır.</p></div></div>
-      <div class="card feature"><div class="fi">${icon("sparkle")}</div><div><h4>Kendini onaran erişim</h4><p>REA sitenin gizli isteklerini öğrenir; site değişince yeniden öğrenip veriyi yine getirir.</p></div></div>
-      <div class="card feature"><div class="fi">${icon("book")}</div><div><h4>Birleştirilmiş yayınlar</h4><p>YÖK, TR Dizin, DergiPark, Tez Merkezi, OpenAlex, Crossref, ORCID ve Scholar tek listede; TR↔EN aynı çalışmalar birleşir.</p></div></div>
-    </div>`);
-  void recentUnis;
-  $("#discoverForm").addEventListener("submit", (e) => {
-    e.preventDefault();
-    const url = $("#dUrl").value.trim(), name = $("#dName").value.trim();
-    if (!safeUrl(url)) { toast("Geçerli bir bağlantı girin (https://…)."); return; }
-    if (name) startJob(url, name);
-    else location.hash = `#/kurum?u=${encodeURIComponent(url)}`;
-  });
-  $("#quickSearch").addEventListener("submit", (e) => {
-    e.preventDefault();
-    const q = $("#qsInput").value.trim();
-    if (q) location.hash = `#/ara?q=${encodeURIComponent(q)}`;
-  });
-  api("/api/universities").then((u) => {
-    const box = $("#homeUnis > div:last-child");
-    if (!box) return;
-    box.innerHTML = u.directory.length ? `<div class="stagger">${u.directory.slice(0, 6).map((x, i) => `
-      <div class="person-row" style="--i:${i}" data-org="${esc(x.home || "https://" + x.domain)}">
-        <div class="av" style="background:linear-gradient(140deg,#1e3a8a,#0f766e)">${icon("building")}</div>
-        <div class="pr-main"><b>${esc(x.name)}</b><span>${esc(x.domain)} · ${x.faculties} fakülte · ${x.people} akademisyen</span></div>
-        ${icon("chevron")}</div>`).join("")}</div>`
-      : `<div class="empty-side" style="padding:14px">Henüz keşfedilen üniversite yok. Yukarıya bir bağlantı girin.</div>`;
-    hydrateIcons(box);
+    <div class="entry-grid stagger">${entries.map(([href, ic, title, id, sub], i) => `<a class="card entry" href="${href}" style="--i:${i + 3}">
+      <span class="fi">${icon(ic)}</span><b>${title}</b><span class="e-sub">${id ? `<span id="${id}">—</span> ` : ""}${sub}</span><span class="e-go">${icon("arrow")}</span></a>`).join("")}</div>
+    ${recent.length ? `<div class="card list-card" style="margin-top:18px">
+      <div class="lc-head"><h3>Son incelenenler</h3><a href="#/akademisyenler" class="faint">Tümü →</a></div>
+      <div class="stagger">${recent.map((c, i) => profileRow(c, i + 6)).join("")}</div></div>` : ""}`);
+  setupOmni();
+  api("/api/overview").then((o) => {
+    [["cProfiles", o.profiles], ["cUnis", o.universities], ["cFirms", o.firms]].forEach(([id, n]) => {
+      const el = document.getElementById(id);
+      if (el) { el.dataset.count = n; el.textContent = fmtNum(n); animateCounts(el.parentElement); }
+    });
   }).catch(() => {});
+}
+
+// Tek arama kutusu: yerel öneriler (profil, üniversite, firma) + "akademisyen ara" ve "konu ara" eylemleri.
+function setupOmni() {
+  const input = $("#omniQ"), pop = $("#omniPop");
+  typePlaceholder(input, ["Şimşek Demir", "Orta Doğu Teknik Üniversitesi", "Aselsan", "derin öğrenme", "Ömer Nezih Gerek"]);
+  let seq = 0, timer, active = 0;
+  const links = () => $$(".omni-item", pop);
+  const mark = () => links().forEach((a, i) => a.classList.toggle("on", i === active));
+  const draw = (q, d) => {
+    const eq = encodeURIComponent(q);
+    const rows = [
+      ...d.people.map((c) => ({ g: "İncelenen akademisyenler", href: `#/profil/${c.id}`, av: avatar(c.name, profilePhoto(c)), t: c.name, s: [c.title, c.institution].filter(Boolean).join(" · ") })),
+      ...d.universities.map((u) => ({ g: "Üniversiteler", href: `#/universite/${u.id}`, ic: "building", t: u.name, s: "Fakülte, bölüm, kadro" })),
+      ...d.firms.map((f) => ({ g: "Firmalar", href: `#/firma/${f.id}`, ic: "briefcase", t: f.name, s: f.cities.join(", ") })),
+      { g: "Ara", href: `#/akademisyenler?q=${eq}`, ic: "users", t: `“${q}” adlı akademisyeni ara`, s: "YÖK Akademik" },
+      { g: "Ara", href: `#/ara?q=${eq}`, ic: "book", t: `“${q}” konusunu ara`, s: "Yayınlar" },
+    ];
+    let group = "";
+    pop.innerHTML = rows.map((r, i) => {
+      const head = r.g !== group ? `<div class="omni-g">${esc(r.g)}</div>` : "";
+      group = r.g;
+      return `${head}<a class="omni-item" href="${esc(r.href)}" style="--i:${i}">${r.av || `<span class="fi">${icon(r.ic)}</span>`}<span class="oi-main"><b>${esc(r.t)}</b>${r.s ? `<span>${esc(r.s)}</span>` : ""}</span></a>`;
+    }).join("");
+    hydrateIcons(pop); active = 0; mark(); pop.hidden = false;
+  };
+  const search = async () => {
+    const q = input.value.trim(), mine = ++seq;
+    if (fold(q).length < 2) { pop.hidden = true; return; }
+    let d;
+    try { d = await api(`/api/lookup?q=${encodeURIComponent(q)}`); } catch { d = { people: [], universities: [], firms: [] }; }
+    if (mine === seq && input.isConnected) draw(q, d);
+  };
+  input.oninput = () => { clearTimeout(timer); timer = setTimeout(search, 160); };
+  input.onfocus = () => { if (input.value.trim() && pop.innerHTML) pop.hidden = false; };
+  input.onkeydown = (e) => {
+    const all = links();
+    if (e.key === "Escape") { pop.hidden = true; return; }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (all.length) { active = (active + (e.key === "ArrowDown" ? 1 : -1) + all.length) % all.length; mark(); all[active].scrollIntoView({ block: "nearest" }); }
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (!pop.hidden && all[active]) { location.hash = all[active].getAttribute("href"); return; }
+      const q = input.value.trim();
+      if (q) location.hash = `#/akademisyenler?q=${encodeURIComponent(q)}`;
+    }
+  };
+  $$("[data-try]").forEach((b) => { b.onclick = () => { input.value = b.dataset.try; input.focus(); search(); }; });
+}
+
+function profileRow(c, i = 0) {
+  return `<div class="person-row" style="--i:${Math.min(i, 24)}" data-chat="${esc(c.id)}" data-q="${esc(fold(`${c.name} ${c.institution || ""}`))}">
+    ${avatar(c.name, profilePhoto(c))}
+    <div class="pr-main"><b>${esc(c.name || "?")}</b><span>${esc([c.title, c.institution].filter(Boolean).join(" · "))}</span></div>
+    <span class="chip">${fmtNum(c.papers)} yayın</span>
+    <button class="h-del" data-delchat="${esc(c.id)}" type="button" aria-label="Sil" title="Profili sil">${icon("x")}</button></div>`;
+}
+
+// =================================================================== AKADEMİSYENLER
+const existingChat = (p) => S.chats.find((c) => fold(c.name) === fold(p.name)
+  && (!c.institution || fold(c.institution).includes(fold(p.university)) || fold(p.university).includes(fold(c.institution))));
+const startFromYok = (p) => startJob(p.university, p.name, () => post("/api/jobs", { name: p.name, yok_url: p.url, university: p.university, department: p.department || p.faculty || "", email: p.email || "" }));
+
+async function viewPeople(q = "") {
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Akademisyenler" }]);
+  await loadChats();
+  setView(`<div class="section-head"><div><h1>Akademisyenler</h1><p>Adı YÖK'te arayın, doğru kişiyi seçin; profil tüm kaynaklardan hazırlansın.</p></div>
+      <div class="actions"><button class="btn ghost sm" type="button" data-byurl>${icon("globe")}Site bağlantısıyla başlat</button></div></div>
+    <form class="card quick-search" id="pSearch"><div class="input">${icon("search")}<input id="pQ" value="${esc(q)}" placeholder="Ad Soyad, ör. Şimşek Demir" autocomplete="off"></div>
+      <button class="btn primary" type="submit">YÖK'te ara</button></form>
+    <div id="pResults"></div>
+    <div class="row-head"><h3>İncelenen profiller</h3><span class="count">${S.chats.length}</span><span class="spacer"></span>
+      ${S.chats.length ? `<div class="input slim">${icon("search")}<input data-filter="pList" placeholder="Listede ara"></div><button class="link" type="button" data-clearall>Tümünü sil</button>` : ""}</div>
+    <div class="card list-card" id="pList">${S.chats.length ? `<div class="stagger">${S.chats.map(profileRow).join("")}</div>`
+      : emptyState("users", "Henüz profil yok", "Yukarıdan bir akademisyen arayın.")}</div>`);
+  $("#pSearch").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = $("#pQ").value.trim();
+    if (fold(v).length < 3) { toast("En az 3 harf yazın."); return; }
+    const next = `#/akademisyenler?q=${encodeURIComponent(v)}`;
+    if (location.hash === next) searchPeople(v); else location.hash = next;
+  });
+  if (q) searchPeople(q); else $("#pQ").focus();
+}
+
+async function searchPeople(q) {
+  const box = $("#pResults");
+  box.innerHTML = `<div class="card list-card result-card"><div class="loading-line"><span class="spinner"></span>YÖK Akademik'te aranıyor…</div>${skeleton(2)}</div>`;
+  let items;
+  try { ({ items } = await api(`/api/people/search?q=${encodeURIComponent(q)}`)); }
+  catch (e) { box.innerHTML = `<div class="notice err result-card">${icon("info")}<div>${esc(e.message)}</div></div>`; hydrateIcons(box); return; }
+  if (!box.isConnected) return;
+  S.candidates = items;
+  box.innerHTML = items.length ? `<div class="card list-card result-card"><div class="lc-head"><h3>YÖK'te bulunanlar</h3><span class="count">${items.length}</span></div>
+      <div class="stagger">${items.map(candidateRow).join("")}</div></div>`
+    : `<div class="card result-card">${emptyState("search", `“${q}” YÖK'te bulunamadı`, "Yazımı kontrol edin. Akademisyen YÖK'te yoksa kurum sitesinin bağlantısıyla başlatabilirsiniz; aradığınız bir konuysa Konular'a bakın.",
+      `<div class="actions" style="justify-content:center;margin-top:14px"><button class="btn sm" type="button" data-byurl="${esc(q)}">${icon("globe")}Site bağlantısıyla başlat</button>
+       <a class="btn sm" href="#/ara?q=${encodeURIComponent(q)}">${icon("book")}Konu olarak ara</a></div>`)}</div>`;
+  hydrateIcons(box);
+}
+
+function candidateRow(p, i) {
+  const chat = existingChat(p);
+  return `<div class="person-row plain" style="--i:${Math.min(i, 24)}">${avatar(p.name, p.photo)}
+    <div class="pr-main"><b>${esc(p.name)}</b><span>${esc([p.title, p.university].filter(Boolean).join(" · "))}</span>
+      <span class="faint">${esc([p.faculty, p.department].filter(Boolean).join(" / "))}</span></div>
+    ${p.orcid ? `<a class="chip teal hide-sm" href="https://orcid.org/${esc(p.orcid)}" target="_blank" rel="noopener">ORCID</a>` : ""}
+    ${chat ? `<button class="btn sm" type="button" data-chat="${esc(chat.id)}">Profili aç</button>` : `<button class="btn sm primary" type="button" data-candidate="${i}">${icon("sparkle")}Profil çıkar</button>`}</div>`;
 }
 
 // =================================================================== YENİ AKADEMİSYEN
 function newPersonModal(prefUrl = "", prefName = "") {
-  openModal(`<h2>Yeni akademisyen</h2><p class="muted" style="margin:6px 0 0">Kurumun akademik kadro ya da kişi sayfası bağlantısını ve adı girin.
-      Profil, yayınlar ve YÖK bilgileri birlikte hazırlanır.</p>
+  openModal(`<h2>Site bağlantısıyla başlat</h2><p class="muted" style="margin:6px 0 0">YÖK'te bulunmayan kişiler için: kurumun kadro ya da kişi sayfası bağlantısını ve adı girin.</p>
     <form id="npForm" class="form-grid" autocomplete="off">
       <div class="field"><label for="npUrl">Üniversite / kadro bağlantısı</label>
         <div class="input">${icon("globe")}<input id="npUrl" type="url" required placeholder="https://…/akademik-kadro" value="${esc(prefUrl)}"></div></div>
@@ -410,13 +574,13 @@ function phaseOf(ev) {
   return { rea: "reverse", scrape: "scrape", crawl: "scrape", yok: "collect", publications: "collect", dedup: "merge", verify: "merge", analysis: "ai" }[ev.step] || "scrape";
 }
 
-async function startJob(url, name, create) {
+async function startJob(sub, name, create, verb = "hazırlanıyor") {
   let job;
-  try { job = await (create ? create() : post("/api/jobs", { url, name })); } catch (e) { toast(esc(e.message)); return; }
+  try { job = await (create ? create() : post("/api/jobs", { url: sub, name })); } catch (e) { toast(esc(e.message)); return; }
   const node = document.createElement("div");
   node.className = "card job enter";
-  node.innerHTML = `<div class="m-kicker"><span class="spinner"></span>Profil ${create ? "yenileniyor" : "hazırlanıyor"}</div>
-    <h2 style="margin-top:10px">${esc(name)}</h2><div class="job-sub">${esc(url)}</div>
+  node.innerHTML = `<div class="m-kicker"><span class="spinner"></span>Profil ${verb}</div>
+    <h2 style="margin-top:10px">${esc(name)}</h2><div class="job-sub">${esc(sub)}</div>
     <div class="progress"><div></div></div>
     <div class="steps">${PHASES.map(([k, l]) => `<div class="step" data-phase="${k}" ${k === "bot" ? "hidden" : ""}><span class="dot"></span>${esc(l)}</div>`).join("")}</div>
     <div class="now"></div>
@@ -456,7 +620,7 @@ async function startJob(url, name, create) {
     $(".progress div", node).style.width = "100%";
     $$(".step:not([hidden])", node).forEach((x) => { x.className = "step done"; $(".dot", x).textContent = "✓"; });
     loadChats();
-    if (create) loadFav();
+    loadFav();
     if (location.hash === `#/is/${job.id}`) { S.result = r; S.chatId = r.chat_id; location.hash = `#/profil/${r.chat_id}`; return; }
     if (S.result?.chat_id === r.chat_id) {  // yenilenen profil o sırada açıksa yerinde güncellenir
       S.result = r;
@@ -479,7 +643,7 @@ async function startJob(url, name, create) {
         if (res.ok) { finish(await res.json()); return; }
       } catch { /* ağ geri gelene kadar dene */ }
       if (Date.now() < until) setTimeout(poll, 3000);
-      else $(".now", node).textContent = "Sonuç alınamadı; profil hazırsa soldaki son aramalarda görünür.";
+      else $(".now", node).textContent = "Sonuç alınamadı; profil hazırsa Akademisyenler listesinde görünür.";
     };
     poll();
   };
@@ -487,18 +651,126 @@ async function startJob(url, name, create) {
 
 function viewJob(jid) {
   const job = S.jobs[jid];
-  setCrumbs([{ label: "Keşfet", href: "#/" }, { label: job ? job.name : "Profil" }]);
-  if (!job) { setView(emptyState("clock", "Bu iş bulunamadı", "Sayfa yenilendiği için ilerleme bilgisi kayboldu. Tamamlanan profiller sol menüdeki son aramalarda.")); return; }
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: job ? job.name : "Profil" }]);
+  if (!job) { setView(emptyState("clock", "Bu iş bulunamadı", "Sayfa yenilendiği için ilerleme bilgisi kayboldu. Tamamlanan profiller Akademisyenler listesinde.")); return; }
   const v = view(); v.innerHTML = ""; v.appendChild(job.node); v.scrollTop = 0;
 }
 
-// =================================================================== KURUM DİZİNİ
+// =================================================================== ÜNİVERSİTELER (YÖK)
+async function viewUnis() {
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Üniversiteler" }]);
+  setView(`<div class="section-head"><div><h1>Üniversiteler</h1><p id="uSub">YÖK Akademik'teki üniversiteler. Birini seçin: fakülte, bölüm, kadro.</p></div></div>
+    <div class="toolbar"><div class="input">${icon("search")}<input id="uQ" data-filter="uGrid" placeholder="Üniversite ara" autocomplete="off"></div></div>
+    <div id="uGrid" class="uni-grid">${skeleton(6)}</div>`);
+  let u;
+  try { u = await api("/api/universities"); } catch (e) { $("#uGrid").innerHTML = `<div class="card">${emptyState("building", "Liste alınamadı", esc(e.message))}</div>`; hydrateIcons($("#uGrid")); return; }
+  const grid = $("#uGrid");
+  if (!grid) return;
+  $("#uSub").textContent = `YÖK Akademik'teki ${u.items.length} üniversite. Birini seçin: fakülte, bölüm, kadro.`;
+  grid.classList.add("stagger");
+  grid.innerHTML = u.items.map((x, i) => `<a class="card uni-card" href="#/universite/${esc(x.id)}" style="--i:${Math.min(i, 12)}" data-q="${esc(fold(x.name))}">
+    <span class="uni-mark">${esc(initials(x.name.replace(/Üniversitesi/g, "")))}</span><span class="uc-main"><b>${esc(x.name)}</b>${x.people.length ? `<span>${x.people.length} profil incelendi</span>` : ""}</span>${icon("chevron")}</a>`).join("");
+  hydrateIcons(grid);
+}
+
+async function viewUni(uid) {
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Üniversiteler", href: "#/universiteler" }, { label: "…" }]);
+  if (S.uni?.id !== uid) S.uni = { id: uid, data: null, fac: null, facData: null, dep: null };
+  const d = S.uni, col = (id, ic, title, ph, body) => `<section class="card col" id="${id}">
+      <div class="col-head"><span class="ch-icon">${icon(ic)}</span><h3>${title}</h3><span class="count" id="${id}N"></span></div>
+      <div class="col-filter"><div class="input">${icon("search")}<input data-filter="${id}" placeholder="${ph}"></div></div>
+      <div class="col-body">${body}</div></section>`;
+  setView(`<div class="card org-head">
+      <div class="org-logo">${icon("building")}</div>
+      <div style="min-width:0"><h1 id="uName">${esc(d.data?.name || "Üniversite")}</h1><div class="meta" id="uMeta"></div></div>
+      <div class="actions" id="uAct"></div></div>
+    <div class="miller">${col("colFac", "layers", "Fakülteler", "Fakültelerde ara", skeleton(7))}
+      ${col("colDep", "grid", "Bölümler", "Bölümlerde ara", `<div class="col-empty">Soldan bir fakülte seçin.</div>`)}
+      ${col("colStaff", "users", "Akademisyenler", "Akademisyenlerde ara", `<div class="col-empty">Bir bölüm seçin.</div>`)}</div>`);
+  if (!d.data) {
+    try { d.data = await api(`/api/universities/${encodeURIComponent(uid)}`); }
+    catch (e) { const b = $("#colFac .col-body"); if (b) b.innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; return; }
+    if (S.uni !== d || !$("#colFac")) return;
+  }
+  renderUni();
+  if (d.facData) { renderYokDeps(); if (d.dep != null) renderYokStaff(); }
+}
+
+function renderUni() {
+  const d = S.uni, items = d.data.items;
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Üniversiteler", href: "#/universiteler" }, { label: d.data.name }]);
+  $("#uName").textContent = d.data.name;
+  $("#uMeta").innerHTML = `<span>Kaynak: YÖK Akademik</span>${d.data.home ? `<span>${esc(new URL(d.data.home).hostname.replace(/^www\./, ""))}</span>` : ""}`;
+  $("#uAct").innerHTML = d.data.home ? `<a class="btn sm" href="${esc(safeUrl(d.data.home))}" target="_blank" rel="noopener">${icon("globe")}Kurum sitesi</a>
+    <a class="btn sm" href="#/kurum?u=${encodeURIComponent(d.data.home)}" title="Fakülte ve bölümleri kurumun kendi sitesinden okur">${icon("layers")}Site dizini</a>` : "";
+  hydrateIcons($("#uAct"));
+  $("#colFacN").textContent = items.length;
+  $("#colFac .col-body").innerHTML = items.length ? `<div class="stagger">${items.map((u, i) => `<div class="unit ${d.fac === i ? "active" : ""}" data-unit="yfac" data-i="${i}" style="--i:${Math.min(i, 24)}" data-q="${esc(fold(u.name))}">
+      <div class="u-main"><b>${esc(u.name)}</b></div>${icon("chevron")}</div>`).join("")}</div>` : `<div class="col-empty">Bu üniversitenin birimleri YÖK'te listelenmemiş.</div>`;
+  hydrateIcons($("#colFac"));
+}
+
+async function selectYokFaculty(i) {
+  const d = S.uni, fac = d.data.items[i];
+  d.fac = i; d.dep = null; d.facData = null;
+  $$("#colFac .unit").forEach((x) => x.classList.toggle("active", +x.dataset.i === i));
+  $("#colDep .col-body").innerHTML = `<div class="loading-line"><span class="spinner"></span>Kadro YÖK'ten alınıyor…</div>${skeleton(6)}`;
+  $("#colStaff .col-body").innerHTML = `<div class="col-empty">Bir bölüm seçin.</div>`;
+  $("#colStaffN").textContent = ""; $("#colDepN").textContent = "";
+  try {
+    const data = await api(`/api/universities/${encodeURIComponent(d.id)}/faculty?name=${encodeURIComponent(fac.raw)}`);
+    if (S.uni !== d || d.fac !== i) return;
+    d.facData = data;
+    renderYokDeps();
+  } catch (e) { const b = $("#colDep .col-body"); if (b) b.innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; }
+}
+
+function renderYokDeps() {
+  const d = S.uni, f = d.facData;
+  $("#colDepN").textContent = f.departments.length;
+  const row = (name, n, i, q) => `<div class="unit ${d.dep === i ? "active" : ""}" data-unit="ydep" data-i="${i}" style="--i:${Math.min(i + 1, 24)}" data-q="${esc(q)}">
+    <div class="u-main"><b>${esc(name)}</b><span>${n} akademisyen</span></div>
+    <div class="u-act"><button class="btn sm" data-yokpapers="${i}" type="button" title="Bu birimin yayınları">${icon("file")}Yayınlar</button></div>${icon("chevron")}</div>`;
+  $("#colDep .col-body").innerHTML = `<div class="stagger">${row("Tüm fakülte", f.people.length, -1, "tum fakulte")}${f.departments.map((x, i) => row(x.name, x.count, i, fold(x.name))).join("")}</div>`;
+  hydrateIcons($("#colDep"));
+}
+
+const yokStaff = () => { const d = S.uni; return d.dep < 0 ? d.facData.people : d.facData.people.filter((p) => p.department === d.facData.departments[d.dep].key); };
+function selectYokDept(i) {
+  S.uni.dep = i;
+  $$("#colDep .unit").forEach((x) => x.classList.toggle("active", +x.dataset.i === i));
+  renderYokStaff();
+}
+function renderYokStaff() {
+  const d = S.uni, people = yokStaff();
+  S.candidates = people;
+  $("#colStaffN").textContent = people.length;
+  $("#colStaff .col-body").innerHTML = `<div class="stagger">${people.map((p, i) => {
+    const chat = existingChat(p);
+    return `<div class="person" style="--i:${Math.min(i, 24)}" data-q="${esc(fold(p.name))}">${avatar(p.name, p.photo)}
+      <div class="p-main"><b>${esc(p.name)}</b><span>${esc(p.title || "")}${d.dep < 0 && p.department ? ` · ${esc(p.department)}` : ""}</span></div>
+      <div class="p-act">${p.email ? `<a class="icon-btn" href="mailto:${esc(p.email)}" title="${esc(p.email)}">${icon("mail")}</a>` : ""}
+        ${safeUrl(p.url) ? `<a class="icon-btn" href="${esc(safeUrl(p.url))}" target="_blank" rel="noopener" title="YÖK Akademik">${icon("external")}</a>` : ""}
+        ${chat ? `<button class="btn sm" data-chat="${esc(chat.id)}" type="button">Aç</button>` : `<button class="btn sm primary" data-candidate="${i}" type="button">Profil</button>`}</div></div>`;
+  }).join("")}</div>`;
+  hydrateIcons($("#colStaff"));
+}
+
+function openYokPapers(i) {
+  const d = S.uni, f = d.facData, fac = d.data.items[d.fac], dep = i < 0 ? null : f.departments[i];
+  const name = dep ? dep.name : fac.name;
+  unitPapersDrawer(name, `${dep ? "Bölüm" : "Fakülte"} yayınları · ${d.data.name}`, `${d.data.name} ${name}`,
+    "Akademisyenler OpenAlex'te ORCID ve adla eşleştiriliyor…",
+    () => post("/api/universities/papers", { uid: d.id, faculty: fac.raw, department: dep ? dep.key : null }));
+}
+
+// =================================================================== KURUM SİTESİ DİZİNİ
 async function viewDirectory(url) {
   if (!safeUrl(url)) { location.hash = "#/"; return; }
   const host = new URL(url).hostname;
   if (!S.dir || S.dir.url !== url) S.dir = { url, host, data: null, fac: null, dep: null, deps: null, staff: null };
   const d = S.dir;
-  setCrumbs([{ label: "Keşfet", href: "#/" }, { label: "Üniversiteler", href: "#/universiteler" }, { label: d.data?.name || host }]);
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Üniversiteler", href: "#/universiteler" }, { label: d.data?.name || host }]);
   setView(`
     <div class="card org-head">
       <div class="org-logo">${icon("building")}</div>
@@ -552,7 +824,7 @@ function renderFaculties() {
   const d = S.dir, items = d.data.items || [];
   $("#orgName").textContent = d.data.name || d.host;
   $("#orgMeta").textContent = `${items.length} birim · ${d.data.method === "gemini" ? "Gemini ile seçildi" : "kurallarla seçildi"} · ${d.data.at || ""}`;
-  setCrumbs([{ label: "Keşfet", href: "#/" }, { label: "Üniversiteler", href: "#/universiteler" }, { label: d.data.name || d.host }]);
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Üniversiteler", href: "#/universiteler" }, { label: d.data.name || d.host }]);
   $("#nFac").textContent = items.length;
   $("#colFac .col-body").innerHTML = items.length ? `<div class="stagger">${items.map((u, i) => unitRow(u, "fac", i, d.fac === i)).join("")}</div>`
     : `<div class="col-empty">Fakülte bağlantısı bulunamadı. Fakültelerin listelendiği sayfanın bağlantısını girerek tekrar deneyin.</div>`;
@@ -604,29 +876,34 @@ function renderStaff() {
   hydrateIcons($("#colStaff"));
 }
 
-async function openUnitPapers(kind, i) {
+function openUnitPapers(kind, i) {
   const d = S.dir, unit = kind === "fac" ? d.data.items[i] : d.deps.items[i];
-  openDrawer(`<h2>${esc(unit.name)}</h2><p>${kind === "fac" ? "Fakülte" : "Bölüm"} yayınları · ${esc(d.data.name || d.host)}</p>`,
-    `<div class="loading-line"><span class="spinner"></span>${kind === "fac" ? "Bölüm kadroları okunuyor ve akademisyenler OpenAlex'te eşleştiriliyor. Büyük fakültelerde bir iki dakika sürebilir…"
-      : "Akademisyenler OpenAlex'te eşleştiriliyor…"}</div>${skeleton(6)}`);
+  unitPapersDrawer(unit.name, `${kind === "fac" ? "Fakülte" : "Bölüm"} yayınları · ${d.data.name || d.host}`, `${unit.name} ${d.data.name || d.host}`,
+    kind === "fac" ? "Bölüm kadroları okunuyor ve akademisyenler OpenAlex'te eşleştiriliyor. Büyük fakültelerde bir iki dakika sürebilir…" : "Akademisyenler OpenAlex'te eşleştiriliyor…",
+    () => post("/api/directory/papers", { url: unit.url, level: kind === "fac" ? "faculty" : "department", name: unit.name }));
+}
+
+async function unitPapersDrawer(name, sub, file, waiting, load) {
+  openDrawer(`<h2>${esc(name)}</h2><p>${esc(sub)}</p>`, `<div class="loading-line"><span class="spinner"></span>${esc(waiting)}</div>${skeleton(6)}`);
   try {
-    const r = await post("/api/directory/papers", { url: unit.url, level: kind === "fac" ? "faculty" : "department", name: unit.name });
-    const listKey = `unit-${fold(unit.name).replace(/ /g, "-")}`;
+    const r = await load();
+    const listKey = `unit-${fold(name).replace(/ /g, "-")}`;
     S.lists[listKey] = r.papers;
-    S.listMeta[listKey] = { file: `${unit.name} ${d.data.name || d.host}` };
+    S.listMeta[listKey] = { file };
     const years = [...new Set(r.papers.map((p) => p.year).filter(Boolean))].sort((a, b) => b - a);
     $("#drawerBody").innerHTML = `
-      <div class="stat-row"><div class="stat"><b>${fmtNum(r.papers.length)}</b><span>yayın</span></div>
+      <div class="stat-row"><div class="stat"><b>${count(r.papers.length)}</b><span>yayın</span></div>
         <div class="stat"><b>${r.matched}/${r.people}</b><span>akademisyen eşleşti</span></div>
-        <div class="stat"><b>${fmtNum(r.papers.reduce((s, p) => s + (p.citations || 0), 0))}</b><span>toplam atıf</span></div></div>
-      <div class="notice" style="margin-bottom:14px">${icon("info")}<div>Hızlı liste OpenAlex'ten. Bir akademisyenin YÖK dahil tam listesi için dizinde <b>Profil</b> düğmesini kullanın.
+        <div class="stat"><b>${count(r.papers.reduce((s, p) => s + (p.citations || 0), 0))}</b><span>toplam atıf</span></div></div>
+      <div class="notice" style="margin-bottom:14px">${icon("info")}<div>Hızlı liste OpenAlex'ten. Bir akademisyenin tüm kaynaklardan tam listesi için <b>Profil</b> düğmesini kullanın.
+        ${r.total_people > r.people ? `<br><span class="faint">Büyük birim: ilk ${r.people} akademisyen (${r.total_people} kişiden, unvan sırasıyla).</span>` : ""}
         ${r.missing.length ? `<br><span class="faint">OpenAlex'te eşleşmeyen: ${esc(r.missing.slice(0, 12).join(", "))}${r.missing.length > 12 ? "…" : ""}</span>` : ""}
         ${r.loose?.length ? `<br><span class="faint">Bu kurumda OpenAlex yayını yok, yalnızca adla eşleşti (o adla tek yazar): ${esc(r.loose.join(", "))}</span>` : ""}</div></div>
       <div class="toolbar"><div class="input">${icon("search")}<input id="dwFilter" placeholder="Başlık ya da yazar ara"></div>
         <select class="select" id="dwYear"><option value="">Tüm yıllar</option>${years.map((y) => `<option>${y}</option>`).join("")}</select>
         ${exportButtons(listKey)}</div>
       <div class="card" id="dwList"></div>`;
-    hydrateIcons($("#drawerBody"));
+    hydrateIcons($("#drawerBody")); animateCounts($("#drawerBody"));
     const draw = () => {
       const q = fold($("#dwFilter").value), y = $("#dwYear").value;
       const list = r.papers.filter((p) => (!y || String(p.year) === y) && (!q || fold(`${p.title} ${(p.authors || []).join(" ")}`).includes(q)));
@@ -649,7 +926,7 @@ function closeDrawer() { $("#drawer").classList.remove("open"); $("#drawer").set
 
 // =================================================================== PROFİL
 async function viewProfile(cid) {
-  setCrumbs([{ label: "Keşfet", href: "#/" }, { label: "Akademisyen" }]);
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Akademisyenler", href: "#/akademisyenler" }, { label: "…" }]);
   let chat = null;
   if (!(S.result && S.result.chat_id === cid)) {
     setView(`<div class="card card-pad">${skeleton(4)}</div>`);
@@ -661,7 +938,6 @@ async function viewProfile(cid) {
   }
   S.chatId = cid; S.jobId = S.result.job_id;
   renderProfile(S.result, chat);
-  $$(".h-item").forEach((x) => x.classList.toggle("active", x.dataset.chat === cid));
 }
 
 function vbadge(key) {
@@ -709,7 +985,7 @@ function renderProfile(r, chat) {
   const p = r.profile, a = r.analysis, y = p.yok || {}, sec = y.sections || {};
   const key = r.job_id;
   const isFav = !!favPerson(key);
-  setCrumbs([{ label: "Keşfet", href: "#/" }, ...(p.institution ? [{ label: p.institution, href: "#/universiteler" }] : []), { label: p.name }]);
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Akademisyenler", href: "#/akademisyenler" }, { label: p.name }]);
   const links = [
     y.email && `<a class="chip blue" href="mailto:${esc(y.email)}">${icon("mail")}${esc(y.email)}</a>`,
     p.orcid && `<a class="chip teal" href="https://orcid.org/${esc(p.orcid)}" target="_blank" rel="noopener">ORCID ${esc(p.orcid)}</a>`,
@@ -753,12 +1029,12 @@ function renderProfile(r, chat) {
         </div>
       </div>
       <div class="kpis">
-        <div class="kpi"><b>${fmtNum(r.unique_count)}</b><span>benzersiz yayın</span></div>
-        <div class="kpi"><b>${fmtNum(totalCites)}</b><span>toplam atıf</span></div>
-        <div class="kpi"><b>${fmtNum((sec.courses || []).length)}</b><span>ders</span></div>
-        <div class="kpi"><b>${fmtNum(nTheses)}</b><span>yönetilen tez</span></div>
-        <div class="kpi"><b>${fmtNum((y.collaborators || []).length)}</b><span>iş birliği</span></div>
-        <div class="kpi"><b>${Object.entries(r.by_source || {}).map(([k, v]) => `${SRC_TR[k] || k} ${v}`).join(" · ") || "—"}</b><span>kaynak dağılımı</span></div>
+        <div class="kpi"><b>${count(r.unique_count)}</b><span>benzersiz yayın</span></div>
+        <div class="kpi"><b>${count(totalCites)}</b><span>toplam atıf</span></div>
+        <div class="kpi"><b>${count((sec.courses || []).length)}</b><span>ders</span></div>
+        <div class="kpi"><b>${count(nTheses)}</b><span>yönetilen tez</span></div>
+        <div class="kpi"><b>${count((y.collaborators || []).length)}</b><span>iş birliği</span></div>
+        <div class="kpi src"><b>${Object.entries(r.by_source || {}).map(([k, v]) => `${SRC_TR[k] || k} ${v}`).join(" · ") || "—"}</b><span>kaynak dağılımı</span></div>
       </div>
     </section>
 
@@ -839,7 +1115,7 @@ function renderProfile(r, chat) {
   };
   $("#pubFilter").oninput = drawPubs; $("#pubSort").onchange = drawPubs; drawPubs();
 
-  $("#refreshProfileBtn").onclick = () => startJob(p.source_url || "", p.name, () => post(`/api/jobs/${r.job_id}/refresh`, {}));
+  $("#refreshProfileBtn").onclick = () => startJob(p.institution || p.source_url || "", p.name, () => post(`/api/jobs/${r.job_id}/refresh`, {}), "yenileniyor");
   $("#favPersonBtn").onclick = async () => {
     const btn = $("#favPersonBtn");
     try {
@@ -1116,8 +1392,8 @@ async function ask(question) {
 
 // =================================================================== KONU ARAMASI
 async function viewSearch(q) {
-  setCrumbs([{ label: "Keşfet", href: "#/" }, { label: "Konu araması" }]);
-  setView(`<div class="section-head"><div><h1>Konu araması</h1><p>OpenAlex, Crossref, Semantic Scholar, TR Dizin ve OpenAIRE (DergiPark, üniversite arşivleri) aynı anda taranır; aynı yayın tek satırda birleşir.</p></div></div>
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Konular" }]);
+  setView(`<div class="section-head"><div><h1>Konular</h1><p>OpenAlex, Crossref, Semantic Scholar, TR Dizin ve OpenAIRE (DergiPark, üniversite arşivleri) aynı anda taranır; aynı yayın tek satırda birleşir.</p></div></div>
     <form class="card quick-search" id="searchForm" style="margin-top:0">
       <div class="input">${icon("search")}<input id="sInput" value="${esc(q)}" placeholder="ör. göğüs hastalıkları, makine öğrenmesi, deprem mühendisliği"></div>
       <button class="btn primary" type="submit">Ara</button></form>
@@ -1158,54 +1434,48 @@ async function viewSearch(q) {
   $("#sFilter").oninput = draw; $("#sSort").onchange = draw; draw();
 }
 
-// =================================================================== FAVORİLER, ÜNİVERSİTELER
-async function viewFavPapers() {
-  setCrumbs([{ label: "Kütüphanem" }, { label: "Favori makaleler" }]);
+// =================================================================== KÜTÜPHANEM
+async function viewLibrary(tab = "papers") {
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Kütüphanem" }]);
   await loadFav();
-  const list = [...S.fav.papers].reverse();
-  S.lists.fav = list;
+  const papers = [...S.fav.papers].reverse(), people = [...S.fav.people].reverse();
+  S.lists.fav = papers;
   S.listMeta.fav = { file: "favori makaleler" };
-  setView(`<div class="section-head"><div><h1>Favori makaleler</h1><p>${list.length} makale kaydedildi.</p></div>
-      <div class="actions">${list.length ? exportButtons("fav") : ""}</div></div>
-    <div class="card">${list.length ? `<div class="stagger">${list.map((p, i) => paperCard(p, p.job_id && p.pid ? { jid: p.job_id, pid: p.pid, person: p.person } : {}, i)).join("")}</div>`
-      : emptyState("bookmark", "Henüz favori makale yok", "Yayın listelerinde ☆ simgesine tıklayarak makaleleri buraya ekleyin.")}</div>`);
-}
-
-async function viewFavPeople() {
-  setCrumbs([{ label: "Kütüphanem" }, { label: "Favori akademisyenler" }]);
-  await loadFav();
-  const list = [...S.fav.people].reverse();
-  setView(`<div class="section-head"><div><h1>Favori akademisyenler</h1><p>${list.length} akademisyen.</p></div></div>
-    ${list.length ? `<div class="collabs stagger">${list.map((p, i) => `<div class="collab" style="--i:${i};cursor:pointer" data-chat="${esc(p.chat_id || "")}">
+  setView(`<div class="section-head"><div><h1>Kütüphanem</h1><p>Kaydettiğiniz makaleler ve akademisyenler.</p></div>
+      <div class="actions">${papers.length ? exportButtons("fav") : ""}</div></div>
+    <div class="tabs" role="tablist"><button class="tab ${tab === "papers" ? "active" : ""}" data-tab="papers" type="button">Makaleler<span class="n">${papers.length}</span></button>
+      <button class="tab ${tab === "people" ? "active" : ""}" data-tab="people" type="button">Akademisyenler<span class="n">${people.length}</span></button></div>
+    <div class="panel ${tab === "papers" ? "active" : ""}" data-panel="papers"><div class="card">${papers.length ? `<div class="stagger">${papers.map((p, i) => paperCard(p, p.job_id && p.pid ? { jid: p.job_id, pid: p.pid, person: p.person } : {}, i)).join("")}</div>`
+      : emptyState("bookmark", "Henüz favori makale yok", "Yayın listelerinde ☆ simgesine tıklayarak makaleleri buraya ekleyin.")}</div></div>
+    <div class="panel ${tab === "people" ? "active" : ""}" data-panel="people">${people.length ? `<div class="collabs stagger">${people.map((p, i) => `<div class="collab" style="--i:${i};cursor:pointer" data-chat="${esc(p.chat_id || "")}">
       ${avatar(p.name, p.photo)}<div class="c-main"><div class="c-title">${esc(p.title || "")}</div><b>${esc(p.name)}</b>
       <span>${esc(p.institution || "")}</span><span class="faint">${esc(p.department || "")}</span>
       <div class="chips" style="margin-top:8px"><span class="chip">${fmtNum(p.papers)} yayın</span>
         <button class="chip" data-unfav="${esc(p.key)}" type="button">${icon("x")}Çıkar</button></div></div></div>`).join("")}</div>`
-      : `<div class="card">${emptyState("users", "Henüz favori akademisyen yok", "Bir profil sayfasında “Favorilere ekle” düğmesini kullanın.")}</div>`}`);
+      : `<div class="card">${emptyState("users", "Henüz favori akademisyen yok", "Bir profil sayfasında “Favorilere ekle” düğmesini kullanın.")}</div>`}</div>`);
 }
 
-async function viewUnis() {
-  setCrumbs([{ label: "Keşfet", href: "#/" }, { label: "Üniversiteler" }]);
-  setView(`<div class="section-head"><div><h1>Üniversiteler</h1><p>Keşfedilen kurum dizinleri ve incelenen akademisyenlerin kurumları.</p></div>
-      <div class="actions"><a class="btn primary" href="#/">${icon("plus")}Yeni üniversite</a></div></div><div id="uBody">${skeleton(4)}</div>`);
-  let u;
-  try { u = await api("/api/universities"); } catch (e) { $("#uBody").textContent = e.message; return; }
-  $("#uBody").innerHTML = `
-    ${u.directory.length ? `<div class="grid-3 stagger">${u.directory.map((x, i) => `<div class="card org-head" style="--i:${i};cursor:pointer;margin:0" data-org="${esc(x.home || "https://" + x.domain)}">
-        <div class="org-logo">${icon("building")}</div><div style="min-width:0"><h3 style="font-size:15px">${esc(x.name)}</h3>
-        <div class="meta"><span>${esc(x.domain)}</span></div>
-        <div class="chips" style="margin-top:8px"><span class="chip blue">${x.faculties} fakülte</span><span class="chip teal">${x.departments} bölüm</span><span class="chip gold">${x.people} akademisyen</span></div></div></div>`).join("")}</div>`
-      : `<div class="card">${emptyState("building", "Henüz kurum dizini yok", "Keşfet sayfasına bir üniversite bağlantısı girin.", `<a class="btn primary" href="#/">Keşfet</a>`)}</div>`}
-    ${u.from_profiles.length ? `<h3 style="margin:28px 0 12px">İncelenen akademisyenlerin kurumları</h3><div class="stack">${u.from_profiles.map((g) => `
-      <div class="card card-pad"><div class="card-title">${icon("building")}${esc(g.institution)}<span class="spacer"></span><span class="count">${g.people.length}</span></div>
-      <div class="chips">${g.people.map((p) => `<button class="chip" data-chat="${esc(p.chat_id)}" type="button">${icon("user")}${esc(p.name)}</button>`).join("")}</div></div>`).join("")}</div>` : ""}`;
-  hydrateIcons($("#uBody"));
+// =================================================================== SİSTEM
+async function viewSystem() {
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Sistem" }]);
+  setView(`<div class="section-head"><div><h1>Sistem</h1><p>Arka plandaki servislerin durumu ve REA'nın öğrendiği site tarifleri.</p></div></div>
+    <div class="grid-2"><div class="card card-pad"><div class="card-title">${icon("info")}Durum</div><div id="sysState">${skeleton(3)}</div></div>
+      <div class="card card-pad"><div class="card-title">${icon("settings")}Site tarifleri</div>
+        <p class="muted" style="margin:0 0 14px">REA sitelerin arka plandaki isteklerini öğrenir; site değişince yeniden öğrenir.</p>
+        <div class="actions"><button class="btn sm" type="button" data-recipes>Öğrenilen tarifler</button><button class="btn sm" type="button" data-scan>Değişiklikleri tara</button></div></div></div>`);
+  let h = null;
+  try { h = await api("/api/health"); } catch { /* aşağıda gösterilir */ }
+  const box = $("#sysState");
+  if (!box) return;
+  const row = (name, ok, text) => `<div class="sys-row"><span class="dot ${ok ? "ok" : "warn"}"></span><b>${esc(name)}</b><span class="muted">${esc(text)}</span></div>`;
+  box.innerHTML = h ? [row("Yapay zekâ", h.llm_ready, h.llm), row("REA", h.rea, h.rea ? "Hazır" : "Kurulu değil"), row("Tarayıcı", h.chromium, h.chromium ? "Hazır" : "Kurulu değil"),
+    row("Patentler (EPO)", h.patents, h.patents ? "Anahtar tanımlı" : "Anahtar yok; patent sekmeleri kapalı")].join("") : `<p class="muted">Sunucuya ulaşılamadı.</p>`;
 }
 
 // =================================================================== FİRMALAR
 // Sanayi ve Teknoloji Bakanlığı Ar-Ge / Tasarım Merkezi listesindeki firmalar ve onlarla çalışan akademisyenler.
 async function viewFirms(q = "", sector = "", city = "") {
-  setCrumbs([{ label: "Keşfet", href: "#/" }, { label: "Firmalar" }]);
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Firmalar" }]);
   setView(`<div class="section-head"><div><h1>Firmalar</h1><p>Resmi Ar-Ge ve Tasarım Merkezi olan firmalar. Bir firma seçin, onunla çalışan akademisyenleri görün.</p></div></div>
     <div class="toolbar"><div class="input">${icon("search")}<input id="firmQ" placeholder="Firma adı (ör. Aselsan, Arçelik)" value="${esc(q)}"></div>
       <select class="select" id="firmSector"><option value="">Tüm sektörler</option></select>
@@ -1239,14 +1509,14 @@ async function viewFirms(q = "", sector = "", city = "") {
 }
 
 async function viewFirm(fid, refresh = false) {
-  setCrumbs([{ label: "Keşfet", href: "#/" }, { label: "Firmalar", href: "#/firmalar" }, { label: "…" }]);
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Firmalar", href: "#/firmalar" }, { label: "…" }]);
   setView(`<div id="firmHead">${skeleton(1)}</div><div class="card card-pad"><div class="loading-line"><span class="spinner"></span>
     OpenAlex ve TR Dizin'de firmayla ortak yayınlar taranıyor, profiller kontrol ediliyor…</div>${skeleton(3)}</div>`);
   let d;
   try { d = await api(`/api/firms/${encodeURIComponent(fid)}${refresh ? "?refresh=1" : ""}`); }
   catch (e) { setView(`<div class="card">${emptyState("briefcase", "Firma açılamadı", esc(e.message))}</div>`); return; }
   const f = d.firm;
-  setCrumbs([{ label: "Keşfet", href: "#/" }, { label: "Firmalar", href: "#/firmalar" }, { label: f.name }]);
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Firmalar", href: "#/firmalar" }, { label: f.name }]);
   const people = d.academics;
   const paperRow = (x) => `<div class="variants">${safeUrl(x.url) ? `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">${esc(x.title)}</a>` : esc(x.title)}
     · ${esc(x.year || "?")} · ${esc(x.source)}${x.role ? ` · ${esc(x.role)}` : ""}${x.firm_people?.length ? ` · <span class="faint">firmadan: ${esc(x.firm_people.join(", "))}</span>` : ""}
@@ -1260,7 +1530,7 @@ async function viewFirm(fid, refresh = false) {
     ${d.errors.map((e) => `<div class="notice warn" style="margin-bottom:14px">${icon("info")}<div>${esc(e)}. Sonuç eksik olabilir; bu sonuç saklanmadı, sonra tekrar açın.</div></div>`).join("")}
     <div class="stat-row"><div class="stat"><b>${fmtNum(people.length)}</b><span>akademisyen</span></div>
       <div class="stat"><b>${fmtNum(d.papers)}</b><span>ortak yayın ve proje</span></div>
-      <div class="stat"><b>${Object.entries(d.by_source).map(([k, v]) => `${esc(k)} ${v}`).join(" · ") || "—"}</b><span>kaynak · ${esc(d.updated)}</span></div></div>
+      <div class="stat src"><b>${Object.entries(d.by_source).map(([k, v]) => `${esc(k)} ${v}`).join(" · ") || "—"}</b><span>kaynak · ${esc(d.updated)}</span></div></div>
     <div class="tabs" role="tablist"><button class="tab active" data-tab="people" type="button">Akademisyenler<span class="n">${fmtNum(people.length)}</span></button>
       <button class="tab" data-tab="tubitak" type="button">TÜBİTAK<span class="n" id="tubitakN">${fmtNum(d.ardeb.length)}</span></button>
       <button class="tab" data-tab="patents" type="button" hidden>Patentler<span class="n" id="patentsN">0</span></button></div>
@@ -1340,16 +1610,21 @@ function route() {
   const parts = path.split("/").filter(Boolean);
   closeDrawer();
   if (parts[0] !== "profil") S.chatRequest?.abort();
-  setNav({ ara: "ara", universiteler: "universiteler", kurum: "universiteler", firmalar: "firmalar", firma: "firmalar", "favori-makaleler": "favori-makaleler",
-    "favori-akademisyenler": "favori-akademisyenler" }[parts[0]] || (parts.length ? "" : "home"));
+  if (parts[0] === "favori-makaleler" || parts[0] === "favori-akademisyenler") {
+    location.replace(`#/kutuphane?tab=${parts[0] === "favori-makaleler" ? "papers" : "people"}`); return undefined;
+  }
+  setNav({ akademisyenler: "akademisyenler", profil: "akademisyenler", is: "akademisyenler", universiteler: "universiteler", universite: "universiteler", kurum: "universiteler",
+    firmalar: "firmalar", firma: "firmalar", ara: "ara", kutuphane: "kutuphane", sistem: "sistem" }[parts[0]] || (parts.length ? "" : "home"));
   switch (parts[0]) {
     case "ara": return viewSearch(params.get("q") || "");
     case "kurum": return viewDirectory(params.get("u") || "");
     case "profil": return viewProfile(parts[1]);
     case "is": return viewJob(parts[1]);
-    case "favori-makaleler": return viewFavPapers();
-    case "favori-akademisyenler": return viewFavPeople();
+    case "akademisyenler": return viewPeople(params.get("q") || "");
+    case "kutuphane": return viewLibrary(params.get("tab") || "papers");
+    case "sistem": return viewSystem();
     case "universiteler": return viewUnis();
+    case "universite": return viewUni(parts[1]);
     case "firmalar": return viewFirms(params.get("q") || "", params.get("sector") || "", params.get("city") || "");
     case "firma": return viewFirm(parts[1]);
     default: return viewHome();
@@ -1369,25 +1644,39 @@ document.addEventListener("click", async (e) => {
     e.stopPropagation();
     if (!confirm("Bu arama ve profil sonucu kalıcı olarak silinsin mi?")) return;
     await api(`/api/chats/${del.dataset.delchat}`, { method: "DELETE" }).catch(() => {});
-    if (del.dataset.delchat === S.chatId) { S.result = null; S.chatId = null; location.hash = "#/"; }
-    loadChats(); return;
+    if (del.dataset.delchat === S.chatId) { S.result = null; S.chatId = null; }
+    await loadChats();
+    const row = del.closest(".person-row");
+    if (row && !calmMotion()) { await row.animate([{ opacity: 1 }, { opacity: 0, transform: "translateX(16px)" }], { duration: 200, easing: EASE }).finished; }
+    route(); return;
   }
   const unfav = t.closest("[data-unfav]");
   if (unfav) {
     e.stopPropagation();
     await api(`/api/favorites/people/${encodeURIComponent(unfav.dataset.unfav)}`, { method: "DELETE" }).catch(() => {});
-    await loadFav(); viewFavPeople(); return;
+    await loadFav(); viewLibrary("people"); return;
   }
   const chat = t.closest("[data-chat]");
   if (chat && chat.dataset.chat) { location.hash = `#/profil/${chat.dataset.chat}`; return; }
   const np = t.closest("[data-newperson]");
-  if (np) { newPersonModal("", np.dataset.newperson); return; }
+  if (np) { location.hash = `#/akademisyenler?q=${encodeURIComponent(np.dataset.newperson)}`; return; }
+  const cand = t.closest("[data-candidate]");
+  if (cand) { startFromYok(S.candidates[+cand.dataset.candidate]); return; }
+  const byUrl = t.closest("[data-byurl]");
+  if (byUrl) { newPersonModal("", byUrl.dataset.byurl || ""); return; }
+  if (t.closest("[data-recipes]")) { showRecipes(); return; }
+  if (t.closest("[data-scan]")) { scanChanges(); return; }
+  if (t.closest("[data-clearall]")) {
+    if (!confirm("Tüm profil sonuçları silinsin mi? Favoriler korunur.")) return;
+    await api("/api/chats", { method: "DELETE" }).catch(() => {});
+    S.result = null; S.chatId = null; await loadChats(); route(); return;
+  }
+  if (!t.closest("#omni") && $("#omniPop")) $("#omniPop").hidden = true;
   const org = t.closest("[data-org]");
   if (org) { location.hash = `#/kurum?u=${encodeURIComponent(org.dataset.org)}`; return; }
   const tab = t.closest("[data-tab]");
   if (tab) {
-    $$(".tab").forEach((x) => x.classList.toggle("active", x === tab));
-    $$(".panel").forEach((x) => x.classList.toggle("active", x.dataset.panel === tab.dataset.tab));
+    switchTab(tab);
     if (tab.dataset.tab === "chat") setTimeout(() => $("#question")?.focus(), 60);
     return;
   }
@@ -1414,6 +1703,8 @@ document.addEventListener("click", async (e) => {
     (exp.dataset.export === "csv" ? exportCsv : exportBib)(list, name, meta);
     return;
   }
+  const yp = t.closest("[data-yokpapers]");
+  if (yp) { e.stopPropagation(); openYokPapers(+yp.dataset.yokpapers); return; }
   const up = t.closest("[data-unitpapers]");
   if (up) { e.stopPropagation(); openUnitPapers(up.dataset.unitpapers, +up.dataset.i); return; }
   if (t.closest("[data-facstaff]")) { const d = S.dir; selectDept(-1, d.data.items[d.fac].url); return; }
@@ -1423,7 +1714,10 @@ document.addEventListener("click", async (e) => {
     startJob(d.staff.page || person.url, person.name); return;
   }
   const unit = t.closest(".unit");
-  if (unit) { unit.dataset.unit === "fac" ? selectFaculty(+unit.dataset.i) : selectDept(+unit.dataset.i); return; }
+  if (unit) {
+    ({ fac: selectFaculty, dep: selectDept, yfac: selectYokFaculty, ydep: selectYokDept })[unit.dataset.unit](+unit.dataset.i);
+    return;
+  }
   if (t.closest("[data-close]") || t.id === "modal" || t.closest("#modalClose")) { closeModal(); return; }
   if (t.closest("#drawerClose")) { closeDrawer(); return; }
 });
@@ -1435,16 +1729,10 @@ document.addEventListener("input", (e) => {
   $$(`#${f} [data-q]`).forEach((el) => { el.style.display = !q || el.dataset.q.includes(q) ? "" : "none"; });
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeDrawer(); } });
-$("#newBtn").addEventListener("click", () => newPersonModal(S.dir?.staff?.page || ""));
 $("#menuBtn").addEventListener("click", () => $("#app").classList.toggle("menu-open"));
 $("#scrim").addEventListener("click", () => $("#app").classList.remove("menu-open"));
-$("#recipesBtn").addEventListener("click", showRecipes);
-$("#scanBtn").addEventListener("click", scanChanges);
-$("#clearAll").addEventListener("click", async () => {
-  if (!confirm("Tüm aramalar ve profil sonuçları silinsin mi? Favoriler korunur.")) return;
-  await api("/api/chats", { method: "DELETE" }).catch(() => {});
-  S.result = null; S.chatId = null; loadChats(); location.hash = "#/";
-});
+$("#themeBtn").addEventListener("click", toggleTheme);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => { if (!storedTheme()) applyTheme(e.matches ? "dark" : "light"); });
 window.addEventListener("hashchange", route);
 
 (async () => {
@@ -1452,6 +1740,8 @@ window.addEventListener("hashchange", route);
   const legacy = new URLSearchParams(location.search).get("chat");
   if (legacy) { history.replaceState(null, "", `/#/profil/${legacy}`); }
   loadEnv();
+  applyTheme(document.documentElement.dataset.theme);
   await Promise.all([loadFav(), loadChats()]);
   route();
+  document.fonts?.ready.then(() => { const a = $("#nav a.active"); if (a) setNav(a.dataset.nav); $("#navPill").classList.add("ready"); });
 })();

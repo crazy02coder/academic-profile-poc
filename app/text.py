@@ -57,6 +57,12 @@ def fold(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
+def word_match(query: str, *texts: str) -> bool:
+    """Sorgunun her sözcüğü metinlerdeki bir sözcüğün başıyla eşleşmeli: "ted", "limited" içinde sayılmaz."""
+    words = {w for t in texts for w in fold(t or "").split()}
+    return all(any(w.startswith(t) for w in words) for t in fold(query).split())
+
+
 def strip_titles(name: str) -> str:
     text = clean(name)
     for rx, _ in _TITLE_RES:

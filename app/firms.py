@@ -18,7 +18,7 @@ import httpx
 from . import history as history_store
 from . import industry, patents, trsources
 from .config import OPENALEX_PARAMS, ROOT, USER_AGENT
-from .text import clean, fold, name_tokens
+from .text import clean, fold, name_tokens, word_match
 
 FIRMS_DIR = ROOT / "data" / "firms"
 TTL = 7 * 24 * 3600
@@ -80,10 +80,9 @@ def firm_list(q: str = "", sector: str = "", city: str = "") -> dict:
         return {"available": False, "items": [], "sectors": [], "cities": []}
     groups = _groups()
     links = _profile_links()
-    fq = fold(q)
     items = []
     for fid, g in groups.items():
-        if fq and fq not in fold(g["name"]) and not any(fq in fold(c) for c in g["centers"]):
+        if q and not word_match(q, g["name"], *g["centers"]):
             continue
         if sector and sector not in g["sectors"]:
             continue

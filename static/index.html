@@ -3,7 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
   <title>Akademik İz</title>
+  <script>
+    // Tema, stil yüklenmeden seçilir; yoksa koyu temada beyaz bir an parlardı.
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem("theme"); } catch (e) { /* tarayıcı depolamayı engellemiş olabilir */ }
+      if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -18,27 +28,20 @@
       <span class="brand-text"><b>Akademik İz</b><small>Araştırma keşif platformu</small></span>
     </a>
 
-    <button class="btn primary block" id="newBtn" type="button"><i data-icon="plus"></i>Yeni akademisyen</button>
-
-    <nav class="nav" aria-label="Ana menü">
-      <a href="#/" data-nav="home"><i data-icon="compass"></i>Keşfet</a>
-      <a href="#/ara" data-nav="ara"><i data-icon="search"></i>Konu araması</a>
+    <nav class="nav" id="nav" aria-label="Ana menü">
+      <span class="nav-pill" id="navPill" aria-hidden="true"></span>
+      <a href="#/" data-nav="home"><i data-icon="home"></i>Ana sayfa</a>
+      <a href="#/akademisyenler" data-nav="akademisyenler"><i data-icon="users"></i>Akademisyenler<span class="count" id="cntProfiles"></span></a>
       <a href="#/universiteler" data-nav="universiteler"><i data-icon="building"></i>Üniversiteler</a>
       <a href="#/firmalar" data-nav="firmalar"><i data-icon="briefcase"></i>Firmalar</a>
-      <div class="nav-label">Kütüphanem</div>
-      <a href="#/favori-makaleler" data-nav="favori-makaleler"><i data-icon="bookmark"></i>Favori makaleler<span class="count" id="cntPapers"></span></a>
-      <a href="#/favori-akademisyenler" data-nav="favori-akademisyenler"><i data-icon="users"></i>Favori akademisyenler<span class="count" id="cntPeople"></span></a>
-      <div class="nav-label row">Son aramalar <button id="clearAll" class="link" type="button">Temizle</button></div>
+      <a href="#/ara" data-nav="ara"><i data-icon="book"></i>Konular</a>
+      <div class="nav-sep"></div>
+      <a href="#/kutuphane" data-nav="kutuphane"><i data-icon="bookmark"></i>Kütüphanem<span class="count" id="cntLibrary"></span></a>
     </nav>
-    <div id="history" class="history"></div>
 
     <div class="side-foot">
-      <details class="tools">
-        <summary><i data-icon="settings"></i>Site araçları</summary>
-        <button type="button" id="recipesBtn" class="tool-btn">Öğrenilen site tarifleri</button>
-        <button type="button" id="scanBtn" class="tool-btn">Değişiklikleri tara</button>
-      </details>
-      <div class="env" id="env"><span class="dot"></span><span>Sistem kontrol ediliyor…</span></div>
+      <a class="side-link" href="#/sistem" data-nav="sistem"><i data-icon="settings"></i>Sistem</a>
+      <div class="env" id="env"><span class="dot"></span><span>Kontrol ediliyor…</span></div>
     </div>
   </aside>
   <div class="scrim" id="scrim"></div>
@@ -47,6 +50,9 @@
     <header class="top">
       <button class="icon-btn menu-btn" id="menuBtn" type="button" aria-label="Menü"><i data-icon="menu"></i></button>
       <nav class="crumbs" id="crumbs" aria-label="Konum"></nav>
+      <button class="icon-btn theme-btn" id="themeBtn" type="button" aria-label="Temayı değiştir">
+        <span class="i-moon"><i data-icon="moon"></i></span><span class="i-sun"><i data-icon="sun"></i></span>
+      </button>
     </header>
     <section id="view" class="view" tabindex="-1"></section>
   </main>

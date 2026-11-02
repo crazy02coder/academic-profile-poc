@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import json
@@ -25,14 +26,14 @@ import os
 from urllib.parse import urlparse
 
 from .config import ROOT, chromium_executable, redact
-from .text import detect_title
+from .text import detect_title, fold, word_match
 from .dedup import resolve
-from .discover import llm_enrich, locate, registrable
+from .discover import Profile, llm_enrich, locate, registrable
 from .llm import LLM
 from .sources import crossref_works, openalex_works, orcid_works, scholar_works, yok_works
 import httpx
 
-from . import directory, firms, industry, library, patents, trsources
+from . import directory, firms, industry, library, patents, trsources, yokdir
 
 app = FastAPI(title="Akademik İz")
 logger = logging.getLogger(__name__)
@@ -63,8 +64,12 @@ STEPS = [  # arayüz kendi sade aşamalarını gösterir; bu liste /api/jobs yan
 
 
 class JobIn(BaseModel):
-    url: str = Field(default="", max_length=2000)
+    url: str = Field(default="", max_length=2000)  # kurum sitesi: isteğe bağlı, YÖK adayından bulunur
     name: str = Field(min_length=2, max_length=160)
+    yok_url: str = Field(default="", max_length=600)  # YÖK aramasında seçilen kişinin profili
+    university: str = Field(default="", max_length=200)
+    department: str = Field(default="", max_length=200)
+    email: str = Field(default="", max_length=200)
 
 
 class ChatIn(BaseModel):
@@ -76,6 +81,30 @@ class ChatIn(BaseModel):
 def _emit(job: dict, event: dict):
     event["t"] = round(time.time() - job["started"], 1)
     job["events"].append(event)
+
+
+SITE_TIMEOUT = 60  # YÖK adayı seçildiyse kurum sitesi yalnız zenginleştirme: fotoğraf, ilgi alanı, profil bağlantısı
+
+
+async def _locate(data: JobIn, name: str, log, llm) -> tuple[Profile, dict]:
+    """Kurum sitesi adımı (Scrapling + REA). Kişi YÖK'ten seçildiyse süre sınırlı; site okunamazsa YÖK'le devam edilir."""
+    if not data.yok_url:
+        return await locate(data.url.strip(), name, log, llm)
+    profile, report = Profile(query_name=name, name=data.name), {"start_url": data.url, "strategy": ["yok"], "rea": None,
+                                                                 "crawl": {"pages": 0}, "walls": [], "recipe": {"events": []}}
+    if data.url:
+        try:
+            profile, report = await asyncio.wait_for(locate(data.url, name, log, llm), SITE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001
+            await log("scrape", "warning", f"Kurum sitesi okunamadı ({type(exc).__name__}); YÖK ile devam ediliyor.")
+    else:
+        await log("scrape", "warning", "Kurum sitesi bulunamadı; profil YÖK ve açık kaynaklardan hazırlanıyor.")
+    profile.name = profile.name or data.name
+    profile.links["yok"] = data.yok_url
+    # YÖK satırındaki kurum yolu: site söylemediyse bu kullanılır, söylediyse ikinci kaynak olarak doğrular.
+    profile.set("institution", data.university, "yok", data.yok_url)
+    profile.set("department", data.department, "yok", data.yok_url)
+    return profile, report
 
 
 async def pipeline(job: dict, data: JobIn):
@@ -90,7 +119,9 @@ async def pipeline(job: dict, data: JobIn):
         report: dict = {}
         yok_rea = None
         name = re.sub(r"^[\s\"“”'‘’]+|[\s\"“”'‘’]+$", "", data.name)
-        profile, report = await locate(data.url.strip(), name, log, llm)
+        if data.yok_url and not data.url:
+            data = data.model_copy(update={"url": await yokdir.person_site(data.university, data.email)})
+        profile, report = await _locate(data, name, log, llm)
         await log("scrape", "done" if profile.found else "warning",
                   f"{profile.name or data.name} · {profile.get('title', 'unvan ?')} · "
                   f"{profile.get('department', 'bölüm ?')}")
@@ -196,8 +227,11 @@ async def pipeline(job: dict, data: JobIn):
         if result["industry"]:
             await log("verify", "done", f"Sanayi iş birlikleri: {len(result['industry'])} firma "
                                         f"({sum(e['official'] for e in result['industry'])} resmi Ar-Ge/Tasarım Merkezi).")
-        result["input"] = {"url": data.url, "name": data.name}
+        result["input"] = data.model_dump()
         prev = job.get("refresh")
+        if not prev and (same := history_store.find_same(prof)):
+            prev = {"job_id": same["job_id"], "chat_id": same["id"]}
+            await log("verify", "done", "Bu akademisyenin kaydı zaten vardı; yeni kayıt açılmadı, mevcut kayıt güncellendi.")
         if prev:  # yenileme: kayıt kimliği, sohbet geçmişi ve favori korunur
             result["job_id"] = prev["job_id"]
             result["chat_id"] = history_store.refresh(prev.get("chat_id") or "", prev["job_id"], result)["id"]
@@ -231,13 +265,18 @@ async def index():
 async def health():
     llm = await LLM().probe()
     return {"rea": rea.available(), "chromium": bool(chromium_executable()), "llm": llm.label(),
-            "llm_ready": llm.available, "steps": STEPS}
+            "llm_ready": llm.available, "steps": STEPS, "patents": patents.enabled()}
 
 
 @app.post("/api/jobs", status_code=202)
 async def create_job(data: JobIn):
-    if not data.url.startswith(("http://", "https://")):
-        raise HTTPException(422, "Geçerli bir http(s) akademik kadro linki girin.")
+    data = data.model_copy(update={"url": data.url.strip(), "yok_url": data.yok_url.strip()})
+    if data.url and not data.url.startswith(("http://", "https://")):
+        raise HTTPException(422, "Geçerli bir http(s) bağlantısı girin.")
+    if data.yok_url and not data.yok_url.startswith(yokdir.BASE + "/"):
+        raise HTTPException(422, "Geçersiz YÖK bağlantısı.")
+    if not data.url and not data.yok_url:
+        raise HTTPException(422, "Önce akademisyeni arayıp seçin ya da kurum sitesi bağlantısı girin.")
     return _start(data)
 
 
@@ -253,9 +292,11 @@ async def refresh_job(jid: str):
     inp, prof = old.get("input") or {}, old["profile"]
     url = next((u for u in (inp.get("url"), prof.get("source_url"), (old.get("recon") or {}).get("start_url"))
                 if isinstance(u, str) and u.startswith(("http://", "https://"))), "")
-    if not url:
+    yok_url = inp.get("yok_url") or (prof.get("links") or {}).get("yok") or ""
+    if not url and not yok_url:
         raise HTTPException(422, "Bu kayıtta başlangıç bağlantısı yok; akademisyeni yeniden arayın.")
-    data = JobIn(url=url, name=inp.get("name") or prof.get("name") or prof.get("query_name") or "")
+    data = JobIn(url=url, name=inp.get("name") or prof.get("name") or prof.get("query_name") or "", yok_url=yok_url,
+                 university=inp.get("university") or "", department=inp.get("department") or "", email=inp.get("email") or "")
     return _start(data, {"job_id": jid, "chat_id": old.get("chat_id")})
 
 
@@ -301,6 +342,16 @@ async def analyze_job(jid: str):
         JOBS[jid]["result"] = result
     KB_CACHE.pop(jid, None)  # asistanın bilgi tabanı yeni analizle yeniden kurulsun
     return analysis
+
+
+@app.get("/api/jobs/{jid}/photo")
+async def job_photo(jid: str):
+    """Profil fotoğrafı (YÖK): listelerde küçük resim; kayıtta yoksa 404, arayüz baş harfleri gösterir."""
+    result = _result_for(jid)
+    m = re.fullmatch(r"data:(image/[a-z+]+);base64,(.+)", ((result or {}).get("profile", {}).get("yok") or {}).get("photo") or "", re.S)
+    if not m:
+        raise HTTPException(404)
+    return Response(base64.b64decode(m.group(2)), media_type=m.group(1), headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.post("/api/jobs/{jid}/patents")
@@ -780,14 +831,109 @@ async def tubitak_teydeb(q: str = ""):
 
 @app.get("/api/universities")
 async def universities():
-    known = {u["domain"]: u for u in directory.all_stores()}
-    seen_people: dict[str, list] = {}
+    """YÖK'teki tüm üniversiteler; incelenen akademisyenler kurum adına göre yanlarında."""
+    try:
+        unis = await yokdir.university_list()
+        tokens = await patents._universities()
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"YÖK'e ulaşılamadı ({type(exc).__name__}).") from None
+    people: dict[str, list] = {}
     for c in history_store.list_all():
-        if c.get("institution"):
-            seen_people.setdefault(c["institution"], []).append({"name": c["name"], "chat_id": c["id"],
-                                                                 "title": c.get("title")})
-    return {"directory": sorted(known.values(), key=lambda u: u["updated"], reverse=True),
-            "from_profiles": [{"institution": k, "people": v} for k, v in sorted(seen_people.items())]}
+        uni = patents._university_of(c.get("institution") or "", tokens)
+        if uni:
+            people.setdefault(uni, []).append({"name": c["name"], "chat_id": c["id"], "title": c.get("title")})
+    return {"items": [{"id": u["id"], "name": u["name"], "people": people.get(u["raw"], [])} for u in unis]}
+
+
+@app.get("/api/universities/{uid}")
+async def university(uid: str):
+    """Üniversitenin fakülteleri (YÖK kurum dizini; kurum sitesi bağlantısı gerekmez)."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(422, "Geçersiz üniversite.")
+    try:
+        d = await yokdir.university_detail(uid)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"YÖK'e ulaşılamadı ({type(exc).__name__}).") from None
+    if not d:
+        raise HTTPException(404, "Üniversite YÖK listesinde bulunamadı.")
+    return d
+
+
+@app.get("/api/universities/{uid}/faculty")
+async def university_faculty(uid: str, name: str = ""):
+    """Fakülte kadrosu ve bölümleri (kişilerin YÖK kurum yolundan). İlk açılış birkaç saniye, sonra önbellekten."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not name:
+        raise HTTPException(422, "Geçersiz istek.")
+    d = await _directory_call(yokdir.faculty_detail(uid, name[:200]))
+    if not d:
+        raise HTTPException(502, "Bu birimin kadrosu YÖK'ten alınamadı. Biraz sonra tekrar deneyin.")
+    return d
+
+
+class YokPapersIn(BaseModel):
+    uid: str = Field(max_length=120)
+    faculty: str = Field(max_length=200)
+    department: str | None = Field(default=None, max_length=200)  # None: tüm fakülte
+
+
+UNIT_PAPERS_LIMIT = 150  # OpenAlex'e kişi başına 1-3 istek: büyük fakültelerde unvan sırasına göre ilk kişiler
+
+
+@app.post("/api/universities/papers")
+async def university_papers(body: YokPapersIn):
+    """Bölüm ya da fakültedeki akademisyenlerin yayınları (OpenAlex hızlı liste; ORCID varsa ORCID ile eşleşir)."""
+    async def run():
+        fac = await yokdir.faculty_detail(body.uid, body.faculty)
+        if not fac:
+            raise RuntimeError("Bu birimin kadrosu YÖK'ten alınamadı.")
+        people = [p for p in fac["people"] if body.department is None or p["department"] == body.department]
+        if not people:
+            raise RuntimeError("Bu birimde akademisyen listesi bulunamadı.")
+        out = await directory.unit_papers(people[:UNIT_PAPERS_LIMIT], fac["domain"], fac["university"])
+        return {**out, "people": min(len(people), UNIT_PAPERS_LIMIT), "total_people": len(people)}
+
+    return await _directory_call(run())
+
+
+@app.get("/api/people/search")
+async def people_search(q: str = ""):
+    """YÖK'te ad araması: aynı adlı kişiler seçim için. Tarayıcı açmaz, ~1-2 sn."""
+    if len(fold(q)) < 3:
+        raise HTTPException(422, "En az 3 harf yazın.")
+    try:
+        return {"items": await yokdir.search_people(q[:120])}
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"YÖK'e ulaşılamadı ({type(exc).__name__}). Biraz sonra tekrar deneyin.") from None
+
+
+@app.get("/api/overview")
+async def overview():
+    """Ana sayfa sayaçları."""
+    try:
+        unis = len(await yokdir.university_list())
+    except httpx.HTTPError:
+        unis = 0
+    return {"universities": unis, "firms": firms.firm_list().get("total", 0), "profiles": len(history_store.list_all())}
+
+
+@app.get("/api/lookup")
+async def lookup(q: str = ""):
+    """Ana sayfa arama kutusu: üniversite, firma ve incelenmiş akademisyen önerileri (yalnız yerel listeler)."""
+    fq = fold(q[:100])
+    if len(fq) < 2:
+        return {"people": [], "universities": [], "firms": []}
+    try:
+        unis = await yokdir.university_list()
+    except httpx.HTTPError:
+        unis = []
+    # Adı sorguyla başlayanlar öne; her gruptan birkaç öneri yeter, asıl arama aşağıdaki eylemlerle yapılır.
+    starts = lambda x: not fold(x["name"]).startswith(fq)
+    people = [c for c in history_store.list_all() if word_match(q[:100], c.get("name") or "")][:4]
+    unis = sorted((u for u in unis if word_match(q[:100], u["name"])), key=starts)[:4]
+    found = sorted(firms.firm_list(q[:100])["items"], key=starts)[:3]
+    return {"people": [{k: c.get(k) for k in ("id", "job_id", "name", "title", "institution")} for c in people],
+            "universities": [{"id": u["id"], "name": u["name"]} for u in unis],
+            "firms": [{"id": f["id"], "name": f["name"], "cities": f["cities"][:2]} for f in found]}
 
 
 # ------------------------------------------------------------------ favoriler
