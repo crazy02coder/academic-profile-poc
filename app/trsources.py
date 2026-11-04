@@ -140,6 +140,7 @@ def _openaire_record(x: dict) -> dict:
     desc = clean(re.sub(r"<[^>]+>", " ", " ".join((x.get("descriptions") or [])[:1])))
     return record(
         "openaire", source_id=x.get("id", ""), title=x.get("mainTitle") or "", year=(x.get("publicationDate") or "")[:4],
+        date=x.get("publicationDate"),
         doi=doi, venue=clean(container.get("name") or x.get("publisher") or ""),
         authors=[clean(a.get("fullName")) for a in sorted(x.get("authors") or [], key=lambda a: a.get("rank") or 99)][:25],
         abstract=desc[:3000], url=local or (urls[0] if urls else ""), citations=cites,

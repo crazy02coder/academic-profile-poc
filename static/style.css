@@ -569,3 +569,16 @@ details.tech summary { cursor: pointer; color: var(--faint); font-size: 12.5px; 
 .thesis details { margin-top: 8px; }
 .thesis summary { cursor: pointer; color: var(--accent); font-size: 13px; font-weight: 600; }
 .thesis .abs { margin-top: 8px; font-size: 13.5px; line-height: 1.6; color: var(--text-2, var(--muted)); white-space: pre-line; }
+
+/* dışa aktarma penceresi */
+.ex-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.ex-row .select { height: 42px; width: 100%; }
+.ex-cats { display: flex; flex-wrap: wrap; gap: 8px; }
+.ex-check { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--line-2); border-radius: 10px;
+  font-size: 13.5px; cursor: pointer; background: var(--surface); }
+.ex-check:has(input:checked) { border-color: var(--text); }
+.ex-check input { accent-color: var(--text); margin: 0; }
+.actions .spacer { flex: 1; }
+.actions #exCount { font-size: 13px; }
+.ex-note { margin: -4px 0 0; font-size: 12.5px; line-height: 1.5; }
+.input.bad { border-color: var(--err); }

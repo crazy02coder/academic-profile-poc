@@ -52,6 +52,7 @@ const ICONS = {
   info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
   sparkle: '<path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"/>',
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
   book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
   award: '<circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/>',
   briefcase: '<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>',
@@ -283,14 +284,53 @@ function download(name, text, type) {
   const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: name });
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
-function exportCsv(list, name, meta = {}) {
-  const cols = [["Başlık", (p) => p.title], ["Yazarlar", (p) => (p.authors || []).join("; ")], ["Yıl", (p) => p.year],
-    ["Yayın yeri", (p) => p.venue], ["Tür", (p) => TYPE_TR[p.type] || p.type], ["DOI", (p) => normDoi(p.doi)],
-    ["Atıf", (p) => p.citations], ["Kaynak", (p) => (p.sources || [p.source]).filter(Boolean).map((s) => SRC_TR[s] || s).join("+")],
-    ["Akademisyen", (p) => (p.unit_authors || []).join("; ") || p.person || meta.person || ""]];
-  const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const rows = [cols.map(([h]) => cell(h)).join(";"), ...list.map((p) => cols.map(([, f]) => cell(f(p))).join(";"))];
-  download(`${name}.csv`, "﻿" + rows.join("\r\n"), "text/csv;charset=utf-8");
+// Excel (.xlsx) dosyası: bağımlılıksız, sıkıştırmasız ZIP içinde en küçük OOXML çalışma kitabı
+const CRC_T = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const crc32 = (b) => { let c = 0xffffffff; for (const x of b) c = CRC_T[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+function zipStore(files) {
+  const enc = new TextEncoder(), parts = [], central = [];
+  let off = 0;
+  const u16 = (v) => [v & 255, (v >>> 8) & 255], u32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+  for (const [name, text] of files) {
+    const n = enc.encode(name), d = enc.encode(text), c = crc32(d);
+    const common = [...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21), ...u32(c), ...u32(d.length), ...u32(d.length), ...u16(n.length), ...u16(0)];
+    const local = new Uint8Array([...u32(0x04034b50), ...common]);
+    parts.push(local, n, d);
+    central.push(new Uint8Array([...u32(0x02014b50), ...u16(20), ...common, ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(off)]), n);
+    off += local.length + n.length + d.length;
+  }
+  const size = central.reduce((s, x) => s + x.length, 0);
+  return new Blob([...parts, ...central, new Uint8Array([...u32(0x06054b50), 0, 0, 0, 0, ...u16(files.length), ...u16(files.length), ...u32(size), ...u32(off), 0, 0])]);
+}
+function exportXlsx(list, name, meta = {}) {
+  const cols = [["Başlık", (p) => p.title, 60], ["Yazarlar", (p) => (p.authors || []).join("; "), 40], ["Yıl", (p) => +p.year || "", 8], ["Yayın tarihi", (p) => p.date ? isoToTr(p.date) : "", 13],
+    ["Kategori", catLabel, 16], ["Yayın yeri", (p) => p.venue, 32], ["Tür", (p) => TYPE_TR[p.type] || p.type, 14], ["DOI", (p) => normDoi(p.doi), 26],
+    ["Atıf", (p) => p.citations ?? "", 8], ["Kaynak", (p) => (p.sources || [p.source]).filter(Boolean).map((s) => SRC_TR[s] || s).join(" + "), 22],
+    ["Akademisyen", (p) => (p.unit_authors || []).join("; ") || p.person || meta.person || "", 24]];
+  const x = (v) => String(v ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 32000);
+  const ref = (c, r) => `${String.fromCharCode(65 + c)}${r}`;
+  const cell = (v, c, r, s = 0) => typeof v === "number" && Number.isFinite(v) ? `<c r="${ref(c, r)}" s="${s}"><v>${v}</v></c>`
+    : `<c r="${ref(c, r)}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${x(v)}</t></is></c>`;
+  const rows = [`<row r="1">${cols.map(([h], c) => cell(h, c, 1, 1)).join("")}</row>`,
+    ...list.map((p, i) => `<row r="${i + 2}">${cols.map(([, f], c) => cell(f(p), c, i + 2)).join("")}</row>`)];
+  const last = ref(cols.length - 1, list.length + 1);
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+<cols>${cols.map(([, , w], c) => `<col min="${c + 1}" max="${c + 1}" width="${w}" customWidth="1"/>`).join("")}</cols>
+<sheetData>${rows.join("")}</sheetData><autoFilter ref="A1:${last}"/></worksheet>`;
+  const title = x([meta.person, meta.note].filter(Boolean).join(" · ") || "Yayınlar");
+  const files = [
+    ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>`],
+    ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>`],
+    ["docProps/core.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${title}</dc:title><dc:creator>Akademik İz</dc:creator></cp:coreProperties>`],
+    ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Yayınlar" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'Yayınlar'!$A$1:$${last.replace(/(\d+)$/, "$$$1")}</definedName></definedNames></workbook>`],
+    ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`],
+    ["xl/styles.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEDEDED"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf fontId="0" fillId="0" borderId="0" xfId="0"/><xf fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`],
+    ["xl/worksheets/sheet1.xml", sheet],
+  ];
+  const blob = zipStore(files);
+  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: `${name}.xlsx` });
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 function exportBib(list, name, meta = {}) {
   const used = new Set();
@@ -305,11 +345,114 @@ function exportBib(list, name, meta = {}) {
     return `@${kind}{${key},\n${Object.entries(f).filter(([, v]) => v).map(([k, v]) => `  ${k} = {${String(v).replace(/[{}]/g, "")}}`).join(",\n")}\n}`;
   });
   const head = meta.person ? `% ${[meta.title, meta.person].filter(Boolean).join(" ")}${meta.institution ? " — " + meta.institution : ""}\n` : "";
-  const header = `${head}% ${list.length} yayın · Akademik İz · ${new Date().toLocaleDateString("tr-TR")}\n\n`;
+  const header = `${head}% ${list.length} yayın${meta.note ? " · " + meta.note : ""} · Akademik İz · ${new Date().toLocaleDateString("tr-TR")}\n\n`;
   download(`${name}.bib`, header + entries.join("\n\n"), "application/x-bibtex;charset=utf-8");
 }
-const exportButtons = (listKey) => `<button class="btn sm" data-export="csv" data-list="${listKey}" type="button">${icon("download")}CSV</button>
-  <button class="btn sm" data-export="bib" data-list="${listKey}" type="button">${icon("download")}BibTeX</button>`;
+const exportButtons = (listKey) => `<button class="btn sm" data-export="${listKey}" type="button">${icon("download")}Dışa aktar</button>`;
+
+// Kaynakların karışık tür adlarını birkaç anlaşılır kategoriye indirger
+const PUB_CATS = [["article", "Makale"], ["proceedings", "Bildiri"], ["book", "Kitap / kitap bölümü"], ["thesis", "Tez"],
+  ["preprint", "Ön baskı"], ["data", "Veri seti"], ["other", "Diğer"], ["none", "Türü belirtilmemiş"]];
+function pubCat(p) {
+  const t = fold(p.type || "");
+  if (!t) return "none";
+  if (/review|editorial|erratum|paratext|reference|supplement|presentation|deliverable|patent|software/.test(t) && !/^review$/.test(t)) return "other";
+  if (/article|^review$|data paper|data-paper/.test(t)) return /data/.test(t) ? "data" : "article";
+  if (/proceed|conference|bildiri/.test(t)) return "proceedings";
+  if (/book|chapter|monograph/.test(t)) return "book";
+  if (/thesis|dissertation|tez/.test(t)) return "thesis";
+  if (/preprint|posted/.test(t)) return "preprint";
+  if (/data/.test(t)) return "data";
+  return "other";
+}
+const catLabel = (p) => Object.fromEntries(PUB_CATS)[pubCat(p)];
+
+// Yayın tarihi aralığı: kesin gün yoksa ay, o da yoksa yılın tamamı. Dönüş: [ilk gün, son gün] "YYYY-MM-DD"
+function pubSpan(p) {
+  const d = String(p.date || ""), y = +p.year || +d.slice(0, 4);
+  if (!y) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return [d, d];
+  if (/^\d{4}-\d{2}$/.test(d)) return [`${d}-01`, `${d}-${String(new Date(+d.slice(0, 4), +d.slice(5, 7), 0).getDate()).padStart(2, "0")}`];
+  return [`${y}-01-01`, `${y}-12-31`];
+}
+const isoToTr = (iso) => iso.split("-").reverse().join(".");
+function trToIso(text, end = false) {
+  const m = String(text || "").trim().match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+  if (!m) return "";
+  const [d, mo, y] = [+m[1], +m[2], +m[3]], dt = new Date(y, mo - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d ? `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}` : "";
+}
+const pubDateTr = (p) => p.date ? isoToTr(p.date) : (p.year || "");
+
+// Dışa aktarma penceresi: tarih aralığı (gün.ay.yıl) her listede, kategori seçimi akademisyen profilinde
+function exportModal(listKey) {
+  const list = S.lists[listKey] || [];
+  if (!list.length) { toast("Dışa aktarılacak yayın yok."); return; }
+  const meta = S.listMeta[listKey] || {};
+  const spans = list.map(pubSpan).filter(Boolean);
+  const first = spans.length ? spans.map((x) => x[0]).sort()[0] : "", last = spans.length ? spans.map((x) => x[1]).sort().at(-1) : "";
+  const noDate = list.length - spans.length, exact = list.filter((p) => /^\d{4}-\d{2}-\d{2}$/.test(p.date || "")).length;
+  const cats = PUB_CATS.map(([k, l]) => [k, l, list.filter((p) => pubCat(p) === k).length]).filter(([, , n]) => n);
+  openModal(`<h2>Yayınları dışa aktar</h2>
+    <p class="muted" style="margin:6px 0 0">${esc(meta.person || meta.file || "Liste")} · ${fmtNum(list.length)} yayın${first ? ` · ${first.slice(0, 4)}–${last.slice(0, 4)}` : ""}</p>
+    <form id="exForm" class="form-grid" autocomplete="off" novalidate>
+      ${first ? `<div class="ex-row">
+        <div class="field"><label for="exFrom">Başlangıç tarihi <small>gün.ay.yıl</small></label>
+          <div class="input">${icon("calendar")}<input id="exFrom" inputmode="numeric" maxlength="10" placeholder="gg.aa.yyyy" value="${isoToTr(first)}"></div></div>
+        <div class="field"><label for="exTo">Bitiş tarihi <small>gün.ay.yıl</small></label>
+          <div class="input">${icon("calendar")}<input id="exTo" inputmode="numeric" maxlength="10" placeholder="gg.aa.yyyy" value="${isoToTr(last)}"></div></div></div>
+        <p class="faint ex-note">${fmtNum(exact)} yayının tam tarihi biliniyor. Yalnız ayı ya da yılı bilinen yayınlar, o ay ya da yıl aralığa değiyorsa eklenir.</p>` : ""}
+      ${noDate ? `<label class="ex-check"><input type="checkbox" id="exNoYear" checked> Tarihi bilinmeyen ${fmtNum(noDate)} yayını da ekle</label>` : ""}
+      ${meta.cats && cats.length > 1 ? `<div class="field"><label>Kategori <small>· en az birini seçin</small></label><div class="ex-cats">
+        ${cats.map(([k, l, n]) => `<label class="ex-check"><input type="checkbox" name="exCat" value="${k}" checked> ${esc(l)} <span class="faint">${fmtNum(n)}</span></label>`).join("")}</div></div>` : ""}
+      <div class="field"><label>Biçim</label><div class="ex-cats">
+        <label class="ex-check"><input type="radio" name="exFmt" value="xlsx" checked> Excel <span class="faint">.xlsx</span></label>
+        <label class="ex-check"><input type="radio" name="exFmt" value="bib"> BibTeX <span class="faint">Zotero, Mendeley</span></label></div></div>
+      <div class="actions" style="justify-content:flex-end"><span class="faint" id="exCount"></span><span class="spacer"></span>
+        <button type="button" class="btn ghost" data-close>Vazgeç</button>
+        <button class="btn primary" id="exGo" type="submit">${icon("download")}İndir</button></div>
+    </form>`);
+  const form = $("#exForm");
+  // Yazarken noktaları kendisi koyar: 01022020 → 01.02.2020
+  form.querySelectorAll("#exFrom, #exTo").forEach((inp) => inp.addEventListener("input", () => {
+    const digits = inp.value.replace(/\D/g, "").slice(0, 8);
+    if (/^[\d.]*$/.test(inp.value) && inp.value.length >= (+inp.dataset.len || 0)) inp.value = [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4)].filter(Boolean).join(".");
+    inp.dataset.len = inp.value.length; update();
+  }));
+  const pick = () => {
+    const fIn = $("#exFrom"), tIn = $("#exTo");
+    let from = fIn ? trToIso(fIn.value) : "", to = tIn ? trToIso(tIn.value) : "";
+    const bad = (fIn && !from) || (tIn && !to);
+    fIn?.closest(".input").classList.toggle("bad", !!fIn && !from); tIn?.closest(".input").classList.toggle("bad", !!tIn && !to);
+    if (from && to && from > to) [from, to] = [to, from];
+    const withNoDate = $("#exNoYear")?.checked ?? true;
+    const on = new Set([...form.querySelectorAll('[name="exCat"]:checked')].map((x) => x.value));
+    const useCats = !!form.querySelector('[name="exCat"]');
+    const out = bad ? [] : list.filter((p) => {
+      const sp = pubSpan(p);
+      return (sp ? (!from || (sp[1] >= from && sp[0] <= to)) : withNoDate) && (!useCats || on.has(pubCat(p)));
+    });
+    return { out, from, to, on, useCats, bad };
+  };
+  const update = () => {
+    const { out, bad } = pick();
+    $("#exCount").textContent = bad ? "Tarihi gün.ay.yıl biçiminde yazın (ör. 01.02.2020)." : `${fmtNum(out.length)} yayın indirilecek`;
+    $("#exGo").disabled = !out.length;
+  };
+  form.addEventListener("change", update); update();
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const { out, from, to, on, useCats } = pick();
+    if (!out.length) return;
+    const stem = fold(meta.file || listKey).replace(/ /g, "-").slice(0, 60) || "akademik-iz";
+    const range = first && (from !== first || to !== last) ? `-${from}_${to}` : "";
+    const catPart = useCats && on.size < cats.length ? `-${[...on].join("-")}` : "";
+    const name = `${stem}-yayinlar${range}${catPart}-${new Date().toISOString().slice(0, 10)}`;
+    const note = [range && `${isoToTr(from)}–${isoToTr(to)}`, catPart && cats.filter(([k]) => on.has(k)).map(([, l]) => l).join(", ")].filter(Boolean).join(" · ");
+    (form.querySelector('[name="exFmt"]:checked').value === "xlsx" ? exportXlsx : exportBib)(out, name, { ...meta, note });
+    closeModal(); toast(`${fmtNum(out.length)} yayın indirildi.`);
+  });
+}
 
 // ------------------------------------------------------------------- yayın ayrıntısı (modal)
 function openModal(html) {
@@ -1008,7 +1151,7 @@ function renderProfile(r, chat) {
     ["memberships", "Üyelikler", "users"], ["art", "Sanatsal faaliyetler", "sparkle"]];
   const pubSrc = (x) => ({ jid: r.job_id, pid: x.id, person: p.name });
   S.lists.pubs = r.publications;
-  S.listMeta.pubs = { file: p.name, person: p.name, title: p.title, institution: p.institution };
+  S.listMeta.pubs = { file: p.name, person: p.name, title: p.title, institution: p.institution, cats: true };
 
   const root = setView(`
     <section class="card profile-hero">
@@ -1695,12 +1838,7 @@ document.addEventListener("click", async (e) => {
   }
   const exp = t.closest("[data-export]");
   if (exp) {
-    const list = S.lists[exp.dataset.list] || [];
-    if (!list.length) { toast("Dışa aktarılacak yayın yok."); return; }
-    const meta = S.listMeta[exp.dataset.list] || {};
-    const stem = fold(meta.file || exp.dataset.list).replace(/ /g, "-").slice(0, 60) || "akademik-iz";
-    const name = `${stem}-yayinlar-${new Date().toISOString().slice(0, 10)}`;
-    (exp.dataset.export === "csv" ? exportCsv : exportBib)(list, name, meta);
+    exportModal(exp.dataset.export);
     return;
   }
   const yp = t.closest("[data-yokpapers]");

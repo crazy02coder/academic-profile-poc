@@ -129,6 +129,9 @@ async def resolve(records: list[dict], subject: str, llm=None, log=None) -> tupl
                     best[key] = m[key]
             if len(m.get("authors") or []) > len(best.get("authors") or []):
                 best["authors"] = m["authors"]
+        # En ayrıntılı tarih (gün > ay); yılı birleşik kaydın yılıyla uyuşmalı
+        dates = [m["date"] for m in members if m.get("date") and (not best.get("year") or m["date"][:4] == str(best["year"]))]
+        best["date"] = max(dates, key=len) if dates else ""
         cites = [m["citations"] for m in members if isinstance(m.get("citations"), int)]
         best["citations"] = max(cites) if cites else None
         best["sources"] = sorted({m["source"] for m in members}, key=lambda s: SOURCE_PRIORITY.get(s, 9))

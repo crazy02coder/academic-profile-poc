@@ -35,7 +35,24 @@ def record(source: str, **kw) -> dict:
         base["year"] = int(base["year"]) if base["year"] else None
     except (TypeError, ValueError):
         base["year"] = None
+    base["date"] = pub_date(base.get("date"), base["year"])
     return base
+
+
+def pub_date(value, year=None) -> str:
+    """Yayın tarihini 'YYYY-MM-DD' ya da 'YYYY-MM' biçimine indirger; yalnız yıl varsa boş döner.
+
+    Kaynağın verdiği tarihin yılı kaydın yılıyla uyuşmuyorsa (ör. çevrimiçi önce yayımlanma) tarih kullanılmaz.
+    """
+    if isinstance(value, (list, tuple)):
+        parts = [int(x) for x in value if str(x).isdigit()]
+    else:
+        parts = [int(x) for x in re.findall(r"\d+", str(value or ""))[:3]]
+    if len(parts) < 2 or not 1000 < parts[0] < 3000 or not 1 <= parts[1] <= 12 or (year and parts[0] != year):
+        return ""
+    if len(parts) > 2 and 1 <= parts[2] <= 31:
+        return f"{parts[0]:04d}-{parts[1]:02d}-{parts[2]:02d}"
+    return f"{parts[0]:04d}-{parts[1]:02d}"
 
 
 def _client() -> httpx.AsyncClient:
@@ -132,7 +149,7 @@ async def openalex_works(profile: Profile, log) -> tuple[list[dict], dict | None
         for inst in author.get("last_known_institutions") or []:
             profile.observe("institution", inst.get("display_name"), "openalex", author["id"])
         out, page, more = [], 1, True
-        select = ("id,doi,display_name,publication_year,primary_location,authorships,abstract_inverted_index,"
+        select = ("id,doi,display_name,publication_year,publication_date,primary_location,authorships,abstract_inverted_index,"
                   "cited_by_count,language,type,topics")
         # cursor= ile sayfalama anahtarsız 401 döner; page= anahtarsız çalışır.
         while more and len(out) < 400:
@@ -146,6 +163,7 @@ async def openalex_works(profile: Profile, log) -> tuple[list[dict], dict | None
                 loc = w.get("primary_location") or {}
                 out.append(record(
                     "openalex", source_id=w["id"], title=w.get("display_name"), year=w.get("publication_year"),
+                    date=w.get("publication_date"),
                     doi=w.get("doi"), venue=((loc.get("source") or {}).get("display_name")),
                     authors=[n for a in w.get("authorships") or [] if (n := (a.get("author") or {}).get("display_name"))][:25],
                     abstract=_abstract(w.get("abstract_inverted_index")), url=w.get("doi") or loc.get("landing_page_url") or w["id"],
@@ -201,7 +219,7 @@ async def crossref_works(profile: Profile, log) -> list[dict]:
             continue
         date = (it.get("published") or it.get("issued") or {}).get("date-parts", [[None]])[0]
         out.append(record(
-            "crossref", source_id=it.get("DOI"), title=(it.get("title") or [""])[0], year=date[0] if date else None,
+            "crossref", source_id=it.get("DOI"), title=(it.get("title") or [""])[0], year=date[0] if date else None, date=date,
             doi=it.get("DOI"), venue=(it.get("container-title") or [""])[0],
             authors=[clean(f"{a.get('given', '')} {a.get('family', '')}") for a in authors][:25],
             abstract=re.sub(r"<[^>]+>", " ", it.get("abstract") or ""), url=it.get("URL"),
@@ -229,6 +247,7 @@ async def orcid_works(profile: Profile, log) -> list[dict]:
         out.append(record(
             "orcid", source_id=str(s.get("put-code")), title=((s.get("title") or {}).get("title") or {}).get("value"),
             year=(((s.get("publication-date") or {}).get("year")) or {}).get("value"), doi=doi,
+            date=[((s.get("publication-date") or {}).get(k) or {}).get("value") for k in ("year", "month", "day")],
             venue=(s.get("journal-title") or {}).get("value"), url=(s.get("url") or {}).get("value"),
             type=s.get("type")))
     await log("publications", "running", f"ORCID public API: {len(out)} eser.")
