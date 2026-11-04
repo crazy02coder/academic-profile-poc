@@ -30,10 +30,10 @@ from .text import detect_title, fold, word_match
 from .dedup import resolve
 from .discover import Profile, llm_enrich, locate, registrable
 from .llm import LLM
-from .sources import crossref_works, openalex_works, orcid_works, scholar_works, yok_works
+from .sources import crossref_works, openalex_by_doi, openalex_works, orcid_works, scholar_works, yok_works
 import httpx
 
-from . import directory, firms, industry, library, patents, trsources, yokdir
+from . import directory, firms, industry, library, patents, quartiles, trsources, yokdir
 
 app = FastAPI(title="Akademik İz")
 logger = logging.getLogger(__name__)
@@ -177,6 +177,10 @@ async def pipeline(job: dict, data: JobIn):
             profile.observe("interests", sch["interests"], "scholar", profile.links.get("scholar", ""))
         if not profile.get("interests") and meta.get("scholar", {}).get("interests"):
             profile.set("interests", meta["scholar"]["interests"], "scholar", profile.links.get("scholar", ""))
+        try:
+            records.extend(await openalex_by_doi(records, profile.name or profile.query_name, log))
+        except Exception as exc:  # noqa: BLE001
+            await log("publications", "warning", f"OpenAlex DOI ile tamamlama atlandı ({type(exc).__name__}).")
         await log("publications", "done", f"{len(records)} ham kayıt toplandı.")
 
         await log("dedup", "running", "Dil tespiti (langdetect + Türkçe karakter sezgisi), DOI/başlık/çapraz dil eşleştirme…")
@@ -473,11 +477,15 @@ KB_CACHE: dict[str, Knowledge] = {}
 def _result_for(jid: str) -> dict | None:
     job = JOBS.get(jid)
     if job and job.get("result"):
-        return job["result"]
-    try:
-        return history_store.load_result(jid)
-    except ValueError:
-        return None
+        res = job["result"]
+    else:
+        try:
+            res = history_store.load_result(jid)
+        except ValueError:
+            return None
+    if res:
+        quartiles.annotate(res.get("publications") or [])  # okuma anında: eski profiller yenilemeden çeyrek alır
+    return res
 
 
 @app.get("/api/jobs/{jid}/result")

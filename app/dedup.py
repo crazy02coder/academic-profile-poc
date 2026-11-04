@@ -124,7 +124,7 @@ async def resolve(records: list[dict], subject: str, llm=None, log=None) -> tupl
         members.sort(key=lambda r: (SOURCE_PRIORITY.get(r["source"], 9), -len(r.get("abstract") or "")))
         best = dict(members[0])
         for m in members[1:]:
-            for key in ("doi", "venue", "abstract", "year", "url"):
+            for key in ("doi", "venue", "issn", "abstract", "year", "url"):
                 if not best.get(key) and m.get(key):
                     best[key] = m[key]
             if len(m.get("authors") or []) > len(best.get("authors") or []):

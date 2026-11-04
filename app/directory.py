@@ -22,6 +22,7 @@ from . import yokdir
 from .config import OPENALEX_PARAMS, ROOT, USER_AGENT
 from .discover import registrable, tr_title
 from .net import fetch_smart, parse
+from . import quartiles
 from .text import clean, detect_title, fold, name_in_text, name_score, strip_titles
 
 DIR = ROOT / "data" / "directory"
@@ -536,6 +537,7 @@ async def unit_papers(people: list[dict], domain: str, institution: str = "", pe
                     "unit_authors": [], "source": "openalex"})
                 p["unit_authors"] = sorted(set(p["unit_authors"]) | set(mine))
     found = {p["name"] for p in matched.values()}
+    quartiles.annotate(list(papers.values()))
     return {"papers": sorted((p for p in papers.values() if p["title"]),
                              key=lambda p: (-(p["year"] or 0), p["title"])),
             "matched": len(found), "missing": [p["name"] for p in people if p["name"] not in found],

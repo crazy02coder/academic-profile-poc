@@ -113,6 +113,28 @@ def delete(cid: str) -> bool:
     return False
 
 
+_INTERESTS: dict[str, tuple[float, list[str]]] = {}
+
+
+def _interests(job_id: str | None) -> list[str]:
+    """Profilin ilgi alanları; sonuç dosyası değişmedikçe yeniden okunmaz (liste her açılışta istenir)."""
+    if not job_id:
+        return []
+    path = RUNS_DIR / f"{_safe(job_id)}.json"
+    try:
+        mtime = path.stat().st_mtime
+        cached = _INTERESTS.get(job_id)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        prof = json.loads(path.read_text()).get("profile") or {}
+    except (OSError, ValueError):
+        return []
+    verified = (prof.get("verification") or {}).get("interests") or []
+    values = [x.get("value") for x in verified] or prof.get("interests") or []
+    _INTERESTS[job_id] = (mtime, values)
+    return values
+
+
 def list_all() -> list[dict]:
     if not CHATS_DIR.exists():
         return []
@@ -124,7 +146,7 @@ def list_all() -> list[dict]:
             continue
         first_q = next((m["content"] for m in c["messages"] if m["role"] == "user"), "")
         out.append({k: c.get(k) for k in ("id", "job_id", "name", "title", "institution", "papers", "created", "updated")}
-                   | {"messages": len(c["messages"]), "preview": first_q[:80]})
+                   | {"messages": len(c["messages"]), "preview": first_q[:80], "interests": _interests(c.get("job_id"))})
     return sorted(out, key=lambda c: c["updated"], reverse=True)
 
 

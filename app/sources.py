@@ -136,6 +136,61 @@ async def openalex_author(client, profile: Profile, log) -> dict | None:
     return best
 
 
+OPENALEX_SELECT = ("id,doi,display_name,publication_year,publication_date,primary_location,authorships,abstract_inverted_index,"
+                   "cited_by_count,language,type,topics")
+
+
+def _openalex_record(w: dict, is_self) -> dict:
+    """OpenAlex eserini ortak kayda çevirir; `is_self(authorship)` kişinin kendisini ortak kurum listesinden ayırır."""
+    loc = w.get("primary_location") or {}
+    return record(
+        "openalex", source_id=w["id"], title=w.get("display_name"), year=w.get("publication_year"),
+        date=w.get("publication_date"),
+        doi=w.get("doi"), venue=((loc.get("source") or {}).get("display_name")), issn=(loc.get("source") or {}).get("issn"),
+        authors=[n for a in w.get("authorships") or [] if (n := (a.get("author") or {}).get("display_name"))][:25],
+        abstract=_abstract(w.get("abstract_inverted_index")), url=w.get("doi") or loc.get("landing_page_url") or w["id"],
+        citations=w.get("cited_by_count"), type=w.get("type"),
+        labels=[t["display_name"] for t in (w.get("topics") or [])[:3]],
+        orgs=[{"name": i.get("display_name"), "type": i.get("type"), "country": i.get("country_code")}
+              for a in w.get("authorships") or [] if not is_self(a)
+              for i in a.get("institutions") or [] if i.get("type") == "company" and i.get("display_name")])
+
+
+async def openalex_by_doi(records: list[dict], name: str, log) -> list[dict]:
+    """Diğer kaynakların bulduğu DOI'leri OpenAlex'te doğrudan arar.
+
+    Yazar kaydı bulunamayan ya da bölünmüş kişilerde atıf, özet ve tarih böylece kaybolmaz. Eser, yalnız yazarları
+    arasında bu kişi varsa eklenir; başka kaynaktaki yanlış bir DOI kişiye yayın olarak yazılmasın.
+    """
+    have = {r["doi"] for r in records if r["source"] == "openalex" and r.get("doi")}
+    # "|" filtre ayırıcısı, "," filtre sonu olduğu için bu karakterleri içeren DOI'ler sorgulanamaz
+    dois = sorted({r["doi"] for r in records if r.get("doi") and r["doi"] not in have and not re.search(r"[|,]", r["doi"])})
+    if not dois:
+        return []
+    is_self = lambda a: name_score(name, (a.get("author") or {}).get("display_name") or "") >= 0.75  # noqa: E731
+    out, other, failed = [], 0, 0
+    async with _client() as client:
+        for i in range(0, len(dois), 50):
+            batch = dois[i:i + 50]
+            r = await client.get(f"{OPENALEX}/works", params={
+                "filter": "doi:" + "|".join(batch), "per-page": 50, "select": OPENALEX_SELECT, **OPENALEX_PARAMS})
+            if r.status_code != 200:
+                failed += len(batch)
+                continue
+            for w in r.json().get("results", []):
+                if any(is_self(a) for a in w.get("authorships") or []):
+                    out.append(_openalex_record(w, is_self))
+                else:
+                    other += 1
+    msg = f"OpenAlex DOI ile tamamlama: {len(dois)} DOI arandı, {len(out)} eser eklendi"
+    if other:
+        msg += f", {other} eserin yazarlarında bu kişi görünmediği için eklenmedi"
+    if failed:
+        msg += f", {failed} DOI sorgulanamadı"
+    await log("publications", "running", msg + ".")
+    return out
+
+
 async def openalex_works(profile: Profile, log) -> tuple[list[dict], dict | None]:
     async with _client() as client:
         author = await openalex_author(client, profile, log)
@@ -149,30 +204,16 @@ async def openalex_works(profile: Profile, log) -> tuple[list[dict], dict | None
         for inst in author.get("last_known_institutions") or []:
             profile.observe("institution", inst.get("display_name"), "openalex", author["id"])
         out, page, more = [], 1, True
-        select = ("id,doi,display_name,publication_year,publication_date,primary_location,authorships,abstract_inverted_index,"
-                  "cited_by_count,language,type,topics")
         # cursor= ile sayfalama anahtarsız 401 döner; page= anahtarsız çalışır.
         while more and len(out) < 400:
             r = await client.get(f"{OPENALEX}/works", params={
-                "filter": f"author.id:{aid}", "per-page": 200, "page": page, "select": select,
+                "filter": f"author.id:{aid}", "per-page": 200, "page": page, "select": OPENALEX_SELECT,
                 "sort": "publication_year:desc", **OPENALEX_PARAMS})
             if r.status_code != 200:
                 break
             data = r.json()
             for w in data.get("results", []):
-                loc = w.get("primary_location") or {}
-                out.append(record(
-                    "openalex", source_id=w["id"], title=w.get("display_name"), year=w.get("publication_year"),
-                    date=w.get("publication_date"),
-                    doi=w.get("doi"), venue=((loc.get("source") or {}).get("display_name")),
-                    authors=[n for a in w.get("authorships") or [] if (n := (a.get("author") or {}).get("display_name"))][:25],
-                    abstract=_abstract(w.get("abstract_inverted_index")), url=w.get("doi") or loc.get("landing_page_url") or w["id"],
-                    citations=w.get("cited_by_count"), type=w.get("type"),
-                    labels=[t["display_name"] for t in (w.get("topics") or [])[:3]],
-                    orgs=[{"name": i.get("display_name"), "type": i.get("type"), "country": i.get("country_code")}
-                          for a in w.get("authorships") or [] if not ((a.get("author") or {}).get("id") or "").endswith(aid)
-                          for i in a.get("institutions") or [] if i.get("type") == "company" and i.get("display_name")],
-                ))
+                out.append(_openalex_record(w, lambda a: ((a.get("author") or {}).get("id") or "").endswith(aid)))
             more = len(data.get("results") or []) == 200
             page += 1
         topics = author.get("topics") or author.get("x_concepts") or []
@@ -188,7 +229,7 @@ async def openalex_works(profile: Profile, log) -> tuple[list[dict], dict | None
 async def crossref_works(profile: Profile, log) -> list[dict]:
     orcid = profile.links.get("orcid")
     inst = profile.get("institution", "")
-    select = "DOI,title,author,published,issued,container-title,abstract,URL,is-referenced-by-count,type"
+    select = "DOI,title,author,published,issued,container-title,ISSN,abstract,URL,is-referenced-by-count,type"
     params = {"rows": 200, "select": select, "mailto": CONTACT_MAIL}
     if orcid:
         params["filter"] = f"orcid:{orcid}"
@@ -220,7 +261,7 @@ async def crossref_works(profile: Profile, log) -> list[dict]:
         date = (it.get("published") or it.get("issued") or {}).get("date-parts", [[None]])[0]
         out.append(record(
             "crossref", source_id=it.get("DOI"), title=(it.get("title") or [""])[0], year=date[0] if date else None, date=date,
-            doi=it.get("DOI"), venue=(it.get("container-title") or [""])[0],
+            doi=it.get("DOI"), venue=(it.get("container-title") or [""])[0], issn=it.get("ISSN"),
             authors=[clean(f"{a.get('given', '')} {a.get('family', '')}") for a in authors][:25],
             abstract=re.sub(r"<[^>]+>", " ", it.get("abstract") or ""), url=it.get("URL"),
             citations=it.get("is-referenced-by-count"), type=it.get("type")))

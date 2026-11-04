@@ -284,6 +284,15 @@ function download(name, text, type) {
   const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: name });
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
+// Çeyrek yayının yılına ve alana göre değişir: alanlar farklıysa aralık yazılır (SJR 2024 Q1–Q2), "en iyi" tek başına gösterilmez
+function quartileLabel(p) {
+  const k = p.quartile;
+  if (!k) return "";
+  const qs = [...new Set((k.categories || []).map((c) => c.q))].sort();
+  const range = qs.length > 1 ? `${qs[0]}–${qs.at(-1)}` : (qs[0] || k.q);
+  return `${k.source} ${k.year} ${range}`;
+}
+const quartileAreas = (p) => (p.quartile?.categories || []).map((c) => `${c.name} (${c.q})`).join("; ");
 // Excel (.xlsx) dosyası: bağımlılıksız, sıkıştırmasız ZIP içinde en küçük OOXML çalışma kitabı
 const CRC_T = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc32 = (b) => { let c = 0xffffffff; for (const x of b) c = CRC_T[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
@@ -304,7 +313,7 @@ function zipStore(files) {
 }
 function exportXlsx(list, name, meta = {}) {
   const cols = [["Başlık", (p) => p.title, 60], ["Yazarlar", (p) => (p.authors || []).join("; "), 40], ["Yıl", (p) => +p.year || "", 8], ["Yayın tarihi", (p) => p.date ? isoToTr(p.date) : "", 13],
-    ["Kategori", catLabel, 16], ["Yayın yeri", (p) => p.venue, 32], ["Tür", (p) => TYPE_TR[p.type] || p.type, 14], ["DOI", (p) => normDoi(p.doi), 26],
+    ["Kategori", catLabel, 16], ["Yayın yeri", (p) => p.venue, 32], ["Dergi çeyreği", (p) => quartileLabel(p), 18], ["Çeyrek alanları", quartileAreas, 36], ["Tür", (p) => TYPE_TR[p.type] || p.type, 14], ["DOI", (p) => normDoi(p.doi), 26],
     ["Atıf", (p) => p.citations ?? "", 8], ["Kaynak", (p) => (p.sources || [p.source]).filter(Boolean).map((s) => SRC_TR[s] || s).join(" + "), 22],
     ["Akademisyen", (p) => (p.unit_authors || []).join("; ") || p.person || meta.person || "", 24]];
   const x = (v) => String(v ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 32000);
@@ -626,10 +635,19 @@ function setupOmni() {
   $$("[data-try]").forEach((b) => { b.onclick = () => { input.value = b.dataset.try; input.focus(); search(); }; });
 }
 
+// YÖK'ün alan kodlarını ve metinden yanlış ayrılmış parçaları ilgi alanı listelerinden temizler
+function cleanInterest(v) {
+  const s = String(v || "").replace(/\s+[0-9A-F]{16}$/, "").trim();
+  return s.length > 2 && !/^(include|but are not limited to|theses)$/i.test(s) ? s : "";
+}
+const chatInterests = (c) => [...new Map((c.interests || []).map(cleanInterest).filter(Boolean).map((x) => [fold(x), x])).values()];
+
 function profileRow(c, i = 0) {
-  return `<div class="person-row" style="--i:${Math.min(i, 24)}" data-chat="${esc(c.id)}" data-q="${esc(fold(`${c.name} ${c.institution || ""}`))}">
+  const ints = chatInterests(c);
+  return `<div class="person-row" style="--i:${Math.min(i, 24)}" data-chat="${esc(c.id)}" data-q="${esc(fold(`${c.name} ${c.institution || ""}`))}" data-ints="${esc(ints.map(fold).join("|"))}">
     ${avatar(c.name, profilePhoto(c))}
-    <div class="pr-main"><b>${esc(c.name || "?")}</b><span>${esc([c.title, c.institution].filter(Boolean).join(" · "))}</span></div>
+    <div class="pr-main"><b>${esc(c.name || "?")}</b><span>${esc([c.title, c.institution].filter(Boolean).join(" · "))}</span>
+      ${ints.length ? `<span class="faint">${esc(ints.slice(0, 3).join(" · "))}</span>` : ""}</div>
     <span class="chip">${fmtNum(c.papers)} yayın</span>
     <button class="h-del" data-delchat="${esc(c.id)}" type="button" aria-label="Sil" title="Profili sil">${icon("x")}</button></div>`;
 }
@@ -642,13 +660,21 @@ const startFromYok = (p) => startJob(p.university, p.name, () => post("/api/jobs
 async function viewPeople(q = "") {
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Akademisyenler" }]);
   await loadChats();
+  // Filtre seçenekleri: en çok kişide geçen alan üstte; aynı alan yazım farkıyla tekrar etmez
+  const interestMap = new Map();
+  S.chats.forEach((c) => chatInterests(c).forEach((x) => {
+    const e = interestMap.get(fold(x)) || [fold(x), x, 0];
+    e[2]++; interestMap.set(fold(x), e);
+  }));
+  const interestOpts = [...interestMap.values()].sort((a, b) => b[2] - a[2] || a[1].localeCompare(b[1], "tr"));
   setView(`<div class="section-head"><div><h1>Akademisyenler</h1><p>Adı YÖK'te arayın, doğru kişiyi seçin; profil tüm kaynaklardan hazırlansın.</p></div>
       <div class="actions"><button class="btn ghost sm" type="button" data-byurl>${icon("globe")}Site bağlantısıyla başlat</button></div></div>
     <form class="card quick-search" id="pSearch"><div class="input">${icon("search")}<input id="pQ" value="${esc(q)}" placeholder="Ad Soyad, ör. Şimşek Demir" autocomplete="off"></div>
       <button class="btn primary" type="submit">YÖK'te ara</button></form>
     <div id="pResults"></div>
     <div class="row-head"><h3>İncelenen profiller</h3><span class="count">${S.chats.length}</span><span class="spacer"></span>
-      ${S.chats.length ? `<div class="input slim">${icon("search")}<input data-filter="pList" placeholder="Listede ara"></div><button class="link" type="button" data-clearall>Tümünü sil</button>` : ""}</div>
+      ${S.chats.length ? `${interestOpts.length ? `<select class="select int-select" id="pInterest" aria-label="İlgi alanı"><option value="">Tüm ilgi alanları</option>${interestOpts.map(([k, l, n]) => `<option value="${esc(k)}">${esc(l)} (${n})</option>`).join("")}</select>` : ""}
+        <div class="input slim">${icon("search")}<input data-filter="pList" placeholder="Listede ara"></div><button class="link" type="button" data-clearall>Tümünü sil</button>` : ""}</div>
     <div class="card list-card" id="pList">${S.chats.length ? `<div class="stagger">${S.chats.map(profileRow).join("")}</div>`
       : emptyState("users", "Henüz profil yok", "Yukarıdan bir akademisyen arayın.")}</div>`);
   $("#pSearch").addEventListener("submit", (e) => {
@@ -658,6 +684,15 @@ async function viewPeople(q = "") {
     const next = `#/akademisyenler?q=${encodeURIComponent(v)}`;
     if (location.hash === next) searchPeople(v); else location.hash = next;
   });
+  const intSel = $("#pInterest");
+  if (intSel) intSel.onchange = () => {
+    let shown = 0;
+    $$("#pList .person-row").forEach((row) => {
+      const hit = !intSel.value || row.dataset.ints.split("|").includes(intSel.value);
+      row.classList.toggle("int-off", !hit); shown += hit;
+    });
+    $(".row-head .count").textContent = shown;
+  };
   if (q) searchPeople(q); else $("#pQ").focus();
 }
 
@@ -1137,6 +1172,11 @@ function renderProfile(r, chat) {
     safeUrl(p.source_url) && `<a class="chip" href="${esc(safeUrl(p.source_url))}" target="_blank" rel="noopener">${icon("building")}Kurum sayfası</a>`,
   ].filter(Boolean).join("");
   const totalCites = r.publications.reduce((s, x) => s + (x.citations || 0), 0);
+  // h-index kaynağa göre gösterilir: kaynaklar farklı yayınları sayar, tek sayıya indirilmez
+  const qCounts = { total: 0, src: "" };
+  r.publications.forEach((x) => { if (x.quartile) { qCounts[x.quartile.q] = (qCounts[x.quartile.q] || 0) + 1; qCounts.total++; qCounts.src = x.quartile.source; } });
+  const srcMeta = r.recon?.sources_meta || {};
+  const hIndex = [["scholar", "Scholar"], ["openalex", "OpenAlex"]].filter(([k]) => srcMeta[k]?.h_index != null).map(([k, l]) => [srcMeta[k].h_index, l]);
   const tez = y.tez_merkezi || {}, trProjects = y.tr_projects || [];
   const nTheses = Math.max((sec.theses || []).length, (tez.advised || []).length);
   const tabs = [
@@ -1175,8 +1215,10 @@ function renderProfile(r, chat) {
         <div class="kpi"><b>${count(r.unique_count)}</b><span>benzersiz yayın</span></div>
         <div class="kpi"><b>${count(totalCites)}</b><span>toplam atıf</span></div>
         <div class="kpi"><b>${count((sec.courses || []).length)}</b><span>ders</span></div>
+        ${hIndex.length ? `<div class="kpi kpi-h" title="Kaynaklar farklı yayınları saydığı için değerler farklı olabilir. Web of Science ve Scopus değerleri dahil değildir.">${hIndex.map(([v, l]) => `<b>${count(v)}<small>${esc(l)}</small></b>`).join("")}<span>h-index</span></div>` : ""}
         <div class="kpi"><b>${count(nTheses)}</b><span>yönetilen tez</span></div>
         <div class="kpi"><b>${count((y.collaborators || []).length)}</b><span>iş birliği</span></div>
+        ${qCounts.total ? `<div class="kpi src"><b>${["Q1", "Q2", "Q3", "Q4"].map((k) => `${k} ${qCounts[k] || 0}`).join(" · ")} · çeyreği yok ${r.publications.length - qCounts.total}</b><span>dergi çeyreği · ${esc(qCounts.src)}, yayın yılına göre, derginin en iyi alanı (Scopus tabanlı, WoS/JCR değildir)</span></div>` : ""}
         <div class="kpi src"><b>${Object.entries(r.by_source || {}).map(([k, v]) => `${SRC_TR[k] || k} ${v}`).join(" · ") || "—"}</b><span>kaynak dağılımı</span></div>
       </div>
     </section>
@@ -1186,8 +1228,8 @@ function renderProfile(r, chat) {
     <div class="panel active" data-panel="overview"><div class="stack">
       <div class="stack" id="analysisBox">${analysisHtml(a)}</div>
       ${(p.verification?.interests?.length || p.interests?.length) ? `<div class="card card-pad"><div class="card-title">İlgi alanları</div><div class="chips">
-        ${(p.verification?.interests?.length ? p.verification.interests.slice(0, 16).map((x) => `<span class="chip" title="${esc(x.sources.join(", "))}">${esc(x.value)}${x.sources.length > 1 ? `<sup>✓${x.sources.length}</sup>` : ""}</span>`)
-          : p.interests.map((x) => `<span class="chip">${esc(x)}</span>`)).join("")}</div></div>` : ""}
+        ${(p.verification?.interests?.length ? p.verification.interests.filter((x) => cleanInterest(x.value)).slice(0, 16).map((x) => `<span class="chip" title="${esc(x.sources.join(", "))}">${esc(cleanInterest(x.value))}${x.sources.length > 1 ? `<sup>✓${x.sources.length}</sup>` : ""}</span>`)
+          : p.interests.filter(cleanInterest).map((x) => `<span class="chip">${esc(cleanInterest(x))}</span>`)).join("")}</div></div>` : ""}
       ${(r.industry || []).length ? `<div class="card card-pad"><div class="card-title">${icon("building")}Sanayi iş birlikleri<span class="spacer"></span>
         <button class="btn sm" data-tabgo="collab" type="button">Kanıtları gör</button></div><div class="chips">${r.industry.map((x) =>
           `<span class="chip ${x.official ? "teal" : ""}">${x.official ? "✓ " : ""}${esc(x.name)}</span>`).join("")}</div></div>` : ""}
@@ -1197,6 +1239,7 @@ function renderProfile(r, chat) {
 
     <div class="panel" data-panel="pubs">
       <div class="toolbar"><div class="input">${icon("search")}<input id="pubFilter" placeholder="Başlıkta ara"></div>
+        ${qCounts.total ? `<select class="select" id="pubQuart" aria-label="Dergi çeyreği"><option value="">Tüm çeyrekler</option>${["Q1", "Q2", "Q3", "Q4"].filter((k) => qCounts[k]).map((k) => `<option value="${k}">En iyi ${qCounts.src} ${k} (${qCounts[k]})</option>`).join("")}<option value="none">Çeyreği yok (${r.publications.length - qCounts.total})</option></select>` : ""}
         <select class="select" id="pubSort"><option value="year">En yeni</option><option value="cites">En çok atıf</option><option value="title">Başlık</option></select>
         ${exportButtons("pubs")}</div>
       <div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th style="width:52px">#</th><th>Başlık</th><th>Yıl</th><th>Kaynak</th><th>Doğrulama</th><th>Atıf</th><th></th></tr></thead>
@@ -1239,14 +1282,16 @@ function renderProfile(r, chat) {
   const tbody = $("#pubs");
   const drawPubs = () => {
     const q = fold($("#pubFilter").value), sort = $("#pubSort").value;
-    let list = r.publications.filter((x) => !q || fold(`${x.title} ${x.variants.map((v) => v.title).join(" ")} ${x.venue || ""}`).includes(q));
+    const qf = $("#pubQuart")?.value || "";
+    let list = r.publications.filter((x) => (!qf || (qf === "none" ? !x.quartile : x.quartile?.q === qf))
+      && (!q || fold(`${x.title} ${x.variants.map((v) => v.title).join(" ")} ${x.venue || ""}`).includes(q)));
     list = [...list].sort(sort === "cites" ? (m, n) => (n.citations || 0) - (m.citations || 0) : sort === "title" ? (m, n) => m.title.localeCompare(n.title, "tr") : () => 0);
     S.lists.pubs = list;
     tbody.innerHTML = list.map((x) => {
       const id = reg(x, pubSrc(x));
       return `<tr id="pub-${esc(x.id)}"><td class="faint">${esc(x.id)}</td>
         <td><div class="t-title" data-open="${id}">${esc(x.title)}</div>
-          ${x.venue ? `<div class="variants">${esc(x.venue)}</div>` : ""}
+          ${x.venue ? `<div class="variants">${esc(x.venue)}${x.quartile ? ` <span class="q-badge ${esc(x.quartile.q.toLowerCase())}" title="${esc(quartileAreas(x))}. ${esc(x.quartile.source)} Scopus tabanlıdır; WoS/JCR çeyreği değildir.">${esc(quartileLabel(x))}</span>` : ""}</div>` : ""}
           ${x.variants.length > 1 ? `<div class="variants">↳ ${x.variants.slice(1).map((v) => `${esc(v.title)} (${esc(v.lang)})`).join(" · ")}</div>` : ""}</td>
         <td>${esc(x.year || "—")}</td>
         <td><div class="chips">${x.sources.map((s) => `<span class="badge ${esc(s)}">${esc(SRC_TR[s] || s)}</span>`).join("")}</div></td>
@@ -1256,7 +1301,7 @@ function renderProfile(r, chat) {
     }).join("") || `<tr><td colspan="7">${emptyState("file", "Yayın yok", "Filtreyi değiştirin.")}</td></tr>`;
     hydrateIcons(tbody);
   };
-  $("#pubFilter").oninput = drawPubs; $("#pubSort").onchange = drawPubs; drawPubs();
+  $("#pubFilter").oninput = drawPubs; $("#pubSort").onchange = drawPubs; if ($("#pubQuart")) $("#pubQuart").onchange = drawPubs; drawPubs();
 
   $("#refreshProfileBtn").onclick = () => startJob(p.institution || p.source_url || "", p.name, () => post(`/api/jobs/${r.job_id}/refresh`, {}), "yenileniyor");
   $("#favPersonBtn").onclick = async () => {

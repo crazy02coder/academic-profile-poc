@@ -33,7 +33,7 @@ SYSTEM = ("Sen 'Akademik İz' asistanısın. Kullanıcı tek bir akademisyen hak
 
 GLOBAL_Q = re.compile(r"\b(kac|sayi|sayisi|toplam|en cok|en az|en fazla|atif|yillara|yil yil|dagilim|kimlerle|kiminle|"
                       r"ortak yazar|birlikte|genel|alanlari|ozetle|ozet|kariyer|unvan|bolum|kurum|orcid|son yayin|"
-                      r"en yeni|en son|ilk yayin|liste|tum|butun|hepsi|yonelim|odak|degisim|trend|h index|h-index|"
+                      r"en yeni|en son|ilk yayin|liste|tum|butun|hepsi|yonelim|odak|degisim|trend|h ?ind(?:ex|eks)\w*|"
                       r"how many|most cited|overall|all)\b")
 # Türkçe eklemeli: kökler önek olarak eşleşir ("yöntemi", "yöntemlerini" → yontem)
 DETAIL_Q = re.compile(r"\b(neden|yontem|teknik|veri ?seti|dataset|deney|detay|ayrinti|anlat|acikla|ne yap|ne bul|"
@@ -79,6 +79,7 @@ class Knowledge:
             "DOĞRULAMA: " + "; ".join(f"{k}={v.get('status')}({'+'.join(v.get('sources', []))})"
                                       for k, v in ver.items() if k != "interests"),
             f"İLGİ ALANLARI: {', '.join(prof.get('interests') or [])}",
+            self._h_index_line(),
             f"YAYIN SAYISI: {len(papers)} benzersiz ({self.result.get('raw_count')} ham kayıt) | YILLARA GÖRE: "
             + ", ".join(f"{y}:{c}" for y, c in sorted(years.items())),
             f"ANALİZ ÖZETİ: {an.get('summary', '')}",
@@ -89,6 +90,14 @@ class Knowledge:
             "SIK ORTAK YAZARLAR: " + ", ".join(f"{a} ({c})" for a, c in coauth.most_common(10)),
             *self._yok_lines(),
         ]
+
+    def _h_index_line(self) -> str:
+        """Kaynaklar farklı yayınları saydığı için değerler tek sayıya indirilmez."""
+        meta = (self.result.get("recon") or {}).get("sources_meta") or {}
+        values = [f"{label}={meta[k]['h_index']}" for k, label in (("scholar", "Google Scholar"), ("openalex", "OpenAlex"))
+                  if (meta.get(k) or {}).get("h_index") is not None]
+        return ("H-INDEX (kaynağa göre; değerleri kaynak adıyla ver, Web of Science/Scopus değeri yok): "
+                + ("; ".join(values) or "toplanan veride yok"))
 
     def _yok_lines(self) -> list[str]:
         """YÖK profilindeki yayın dışı bilgiler: sohbet 'hangi dersleri veriyor?' gibi sorulara cevap verebilsin."""
@@ -131,7 +140,9 @@ class Knowledge:
         lines = self._header() + ["", "TÜM YAYINLAR (kimlik, yıl, dergi, atıf, dil, kaynak):"]
         for p in self.papers:
             lines.append(f"[{p['id']}] {p['year'] or '?'} | {p['title']} | {p.get('venue') or '-'} | atıf "
-                         f"{p.get('citations') or 0} | {'/'.join(p.get('languages', []))} | {'+'.join(p.get('sources', []))}")
+                         f"{p.get('citations') or 0} | {'/'.join(p.get('languages', []))} | {'+'.join(p.get('sources', []))}"
+                         + (f" | dergi çeyreği {p['quartile']['source']} {p['quartile']['year']}: "
+                            + ", ".join(f"{c['name']} {c['q']}" for c in p["quartile"]["categories"]) if p.get("quartile") else ""))
         return "\n".join(lines)
 
     def _full(self) -> str:
@@ -242,7 +253,7 @@ async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: s
             await on_stage("İlgili yayınlar hazırlanıyor (BM25 ve varsa embedding modeli)…")
         papers, info = await kb.retrieve(question, llm)
         meta.update(info)
-        prefix = SYSTEM + "\n\nBİLGİ TABANI (yalnız getirilen):\n" + "\n".join(kb._header()[:4])
+        prefix = SYSTEM + "\n\nBİLGİ TABANI (yalnız getirilen):\n" + "\n".join(kb._header()[:5])
         tail = "GETİRİLEN YAYINLAR (RAG):\n" + _details(papers) + "\n\n"
     meta["context_tokens"] = est_tokens(prefix + tail)
     meta["retrieval_s"] = round(time.time() - started, 2)
@@ -277,6 +288,8 @@ async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: s
 async def _mock_answer(kb: Knowledge, question: str, llm) -> list[str]:
     prof, papers = kb.prof, kb.papers
     q = fold(question)
+    if re.search(r"h ?ind(ex|eks)", q):
+        return ["h-index: " + kb._h_index_line().split(": ", 1)[1] + "."]
     if re.search(r"kac|sayi|how many|toplam", q):
         years = Counter(p["year"] for p in papers if p["year"])
         return [f"{prof['name']} için {len(papers)} benzersiz yayın bulundu. Yıllara göre: "

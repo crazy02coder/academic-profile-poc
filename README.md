@@ -251,6 +251,15 @@ Firma sonuçları 7 gün saklanır; OpenAlex kotası dolduğunda eksik sonuç sa
 
 ---
 
+## Dergi çeyreği (Q1–Q4)
+
+Yayınların dergi çeyreği, içe aktarılan SCImago (SJR) listelerinden gösterilir:
+
+1. [scimagojr.com/journalrank.php](https://www.scimagojr.com/journalrank.php) adresinden her yıl için "Download data" ile dosyayı indirip `data/sjr/` klasörüne koyun.
+2. `python scripts/import_sjr.py` komutunu çalıştırın. Yeni yıl çıkınca dosyayı ekleyip aynı komutu tekrarlamak yeterlidir.
+
+Yayın, çıktığı yılın listesiyle eşleşir; o yılın listesi yoksa en son liste kullanılır ve etikette o yıl yazar. Dergi önce ISSN, yoksa adının birebir eşleşmesiyle bulunur. Alanlara göre çeyrek farklıysa aralık gösterilir (`SJR 2024 Q1–Q2`). SJR Scopus tabanlıdır ve WoS/JCR çeyreğiyle aynı değildir.
+
 ## Patentler
 
 Kaynak EPO Open Patent Services'tir (Espacenet'in verisi; EP, WO ve TR yayınları). Anahtar tanımlı değilse patent sekmeleri görünmez.

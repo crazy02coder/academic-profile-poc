@@ -582,3 +582,11 @@ details.tech summary { cursor: pointer; color: var(--faint); font-size: 12.5px; 
 .actions #exCount { font-size: 13px; }
 .ex-note { margin: -4px 0 0; font-size: 12.5px; line-height: 1.5; }
 .input.bad { border-color: var(--err); }
+.kpi-h b { display: flex; align-items: baseline; gap: 6px; }
+.kpi-h b + b { margin-top: 2px; }
+.kpi-h small { font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+.person-row.int-off { display: none; }
+.int-select { max-width: 240px; height: 32px; font-size: 12.5px; }
+.q-badge { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 6px; font-size: 11px; font-weight: 700; line-height: 18px; border: 1px solid var(--line-2); color: var(--text-2); white-space: nowrap; }
+.q-badge.q1 { background: var(--text); border-color: var(--text); color: var(--surface); }
+.q-badge.q2 { border-color: var(--text); color: var(--text); }
