@@ -2,7 +2,7 @@ services:
   - type: web
     name: akademik-iz
     runtime: docker
-    plan: free
+    plan: pro
     healthCheckPath: /
     envVars:
       - key: GEMINI_API_KEY
