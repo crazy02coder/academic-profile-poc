@@ -64,6 +64,8 @@ OpenAlex anahtarsız da çalışır ama IP başına günlük ortak bütçe (~100
 | Kısa işler (link seçimi) | `gemini-3.5-flash-lite` |
 | RAG gömme | `gemini-embedding-001` (768 boyut) |
 
+Sağlayıcı **Ayarlar** sayfasından değiştirilir: Gemini, ChatGPT, Claude ya da OpenAI uyumlu kendi sunucunuz (adres + anahtar). Ayarlar git'e girmeyen `.ai-settings.json` dosyasında durur; anahtarlar arayüze geri gönderilmez. `.env`'deki `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` yedek olarak geçerlidir. Claude'da gömme modeli olmadığından sohbet yayınları kelime aramasıyla bulur.
+
 Ücretsiz katmanda kota (429) ve yoğunluk (503) hataları olağandır. Hata alan istek sıradaki modelle (`GEMINI_FALLBACKS`) yeniden denenir; kotası dolan model 60 sn atlanır.
 
 ---

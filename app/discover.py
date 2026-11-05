@@ -978,7 +978,7 @@ async def llm_enrich(profile: Profile, llm, log):
         if value:
             profile.set(key, value, "llm", profile.source_url)
     if any(k in profile.facts and profile.facts[k].source == "llm" for k in missing):
-        await log("scrape", "running", "Eksik profil alanları Gemini ile sayfa metninden tamamlandı (metinde doğrulandı).")
+        await log("scrape", "running", "Eksik profil alanları yapay zekâ ile sayfa metninden tamamlandı (metinde doğrulandı).")
 
 
 def dumps(obj) -> str:

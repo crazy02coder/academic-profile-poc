@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 import time
+from collections import Counter
 
 import httpx
 
@@ -38,7 +39,23 @@ def _groups() -> dict[str, dict]:
 
 def _public(fid: str, g: dict) -> dict:
     return {"id": fid, "name": g["name"], "centers": g["centers"], "cities": sorted(g["cities"]),
-            "sectors": sorted(g["sectors"]), "kinds": sorted(g["kinds"])}
+            "sectors": sorted(g["sectors"]), "kinds": sorted(g["kinds"]), "areas": _areas().get(fid, {})}
+
+
+# ------------------------------------------------------------------ çalışma alanları (scripts/build_firm_areas.py üretir)
+AREAS_PATH = ROOT / "data" / "firm_areas.json"
+_areas_cache: tuple[float, dict] = (0, {})
+
+
+def _areas() -> dict:
+    global _areas_cache
+    try:
+        mtime = AREAS_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if _areas_cache[0] != mtime:
+        _areas_cache = (mtime, json.loads(AREAS_PATH.read_text()).get("firms", {}))
+    return _areas_cache[1]
 
 
 # ------------------------------------------------------------------ uygulamadaki profiller
@@ -74,12 +91,14 @@ def _profile_links() -> dict[str, list[dict]]:
     return out
 
 
-def firm_list(q: str = "", sector: str = "", city: str = "") -> dict:
+def firm_list(q: str = "", sector: str = "", city: str = "", area: str = "") -> dict:
     info = industry.centers_info()
     if not info.get("available"):
         return {"available": False, "items": [], "sectors": [], "cities": []}
     groups = _groups()
     links = _profile_links()
+    areas = _areas()
+    area_counts = Counter(x["name"] for fid in groups for x in areas.get(fid, {}).get("tags", []))
     items = []
     for fid, g in groups.items():
         if q and not word_match(q, g["name"], *g["centers"]):
@@ -88,13 +107,16 @@ def firm_list(q: str = "", sector: str = "", city: str = "") -> dict:
             continue
         if city and city not in g["cities"]:
             continue
+        if area and not any(x["name"] == area for x in areas.get(fid, {}).get("tags", [])):
+            continue
         cached = _cached(fid)
         items.append(_public(fid, g) | {"profiles": len(links.get(g["name"], [])),
                                         "academics": cached.get("academic_count") if cached else None})
     items.sort(key=lambda x: (-x["profiles"], -(x["academics"] or 0), -len(x["centers"]), fold(x["name"])))
     return {"available": True, "info": info, "total": len(groups), "count": len(items), "items": items[:300],
             "sectors": sorted({s for g in groups.values() for s in g["sectors"] if s}),
-            "cities": sorted({c for g in groups.values() for c in g["cities"] if c})}
+            "cities": sorted({c for g in groups.values() for c in g["cities"] if c}),
+            "areas": [{"name": k, "count": n} for k, n in sorted(area_counts.items(), key=lambda x: (-x[1], x[0]))]}
 
 
 # ------------------------------------------------------------------ dış kaynaklar
@@ -124,11 +146,7 @@ async def _openalex(client, g: dict) -> tuple[list[dict], str]:
     filters = ([f"institutions.id:{'|'.join(ids)}"] if ids else []) + \
         [f'raw_affiliation_strings.search:"{n}"' for n in _names(g)]
 
-    def at_firm(a) -> bool:
-        if any(i.get("id", "").rsplit("/", 1)[-1] in ids for i in a.get("institutions") or []):
-            return True
-        return any(industry.match(part) is g for s in a.get("raw_affiliation_strings") or [] for part in s.split(","))
-
+    at_firm = _at_firm(g, ids)
     works: dict[str, dict] = {}
     for f in filters:
         for page in (1, 2):
@@ -143,6 +161,78 @@ async def _openalex(client, g: dict) -> tuple[list[dict], str]:
             if len(batch) < 200:
                 break
     return _openalex_rows(works.values(), at_firm), ""
+
+
+TURKEY = re.compile(r"t[uü]rk[iı]ye|turkey|\bTR\b", re.I)
+NOT_FIRM_ADDRESS = re.compile(r"[üu]niversit|university|college|hospital|hastane|fak[üu]lte|faculty|school of|klinik|clinic", re.I)
+# Marka ardından gelebilen kurumsal kelimeler ("Aselsan Research Center", "Arçelik Ar-Ge")
+UNIT_WORDS = {"research", "center", "centre", "merkezi", "arge", "ar", "rd", "dept", "department", "division", "group",
+              "grubu", "technologies", "technology", "teknoloji", "teknolojileri", "company", "co", "turkey", "turkiye"}
+
+
+def firm_address(address: str, g: dict, in_turkey: bool = False) -> bool:
+    """Ham yazar adresi bu firmayı mı gösteriyor? Tek kelimelik marka şehir ya da soyadı olabilir ("Agra, India"; "Doğu Anadolu").
+
+    Adres Türkiye'de olmalı (metinde yazmıyorsa in_turkey: OpenAlex yazarı yalnızca Türkiye'ye bağlamış), üniversite/hastane
+    adresi olmamalı; marka ya şirket ekiyle ya listedeki devam kelimesiyle ya da kurumsal bir kelimeyle birlikte veya adres
+    parçasında tek başına yazılmalı.
+    """
+    if not address or not (in_turkey or TURKEY.search(address)) or NOT_FIRM_ADDRESS.search(address):
+        return False
+    for part in address.split(","):
+        if industry.match(part) is not g:
+            continue
+        folded = " ".join(industry._words(part))
+        if any(alias in folded and industry.match(target) is g for alias, target in industry.ALIASES.items()):
+            return True  # "Ford Otosan" → Ford Otomotiv
+        words = industry._words(re.sub(r"\([^)]*\)", " ", part))
+        key = list(g["key"])
+        i = next((n for n in range(len(words)) if words[n:n + len(key)] == key), None)
+        if i is None:
+            return True  # kısaltma/yabancı ad eşleşmesi (industry.ALIASES)
+        after = [w for w in words[i + len(key):] if w not in industry.LEGAL]
+        suffixed = i + len(key) < len(words) and words[i + len(key)] in industry.FIRM_SUFFIX
+        if suffixed or not after or after[0] in g["nexts"] or after[0] in UNIT_WORDS:
+            return True
+    return False
+
+
+def _at_firm(g: dict, ids: set[str]):
+    """Yazar bu firmada mı: firmanın kurum kaydı ya da firma_address kuralını geçen ham adres."""
+    def check(a) -> bool:
+        if any(i.get("id", "").rsplit("/", 1)[-1] in ids for i in a.get("institutions") or []):
+            return True
+        in_turkey = (a.get("countries") or []) == ["TR"]
+        return any(firm_address(s, g, in_turkey) for s in a.get("raw_affiliation_strings") or [])
+    return check
+
+
+async def openalex_areas(client, g: dict) -> dict | None:
+    """Firmanın yayınlarından çalışma alanları; yazarlardan biri firmada değilse yayın sayılmaz. Kota/ağ hatasında None."""
+    r = await client.get(f"{OPENALEX}/institutions", params={
+        "search": g["name"], "filter": "country_code:TR", "per-page": 25, **OPENALEX_PARAMS, "select": "id,display_name"})
+    if r.status_code != 200:
+        return None
+    ids = {i["id"].rsplit("/", 1)[-1] for i in r.json().get("results") or [] if industry.match(i.get("display_name") or "") is g}
+    filters = ([f"institutions.id:{'|'.join(ids)}"] if ids else []) + \
+        [f'raw_affiliation_strings.search:"{n}"' for n in _names(g)]
+    at_firm = _at_firm(g, ids)
+    works: dict[str, dict] = {}
+    for f in filters:
+        r = await client.get(f"{OPENALEX}/works", params={
+            "filter": f, "per-page": 200, "sort": "publication_year:desc", "select": "id,authorships,primary_topic", **OPENALEX_PARAMS})
+        if r.status_code != 200:
+            return None
+        works.update((w["id"], w) for w in r.json().get("results") or [] if any(at_firm(a) for a in w.get("authorships") or []))
+    subfields, topics = Counter(), Counter()
+    for w in works.values():
+        t = w.get("primary_topic") or {}
+        if t.get("display_name"):
+            topics[t["display_name"]] += 1
+        if (t.get("subfield") or {}).get("display_name"):
+            subfields[t["subfield"]["display_name"]] += 1
+    return {"papers": len(works), "tags": [{"name": k, "count": n} for k, n in subfields.most_common(6)],
+            "topics": [{"name": k, "count": n} for k, n in topics.most_common(8)]}
 
 
 def _openalex_rows(works, at_firm) -> list[dict]:

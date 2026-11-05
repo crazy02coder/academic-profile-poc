@@ -1001,7 +1001,7 @@ function unitRow(u, kind, i, active) {
 function renderFaculties() {
   const d = S.dir, items = d.data.items || [];
   $("#orgName").textContent = d.data.name || d.host;
-  $("#orgMeta").textContent = `${items.length} birim · ${d.data.method === "gemini" ? "Gemini ile seçildi" : "kurallarla seçildi"} · ${d.data.at || ""}`;
+  $("#orgMeta").textContent = `${items.length} birim · ${d.data.method === "gemini" ? "Yapay zekâ ile seçildi" : "kurallarla seçildi"} · ${d.data.at || ""}`;
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Üniversiteler", href: "#/universiteler" }, { label: d.data.name || d.host }]);
   $("#nFac").textContent = items.length;
   $("#colFac .col-body").innerHTML = items.length ? `<div class="stagger">${items.map((u, i) => unitRow(u, "fac", i, d.fac === i)).join("")}</div>`
@@ -1474,7 +1474,7 @@ function analysisHtml(a) {
       <button class="btn primary" data-analyze type="button">${icon("sparkle")}Yapay zekâ ile analiz et</button></div>`;
   }
   return `<div class="card card-pad"><div class="card-title">${icon("sparkle")}Araştırma özeti<span class="spacer"></span>
-      <span class="chip ${a.mode === "mock" ? "gold" : "blue"}">${a.mode === "mock" ? "Kural tabanlı analiz" : "Gemini · " + esc(a.model || "")}</span>
+      <span class="chip ${a.mode === "mock" ? "gold" : "blue"}">${a.mode === "mock" ? "Kural tabanlı analiz" : "Yapay zekâ · " + esc(a.model || "")}</span>
       <button class="icon-btn" data-analyze type="button" title="Yeniden analiz et">${icon("refresh")}</button></div>
       ${a.summary ? `<p class="summary-text">${esc(a.summary)}</p>` : ""}
       <div class="chips" style="margin-bottom:14px">${(a.areas || []).map((x) => `<span class="chip blue">${esc(x.label)}</span>`).join("")}</div>
@@ -1490,7 +1490,7 @@ async function runAnalysis() {
   if (!box || !r || S.analyzing) return;
   S.analyzing = true;
   box.innerHTML = `<div class="card card-pad"><div class="card-title">${icon("sparkle")}Araştırma analizi</div>
-    <div class="loading-line"><span class="spinner"></span>Gemini ${fmtNum(r.unique_count)} yayını inceliyor, iddialar kanıtlarla doğrulanıyor…</div>${skeleton(3)}</div>`;
+    <div class="loading-line"><span class="spinner"></span>Yapay zekâ ${fmtNum(r.unique_count)} yayını inceliyor, iddialar kanıtlarla doğrulanıyor…</div>${skeleton(3)}</div>`;
   hydrateIcons(box);
   try {
     const a = await post(`/api/jobs/${r.job_id}/analyze`, {});
@@ -1645,12 +1645,14 @@ async function viewLibrary(tab = "papers") {
 
 // =================================================================== SİSTEM
 async function viewSystem() {
-  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Sistem" }]);
-  setView(`<div class="section-head"><div><h1>Sistem</h1><p>Arka plandaki servislerin durumu ve REA'nın öğrendiği site tarifleri.</p></div></div>
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Ayarlar" }]);
+  setView(`<div class="section-head"><div><h1>Ayarlar</h1><p>Kullanılacak yapay zekâ, servislerin durumu ve REA'nın öğrendiği site tarifleri.</p></div></div>
+    <div class="card card-pad ai-card" id="aiCard">${skeleton(3)}</div>
     <div class="grid-2"><div class="card card-pad"><div class="card-title">${icon("info")}Durum</div><div id="sysState">${skeleton(3)}</div></div>
       <div class="card card-pad"><div class="card-title">${icon("settings")}Site tarifleri</div>
         <p class="muted" style="margin:0 0 14px">REA sitelerin arka plandaki isteklerini öğrenir; site değişince yeniden öğrenir.</p>
         <div class="actions"><button class="btn sm" type="button" data-recipes>Öğrenilen tarifler</button><button class="btn sm" type="button" data-scan>Değişiklikleri tara</button></div></div></div>`);
+  aiSettingsCard();
   let h = null;
   try { h = await api("/api/health"); } catch { /* aşağıda gösterilir */ }
   const box = $("#sysState");
@@ -1660,18 +1662,91 @@ async function viewSystem() {
     row("Patentler (EPO)", h.patents, h.patents ? "Anahtar tanımlı" : "Anahtar yok; patent sekmeleri kapalı")].join("") : `<p class="muted">Sunucuya ulaşılamadı.</p>`;
 }
 
+// Yapay zekâ sağlayıcısı. Anahtar sunucuda kalır; arayüze yalnızca "kayıtlı mı" bilgisi gelir.
+async function aiSettingsCard() {
+  const card = $("#aiCard");
+  let cfg;
+  try { cfg = await api("/api/settings/ai"); } catch { if (card) card.innerHTML = `<p class="muted">Ayarlar okunamadı.</p>`; return; }
+  if (!card?.isConnected) return;
+  const NOTES = {
+    gemini: "Google AI Studio anahtarı.",
+    openai: "platform.openai.com anahtarı. ChatGPT Plus üyeliği API anahtarı yerine geçmez.",
+    anthropic: "console.anthropic.com anahtarı. Claude'da gömme modeli olmadığı için sohbet yayınları kelime aramasıyla bulur.",
+    custom: "OpenAI uyumlu her sunucu olur (Ollama, LM Studio, vLLM…). Anahtar gerekmiyorsa boş bırakın.",
+  };
+  card.innerHTML = `<div class="card-title">${icon("settings")}Yapay zekâ</div>
+    <form class="ai-form" id="aiForm" autocomplete="off">
+      <div class="field"><label for="aiProvider">Sağlayıcı</label><select class="select" id="aiProvider">
+        ${Object.entries(cfg.providers).map(([k, p]) => `<option value="${k}" ${k === cfg.provider ? "selected" : ""}>${esc(p.label)}</option>`).join("")}</select></div>
+      <div class="field" id="aiUrlField"><label for="aiUrl">Sunucu adresi</label><div class="input"><input id="aiUrl" placeholder="http://localhost:11434/v1"></div></div>
+      <div class="field"><label for="aiKey">API anahtarı</label><div class="input"><input id="aiKey" type="password" autocomplete="new-password"></div></div>
+      <div class="field"><label for="aiModel">Model</label><div class="input"><input id="aiModel" list="aiModels"></div><datalist id="aiModels"></datalist></div>
+      <div class="field"><label for="aiFast">Kısa işler modeli <small>isteğe bağlı</small></label><div class="input"><input id="aiFast" list="aiModels"></div></div>
+      <div class="field" id="aiEmbedField"><label for="aiEmbed">Gömme modeli <small>isteğe bağlı</small></label><div class="input"><input id="aiEmbed" list="aiModels"></div></div>
+    </form>
+    <p class="muted ai-note" id="aiNote"></p>
+    <div class="actions"><button class="btn primary sm" type="button" id="aiSave">Kaydet ve kullan</button>
+      <button class="btn sm" type="button" id="aiList">Bağlantıyı dene</button>
+      <button class="btn sm" type="button" id="aiClear">Anahtarı sil</button></div>
+    <p class="muted ai-note" id="aiStatus" role="status"></p>
+    <p class="faint ai-note">Anahtar yalnızca bu bilgisayarda saklanır. Taranan sayfa metinleri, yayın bilgileri ve sohbet soruları seçtiğiniz sağlayıcıya gönderilir.</p>`;
+  const fill = () => {
+    const name = $("#aiProvider").value, p = cfg.providers[name];
+    $("#aiUrlField").hidden = name !== "custom";
+    $("#aiEmbedField").hidden = name !== "custom";
+    $("#aiUrl").value = p.base_url || "";
+    $("#aiModel").value = p.model || "";
+    $("#aiFast").value = p.fast_model || "";
+    $("#aiEmbed").value = p.embed_model || "";
+    $("#aiKey").value = "";
+    $("#aiKey").placeholder = p.has_key ? (p.key_source === "env" ? "Anahtar .env dosyasından geliyor" : "Kayıtlı; değiştirmek için yazın") : "Anahtarı yapıştırın";
+    $("#aiClear").hidden = p.key_source !== "saved";
+    $("#aiModels").innerHTML = "";
+    $("#aiNote").textContent = NOTES[name];
+    $("#aiStatus").textContent = "";
+  };
+  const values = (extra = {}) => ({ provider: $("#aiProvider").value, key: $("#aiKey").value, base_url: $("#aiUrl").value,
+    model: $("#aiModel").value, fast_model: $("#aiFast").value, embed_model: $("#aiEmbed").value, ...extra });
+  const status = (text) => { $("#aiStatus").textContent = text; };
+  const save = async (extra) => {
+    status("Kaydediliyor ve bağlanılıyor…");
+    try {
+      const r = await post("/api/settings/ai", values(extra));
+      cfg = r;
+      const label = r.label;
+      fill();
+      status(r.ready ? `Kullanımda: ${label}` : label);
+      loadEnv();
+    } catch (e) { status(e.message || "Kaydedilemedi."); }
+  };
+  fill();
+  $("#aiProvider").addEventListener("change", fill);
+  $("#aiList").addEventListener("click", async () => {
+    status("Bağlanılıyor…");
+    try {
+      const r = await post("/api/settings/ai/models", values());
+      if (!r.ok) return status(r.error);
+      $("#aiModels").innerHTML = r.models.map((m) => `<option value="${esc(m)}">`).join("");
+      status(r.models.length ? `Bağlantı başarılı. ${r.models.length} model bulundu; Model kutusundan seçebilirsiniz.` : "Bağlantı başarılı; sunucu model listesi vermedi, model adını yazın.");
+    } catch (e) { status(e.message || "Bağlanılamadı."); }
+  });
+  $("#aiSave").addEventListener("click", () => save({}));
+  $("#aiClear").addEventListener("click", () => save({ key: "", clear_key: true }));
+}
+
 // =================================================================== FİRMALAR
 // Sanayi ve Teknoloji Bakanlığı Ar-Ge / Tasarım Merkezi listesindeki firmalar ve onlarla çalışan akademisyenler.
-async function viewFirms(q = "", sector = "", city = "") {
+async function viewFirms(q = "", sector = "", city = "", area = "") {
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Firmalar" }]);
   setView(`<div class="section-head"><div><h1>Firmalar</h1><p>Resmi Ar-Ge ve Tasarım Merkezi olan firmalar. Bir firma seçin, onunla çalışan akademisyenleri görün.</p></div></div>
     <div class="toolbar"><div class="input">${icon("search")}<input id="firmQ" placeholder="Firma adı (ör. Aselsan, Arçelik)" value="${esc(q)}"></div>
       <select class="select" id="firmSector"><option value="">Tüm sektörler</option></select>
-      <select class="select" id="firmCity"><option value="">Tüm iller</option></select></div>
+      <select class="select" id="firmCity"><option value="">Tüm iller</option></select>
+      <select class="select" id="firmArea" aria-label="Çalışma alanı" hidden><option value="">Tüm çalışma alanları</option></select></div>
     <div id="fBody">${skeleton(4)}</div>`);
   let timer;
   const load = async () => {
-    const qs = new URLSearchParams({ q: $("#firmQ").value.trim(), sector: $("#firmSector").value, city: $("#firmCity").value });
+    const qs = new URLSearchParams({ q: $("#firmQ").value.trim(), sector: $("#firmSector").value, city: $("#firmCity").value, area: $("#firmArea").value || area });
     history.replaceState(null, "", `#/firmalar?${qs}`);
     let d;
     try { d = await api(`/api/firms?${qs}`); } catch (e) { $("#fBody").textContent = e.message; return; }
@@ -1682,17 +1757,22 @@ async function viewFirms(q = "", sector = "", city = "") {
     }
     const fill = (sel, values, cur) => { if (sel.options.length > 1) return; sel.insertAdjacentHTML("beforeend", values.map((v) => `<option ${v === cur ? "selected" : ""}>${esc(v)}</option>`).join("")); };
     fill($("#firmSector"), d.sectors, sector); fill($("#firmCity"), d.cities, city);
+    if (d.areas?.length && $("#firmArea").options.length === 1) {
+      $("#firmArea").insertAdjacentHTML("beforeend", d.areas.map((x) => `<option value="${esc(x.name)}" ${x.name === area ? "selected" : ""}>${esc(x.name)} (${x.count})</option>`).join(""));
+      $("#firmArea").hidden = false;
+    }
     $("#fBody").innerHTML = `<p class="faint" style="margin:0 0 12px">${fmtNum(d.count)} firma${d.count > d.items.length ? `, ilk ${d.items.length} gösteriliyor` : ""} · toplam ${fmtNum(d.total)} firma, ${fmtNum(d.info.count)} merkez · liste ${esc(d.info.imported || "")}</p>
       ${d.items.length ? `<div class="grid-3 stagger">${d.items.map((x, i) => `<a class="card org-head" style="--i:${i};margin:0;color:inherit;text-decoration:none" href="#/firma/${esc(x.id)}">
         <div class="org-logo">${icon("briefcase")}</div><div style="min-width:0"><h3 style="font-size:15px">${esc(x.name)}</h3>
         <div class="meta"><span>${esc(x.sectors.join(", "))}</span></div>
+        ${x.areas?.tags?.length ? `<div class="faint" style="margin-top:6px;font-size:12.5px">${esc(x.areas.tags.slice(0, 3).map((t) => t.name).join(" · "))}</div>` : ""}
         <div class="chips" style="margin-top:8px"><span class="chip teal">${x.centers.length} merkez</span><span class="chip">${esc(x.cities.slice(0, 2).join(", "))}${x.cities.length > 2 ? "…" : ""}</span>
           ${x.profiles ? `<span class="chip gold">${icon("user")}${x.profiles} profil</span>` : ""}${x.academics ? `<span class="chip blue">${x.academics} akademisyen</span>` : ""}</div></div></a>`).join("")}</div>`
         : `<div class="card">${emptyState("search", "Firma bulunamadı", "Aramayı ya da filtreleri değiştirin.")}</div>`}`;
     hydrateIcons($("#fBody"));
   };
   $("#firmQ").oninput = () => { clearTimeout(timer); timer = setTimeout(load, 250); };
-  $("#firmSector").onchange = load; $("#firmCity").onchange = load;
+  $("#firmSector").onchange = load; $("#firmCity").onchange = load; $("#firmArea").onchange = () => { area = ""; load(); };
   load();
 }
 
@@ -1712,6 +1792,9 @@ async function viewFirm(fid, refresh = false) {
   setView(`<section class="card org-head"><div class="org-logo">${icon("briefcase")}</div><div style="min-width:0;flex:1">
       <h1>${esc(f.name)}</h1><div class="meta"><span>${esc(f.sectors.join(", "))}</span><span>${esc(f.cities.join(", "))}</span></div>
       <div class="chips" style="margin-top:8px">${f.kinds.map((k) => `<span class="chip teal">✓ ${esc(k)}</span>`).join("")}</div>
+      ${f.areas?.tags?.length ? `<div class="m-h" style="margin:14px 0 6px">Çalışma alanları</div><div class="chips">${f.areas.tags.map((t) => `<a class="chip blue" href="#/firmalar?area=${encodeURIComponent(t.name)}">${esc(t.name)}<sup>${t.count}</sup></a>`).join("")}</div>
+        ${f.areas.topics?.length ? `<div class="chips" style="margin-top:6px">${f.areas.topics.map((t) => `<span class="chip">${esc(t.name)}<sup>${t.count}</sup></span>`).join("")}</div>` : ""}
+        <p class="faint" style="margin:6px 0 0;font-size:12.5px">Firmanın ${fmtNum(f.areas.papers)} yayınının OpenAlex konularından; yayın dışı çalışmaları kapsamaz.</p>` : ""}
       <details style="margin-top:10px"><summary class="faint" style="cursor:pointer">${f.centers.length} kayıtlı merkez</summary>
         <ul style="margin:8px 0 0;padding-left:18px">${f.centers.map((c) => `<li class="faint">${esc(c)}</li>`).join("")}</ul></details></div>
       <button class="btn" id="firmRefresh" type="button">${icon("refresh")}Yeniden tara</button></section>
@@ -1813,7 +1896,7 @@ function route() {
     case "sistem": return viewSystem();
     case "universiteler": return viewUnis();
     case "universite": return viewUni(parts[1]);
-    case "firmalar": return viewFirms(params.get("q") || "", params.get("sector") || "", params.get("city") || "");
+    case "firmalar": return viewFirms(params.get("q") || "", params.get("sector") || "", params.get("city") || "", params.get("area") || "");
     case "firma": return viewFirm(parts[1]);
     default: return viewHome();
   }

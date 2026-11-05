@@ -46,7 +46,8 @@ EPO_SECRET = os.getenv("EPO_SECRET", "")
 
 def redact(text: str) -> str:
     """Kullanıcıya gösterilen hata metinlerinden (istek URL'leri) anahtarları siler."""
-    for secret in (OPENALEX_API_KEY, GEMINI_API_KEY, EPO_KEY, EPO_SECRET):
+    from . import ai_settings  # döngüsel içe aktarmayı önler: ai_settings bu modülü kullanır
+    for secret in (OPENALEX_API_KEY, GEMINI_API_KEY, EPO_KEY, EPO_SECRET, *ai_settings.secrets()):
         if secret:
             text = text.replace(secret, "***")
     return text

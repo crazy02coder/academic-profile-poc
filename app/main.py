@@ -29,7 +29,8 @@ from .config import ROOT, chromium_executable, redact
 from .text import detect_title, fold, word_match
 from .dedup import resolve
 from .discover import Profile, llm_enrich, locate, registrable
-from .llm import LLM
+from . import ai_settings
+from .llm import LLM, list_models
 from .sources import crossref_works, openalex_by_doi, openalex_works, orcid_works, scholar_works, yok_works
 import httpx
 
@@ -272,6 +273,56 @@ async def health():
             "llm_ready": llm.available, "steps": STEPS, "patents": patents.enabled()}
 
 
+class AiSettingsIn(BaseModel):
+    provider: str
+    key: str = ""
+    clear_key: bool = False
+    model: str = ""
+    fast_model: str = ""
+    embed_model: str = ""
+    base_url: str = ""
+
+
+@app.get("/api/settings/ai")
+async def ai_settings_get():
+    return ai_settings.public()
+
+
+@app.post("/api/settings/ai")
+async def ai_settings_save(body: AiSettingsIn):
+    try:
+        ai_settings.save(body.provider, body.key, body.clear_key, body.model, body.fast_model, body.embed_model, body.base_url)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    # Yeni sağlayıcı hemen geçerli; gömme vektörleri modele özgü olduğundan sohbet bilgi tabanları da yeniden kurulur.
+    _LLM_CACHE.update(llm=None, at=0.0)
+    KB_CACHE.clear()
+    llm = await _llm()
+    return {**ai_settings.public(), "ready": llm.available, "label": llm.label()}
+
+
+@app.post("/api/settings/ai/models")
+async def ai_settings_models(body: AiSettingsIn):
+    """Girilen bilgilerle bağlanıp model listesini getirir; hiçbir şey kaydetmez."""
+    if body.provider not in ai_settings.PROVIDERS:
+        raise HTTPException(422, "Bilinmeyen sağlayıcı.")
+    try:
+        url = ai_settings.clean_url(body.base_url) if body.provider == "custom" else ai_settings.PROVIDERS[body.provider]["base_url"]
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    key = ai_settings.key_for_test(body.provider, body.key.strip(), url)
+    if body.provider != "custom" and not key:
+        return {"ok": False, "error": "Anahtar girilmedi.", "models": []}
+    try:
+        names = await list_models(body.provider, url, key)
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        return {"ok": False, "models": [], "error": "Anahtar geçersiz ya da yetkisiz." if code in (401, 403) else f"Sunucu HTTP {code} döndürdü."}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "models": [], "error": f"Bağlanılamadı ({type(exc).__name__})."}
+    return {"ok": True, "models": names or [], "error": ""}
+
+
 @app.post("/api/jobs", status_code=202)
 async def create_job(data: JobIn):
     data = data.model_copy(update={"url": data.url.strip(), "yok_url": data.yok_url.strip()})
@@ -507,8 +558,7 @@ async def chat(jid: str, body: ChatIn):
         conv = None
     if conv is None:
         conv = history_store.create(jid, result)
-    job = JOBS.get(jid) or {}
-    llm = job.get("llm") or await LLM().probe()
+    llm = await _llm()
     kb = KB_CACHE.get(jid)
     if kb is None:
         kb = KB_CACHE[jid] = Knowledge(result)
@@ -584,8 +634,7 @@ async def paper(jid: str, pid: str):
     item = next((p for p in (result or {}).get("publications", []) if p["id"] == pid), None)
     if not item:
         raise HTTPException(404)
-    job = JOBS.get(jid) or {}
-    llm = job.get("llm") or await _llm()
+    llm = await _llm()
     return _paper_stream(item, llm, PAPER_CACHE.setdefault(jid, {}), result.get("profile"), f"iş {jid}, yayın {pid}")
 
 
@@ -738,9 +787,9 @@ async def directory_papers(body: UnitPapersIn):
 
 
 @app.get("/api/firms")
-async def firm_list(q: str = "", sector: str = "", city: str = ""):
+async def firm_list(q: str = "", sector: str = "", city: str = "", area: str = ""):
     """Resmi Ar-Ge / Tasarım Merkezi listesindeki firmalar (marka bazında gruplu)."""
-    return firms.firm_list(q[:100], sector[:120], city[:60])
+    return firms.firm_list(q[:100], sector[:120], city[:60], area[:120])
 
 
 @app.get("/api/firms/{fid}")

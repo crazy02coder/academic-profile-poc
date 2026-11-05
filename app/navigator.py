@@ -227,7 +227,7 @@ async def perceive(llm, name: str, sel, url: str, links: list[tuple[str, str]], 
     text = clean(sel.get_all_text(separator=" "))
     if data.get("is_target_person_page") and not name_in_text(name, text):
         data["is_target_person_page"] = False
-        data["reason"] = "Gemini hedef dedi ama ad sayfada yok → reddedildi. " + data.get("reason", "")
+        data["reason"] = "Yapay zekâ hedef dedi ama ad sayfada yok → reddedildi. " + data.get("reason", "")
     page_f = fold(text)
     for key in ("title", "department"):
         v = clean(data.get(key) or "")
@@ -305,7 +305,7 @@ async def navigate(start_url: str, start_sel, start_html: str, name: str, llm, s
     frontier = [(start_url, start_sel, start_html, ["başlangıç"])]
     steps, fetched, tried_search = 0, 1, False
     report["agent"] = {"steps": []}
-    await log("crawl", "running", f"Ajan başlıyor: Scrapling sayfayı getirip Markdown'a çeviriyor, Gemini okuyup algılıyor "
+    await log("crawl", "running", f"Ajan başlıyor: Scrapling sayfayı getirip Markdown'a çeviriyor, yapay zekâ okuyup algılıyor "
                                   f"ve yön seçiyor, REA gerekirse etkileşime giriyor (en fazla {MAX_STEPS} algı).")
     while frontier and steps < MAX_STEPS:
         url, sel, html, trail = frontier.pop(0)
@@ -315,13 +315,13 @@ async def navigate(start_url: str, start_sel, start_html: str, name: str, llm, s
         view = await perceive(llm, name, sel, url, links, bool(search_css), trail, tried_search)
         steps += 1
         if view is None:
-            await log("crawl", "warning", "Gemini sayfayı algılayamadı (geçersiz çıktı); bu dal atlandı.")
+            await log("crawl", "warning", "Yapay zekâ sayfayı algılayamadı (geçersiz çıktı); bu dal atlandı.")
             continue
         chosen = [links[i] for i in view["next_links"]]
         report["agent"]["steps"].append({"at": url, "page_type": view["page_type"], "target": view["is_target_person_page"],
                                          "action": "search" if view["use_search"] else "open",
                                          "reason": view.get("reason", ""), "chosen": [u for u, _ in chosen]})
-        await log("crawl", "running", f"Gemini algısı #{steps}: [{PAGE_TYPE_TR[view['page_type']]}] "
+        await log("crawl", "running", f"Yapay zekâ algısı #{steps}: [{PAGE_TYPE_TR[view['page_type']]}] "
                                       f"{'HEDEF ✓' if view['is_target_person_page'] else 'hedef değil'} — "
                                       f"{view.get('reason', '')[:110]}")
         if view["page_type"] == "staff_list" and not view["is_target_person_page"]:
