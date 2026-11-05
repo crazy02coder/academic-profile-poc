@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: akademik-iz
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENALEX_API_KEY
+        sync: false
+      - key: EPO_KEY
+        sync: false
+      - key: EPO_SECRET
+        sync: false

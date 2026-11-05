@@ -1,0 +1,15 @@
+.git
+.venv
+node_modules
+.env
+.ai-settings.json
+.ai-settings.tmp
+.cache
+runs
+data/*
+!data/arge_merkezleri.json
+!data/journal_quartiles.sqlite
+docs
+*.pyc
+__pycache__
+.DS_Store

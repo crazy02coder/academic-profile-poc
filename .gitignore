@@ -4,6 +4,8 @@ node_modules/
 .env
 runs/
 .cache/
-data/
+data/*
+!data/arge_merkezleri.json
+!data/journal_quartiles.sqlite
 .ai-settings.json
 .ai-settings.tmp
