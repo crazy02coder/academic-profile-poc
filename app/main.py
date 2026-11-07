@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import logging
 import re
 import json
@@ -14,8 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from typing import Literal
 
-from . import rea, recipes
+from . import rea, recipes, org_assets, student_view, student_assistant
 from .consensus import save_run, verify_papers, verify_profile
 from .net import fetch_static
 from .analysis import analyze
@@ -34,7 +36,7 @@ from .llm import LLM, list_models
 from .sources import crossref_works, openalex_by_doi, openalex_works, orcid_works, scholar_works, yok_works
 import httpx
 
-from . import directory, firms, industry, library, patents, publication_status, quartiles, trsources, unit_publications, wos, wos_enrichment, wos_verification, yokdir
+from . import directory, firms, industry, library, patents, profile_refresh, publication_status, quartiles, trsources, unit_publications, wos, wos_enrichment, wos_verification, yokdir
 
 app = FastAPI(title="Akademik İz")
 logger = logging.getLogger(__name__)
@@ -77,6 +79,26 @@ class ChatIn(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
     chat_id: str = ""
     mode: str = "auto"  # auto | rag | cag | hybrid
+
+
+class StudentMessageIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class StudentChatIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    question: str = Field(min_length=1, max_length=1000)
+    messages: list[StudentMessageIn] = Field(default_factory=list, max_length=10)
+    section: str | None = Field(default=None, max_length=30)
+    faculty: str = Field(default="", max_length=200, pattern=r"^[^\x00-\x1f<>:{}\[\]\\]*$")
+    department: str = Field(default="", max_length=200, pattern=r"^[^\x00-\x1f<>:{}\[\]\\]*$")
+
+
+class RefreshIn(BaseModel):
+    sections: list[str] | None = Field(default=None, max_length=12)
+    sources: list[str] | None = Field(default=None, max_length=12)
 
 
 def _emit(job: dict, event: dict):
@@ -266,6 +288,9 @@ async def pipeline(job: dict, data: JobIn):
         publication_status.annotate(result.get("publications") or [])
         job["result"] = result
         history_store.save_result(result["job_id"], result)
+        # Yalnız kullanıcının başlattığı tam toplama sırasında WoS işi oluştur.
+        # Kayıtlı profilin açılması artık salt durum okumasıdır.
+        await start_wos(result["job_id"], retry=bool(prev))
         _emit(job, {"type": "result", "data": result})
     except Exception as exc:  # noqa: BLE001
         _emit(job, {"type": "error", "message": f"İş tamamlanamadı: {type(exc).__name__}: {redact(str(exc))[:200]}"})
@@ -279,11 +304,23 @@ async def index():
     return FileResponse(ROOT / "static" / "index.html")
 
 
+def _wos_activity() -> dict:
+    """Read local task registries without creating a scan or opening WoS."""
+    active_jobs = sum(not task.done() for tasks in (wos.TASKS, library._TOPIC_TASKS)
+                      for task in tasks.values())
+    pending_jobs = sum(1 for job in JOBS.values()
+                       if job.get("expects_wos") and not job["done"] and not job["task"].done())
+    pending_jobs += sum(not task.done() for task in unit_publications.TASKS.values())
+    return {"active_jobs": active_jobs, "pending_jobs": pending_jobs}
+
+
 @app.get("/api/health")
 async def health():
     llm = await LLM().probe()
     return {"rea": rea.available(), "chromium": bool(chromium_executable()), "llm": llm.label(),
-            "llm_ready": llm.available, "steps": STEPS, "patents": patents.enabled()}
+            "llm_ready": llm.available, "steps": STEPS, "patents": patents.enabled(),
+            "wos_activity": {**_wos_activity(),
+                             "waiting_verifications": len(wos_verification.get_active().get("items", []))}}
 
 
 class AiSettingsIn(BaseModel):
@@ -350,11 +387,19 @@ async def create_job(data: JobIn):
 
 
 @app.post("/api/jobs/{jid}/refresh", status_code=202)
-async def refresh_job(jid: str):
-    """Kayıtlı profili kaynaklardan baştan toplar (yeni yayınlar, eksik fotoğraf, güncellenen ayrıştırma kodu)."""
+async def refresh_job(jid: str, body: RefreshIn | None = None):
+    """Seçilen bölümleri yeniler; gövdesiz eski istemciler tam yenileme yapabilir."""
     old = _result_for(jid)
     if not old:
         raise HTTPException(404, "Profil sonucu bulunamadı.")
+    options = None
+    if body and body.sections is not None:
+        sections, sources = set(body.sections), set(body.sources if body.sources is not None else profile_refresh.SOURCES)
+        if not sections or sections - profile_refresh.SECTIONS or sources - profile_refresh.SOURCES:
+            raise HTTPException(422, "Geçerli veri bölümleri ve kaynaklar seçin.")
+        if "publications" in sections and not sources:
+            raise HTTPException(422, "Yayınlar için en az bir kaynak seçin.")
+        options = {"sections": sections, "sources": sources}
     running = next((j for j in JOBS.values() if (j.get("refresh") or {}).get("job_id") == jid and not j["done"]), None)
     if running:
         return {"id": running["id"], "steps": STEPS}
@@ -362,22 +407,65 @@ async def refresh_job(jid: str):
     url = next((u for u in (inp.get("url"), prof.get("source_url"), (old.get("recon") or {}).get("start_url"))
                 if isinstance(u, str) and u.startswith(("http://", "https://"))), "")
     yok_url = inp.get("yok_url") or (prof.get("links") or {}).get("yok") or ""
-    if not url and not yok_url:
+    if not url and not yok_url and options is None:
         raise HTTPException(422, "Bu kayıtta başlangıç bağlantısı yok; akademisyeni yeniden arayın.")
     data = JobIn(url=url, name=inp.get("name") or prof.get("name") or prof.get("query_name") or "", yok_url=yok_url,
                  university=inp.get("university") or "", department=inp.get("department") or "", email=inp.get("email") or "")
-    return _start(data, {"job_id": jid, "chat_id": old.get("chat_id")})
+    return _start(data, {"job_id": jid, "chat_id": old.get("chat_id")}, options)
 
 
-def _start(data: JobIn, refresh: dict | None = None) -> dict:
+def _start(data: JobIn, refresh: dict | None = None, options: dict | None = None) -> dict:
     for jid in [k for k, v in JOBS.items() if v["done"] and time.time() - v["started"] > 3600]:
         JOBS.pop(jid, None)
     jid = uuid.uuid4().hex[:12]
     job = {"id": jid, "events": [], "done": False, "started": time.time(), "result": None, "refresh": refresh,
-           "input": data.model_dump()}
+           "input": data.model_dump(),
+           "expects_wos": not options or ("publications" in options["sections"] and "wos" in options["sources"])}
     JOBS[jid] = job
-    job["task"] = asyncio.create_task(pipeline(job, data))
+    job["task"] = asyncio.create_task(_selective_pipeline(job, options) if options else pipeline(job, data))
     return {"id": jid, "steps": STEPS}
+
+
+async def _selective_pipeline(job: dict, options: dict):
+    async def log(step, status, message):
+        _emit(job, {"type": "log", "step": step, "status": status, "message": message})
+
+    jid = job["refresh"]["job_id"]
+    try:
+        old = copy.deepcopy(_result_for(jid))
+        llm = await _llm()
+        job["llm"] = llm
+        result = await profile_refresh.collect(old, options["sections"], options["sources"], llm, log)
+        current = _result_for(jid)
+        if not current or history_store.load_result(jid) is None:
+            raise ValueError("Profil tarama sırasında silindi.")
+        # Aynı anda süren WoS taramasının yeni kayıtları bir bölüm yenilemesinde kaybolmasın.
+        if current.get("wos_revision") != old.get("wos_revision"):
+            profile_refresh.merge_publications(result, current.get("publications") or [])
+            for key in ("wos_revision", "wos_enrichment"):
+                if key in current:
+                    result[key] = current[key]
+        result["elapsed"] = round(time.time() - job["started"], 1)
+        result["chat_id"] = history_store.refresh(old.get("chat_id") or "", jid, result)["id"]
+        history_store.save_result(jid, result)
+        for existing in JOBS.values():
+            if (existing.get("result") or {}).get("job_id") == jid:
+                existing["result"] = result
+        job["result"] = result
+        KB_CACHE.pop(jid, None)
+        PAPER_CACHE.pop(jid, None)
+        p = result["profile"]
+        library.update_person(jid, {"name": p.get("name"), "title": p.get("title"), "institution": p.get("institution"),
+            "department": p.get("department"), "photo": (p.get("yok") or {}).get("photo"), "papers": result["unique_count"]})
+        if "publications" in options["sections"] and "wos" in options["sources"]:
+            await start_wos(jid, retry=True)
+        await log("verify", "done", "Seçilen bilgiler güncellendi.")
+        _emit(job, {"type": "result", "data": result})
+    except Exception as exc:
+        _emit(job, {"type": "error", "message": f"Yenileme tamamlanamadı: {type(exc).__name__}: {redact(str(exc))[:200]}"})
+    finally:
+        job["done"] = True
+        _emit(job, {"type": "end"})
 
 
 @app.post("/api/jobs/{jid}/industry")
@@ -515,7 +603,7 @@ async def recipes_check():
 async def wos_verification_status(request: Request):
     if not wos_verification.same_origin(request, required=False):
         raise HTTPException(403, "Doğrulama paneli yalnız aynı uygulama üzerinden açılabilir.")
-    return wos_verification.get_active()
+    return {**wos_verification.get_active(), **_wos_activity()}
 
 
 @app.websocket("/api/wos/verification/{challenge_id}/stream")
@@ -538,6 +626,9 @@ async def _close_browsers():
     _UNIT_PERSON_UPDATES.clear()
     await library.close()
     await wos.close()
+    for task in [*org_assets._INFLIGHT.values(), *student_view.TASKS.values()]:
+        task.cancel()
+    await asyncio.gather(*list(org_assets._INFLIGHT.values()), *list(student_view.TASKS.values()), return_exceptions=True)
     await close_stealth()
     await close_google()
 
@@ -1170,15 +1261,48 @@ async def university(uid: str):
     return d
 
 
+@app.get("/api/universities/{uid}/student")
+async def university_student(uid: str, refresh: bool = False, section: str | None = None,
+                             faculty: str = Query(default="", max_length=200),
+                             department: str = Query(default="", max_length=200)):
+    if section is not None and section not in student_view.GROUPS:
+        raise HTTPException(422, "Geçerli bir öğrenci bilgisi başlığı seçin.")
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not await yokdir._university(uid):
+        raise HTTPException(404, "Üniversite bulunamadı.")
+    # Model bağlantısı yalnız yeni bir başlık gerçekten taranacaksa hazırlanır.
+    return await student_view.get(uid, _llm, refresh, section=section, faculty=faculty, department=department)
+
+
+@app.post("/api/universities/{uid}/student/chat")
+async def university_student_chat(uid: str, body: StudentChatIn):
+    if not body.question.strip():
+        raise HTTPException(422, "Öğrenci asistanına bir soru yazın.")
+    if body.section is not None and body.section not in student_view.GROUPS:
+        raise HTTPException(422, "Geçerli bir öğrenci bilgisi başlığı seçin.")
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(404, "Üniversite bulunamadı.")
+    try:
+        university = await asyncio.wait_for(yokdir._university(uid), 12)
+    except (TimeoutError, httpx.HTTPError):
+        return student_assistant.unavailable("Üniversite kaydı şu anda doğrulanamıyor. Lütfen biraz sonra tekrar deneyin.")
+    if not university:
+        raise HTTPException(404, "Üniversite bulunamadı.")
+    return await student_assistant.answer(
+        uid, university, _llm, question=body.question.strip(),
+        messages=[message.model_dump() for message in body.messages], section=body.section,
+        faculty=body.faculty, department=body.department)
+
+
 @app.get("/api/universities/{uid}/faculty")
-async def university_faculty(uid: str, name: str = ""):
+async def university_faculty(uid: str, name: str = "", metrics: bool = True):
     """Fakülte kadrosu ve bölümleri (kişilerin YÖK kurum yolundan). İlk açılış birkaç saniye, sonra önbellekten."""
     if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not name:
         raise HTTPException(422, "Geçersiz istek.")
     d = await _directory_call(yokdir.faculty_detail(uid, name[:200]))
     if not d:
         raise HTTPException(502, "Bu birimin kadrosu YÖK'ten alınamadı. Biraz sonra tekrar deneyin.")
-    return {**d, "people": _staff_metrics(d["people"], d["university"])}
+    # Öğrenci dizini için bütün kayıtlı profillerin yayın/atıf metriklerini okumaya gerek yok.
+    return {**d, "people": _staff_metrics(d["people"], d["university"]) if metrics else d["people"]}
 
 
 class YokPapersIn(BaseModel):
@@ -1299,11 +1423,46 @@ async def favorites_del_person(key: str):
 
 
 # ------------------------------------------------------------------ konu araması
+@app.post("/api/favorites/{kind}")
+async def favorites_add_org(kind: str, body: FavIn):
+    if kind not in {"universities", "firms"}:
+        raise HTTPException(404)
+    oid = str(body.item.get("id") or "")
+    if kind == "universities":
+        item = next((u for u in await yokdir.university_list() if u["id"] == oid), None)
+    else:
+        group = firms._groups().get(oid)
+        item = firms._public(oid, group) if group else None
+    if not item:
+        raise HTTPException(404, "Kurum kaydı bulunamadı.")
+    return library.add_org(kind, item)
+
+
+@app.delete("/api/favorites/{kind}/{key:path}")
+async def favorites_del_org(kind: str, key: str):
+    if kind not in {"universities", "firms"}:
+        raise HTTPException(404)
+    return {"deleted": library.remove_org(kind, key)}
+
+
+@app.get("/api/organization-logo/{kind}/{oid}")
+async def organization_logo(kind: str, oid: str):
+    entry = await org_assets.logo(kind, oid)
+    if not entry.get("data"):
+        return Response(status_code=404, headers={"Cache-Control": "no-store"})
+    return Response(base64.b64decode(entry["data"]), media_type=entry["type"], headers={
+        "Cache-Control": "public, max-age=604800", "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+
 @app.get("/api/search")
-async def topic_search(q: str = ""):
+async def topic_search(q: str = "", sources: str | None = None):
     if len(q.strip()) < 3:
         raise HTTPException(422, "En az 3 karakterlik bir konu yazın.")
-    return await library.topic_search(q[:200], await _llm())
+    selected = None if sources is None else {x.strip() for x in sources.split(",") if x.strip()}
+    if selected is not None and (not selected or selected - library.TOPIC_SOURCES):
+        raise HTTPException(422, "En az bir geçerli yayın kaynağı seçin.")
+    return await library.topic_search(q[:200], await _llm(), sources=selected)
 
 
 @app.get("/api/search/{search_id}")

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
   <title>Akademik İz</title>
+  <link rel="icon" href="/static/brand-mark.svg" type="image/svg+xml">
   <script>
     // Tema, stil yüklenmeden seçilir; yoksa koyu temada beyaz bir an parlardı.
     (function () {
@@ -23,24 +24,24 @@
 <body>
 <div class="app" id="app">
   <aside class="side" id="side">
-    <a class="brand" href="#/">
-      <span class="mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 3 9.5 16 16l13-6.5L16 3Z" fill="currentColor" opacity=".9"/><path d="M7 13.5v6.2c0 2.6 4 4.8 9 4.8s9-2.2 9-4.8v-6.2L16 18l-9-4.5Z" fill="currentColor" opacity=".55"/><path d="M27 10v8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>
+    <a class="brand" href="#/" aria-label="Akademik İz ana sayfa">
+      <span class="mark"><img src="/static/brand-mark.svg" alt=""></span>
       <span class="brand-text"><b>Akademik İz</b><small>Araştırma keşif platformu</small></span>
     </a>
 
     <nav class="nav" id="nav" aria-label="Ana menü">
       <span class="nav-pill" id="navPill" aria-hidden="true"></span>
-      <a href="#/" data-nav="home"><i data-icon="home"></i>Ana sayfa</a>
-      <a href="#/akademisyenler" data-nav="akademisyenler"><i data-icon="users"></i>Akademisyenler<span class="count" id="cntProfiles"></span></a>
-      <a href="#/universiteler" data-nav="universiteler"><i data-icon="building"></i>Üniversiteler</a>
-      <a href="#/firmalar" data-nav="firmalar"><i data-icon="briefcase"></i>Firmalar</a>
-      <a href="#/ara" data-nav="ara"><i data-icon="book"></i>Konular</a>
+      <a href="#/" data-nav="home"><i data-icon="home"></i><span class="nav-label">Ana sayfa</span></a>
+      <a href="#/akademisyenler" data-nav="akademisyenler"><i data-icon="users"></i><span class="nav-label">Akademisyenler</span><span class="count" id="cntProfiles"></span></a>
+      <a href="#/universiteler" data-nav="universiteler"><i data-icon="building"></i><span class="nav-label">Üniversiteler</span></a>
+      <a href="#/firmalar" data-nav="firmalar"><i data-icon="briefcase"></i><span class="nav-label">Firmalar</span></a>
+      <a href="#/ara" data-nav="ara"><i data-icon="book"></i><span class="nav-label">Konular</span></a>
       <div class="nav-sep"></div>
-      <a href="#/kutuphane" data-nav="kutuphane"><i data-icon="bookmark"></i>Kütüphanem<span class="count" id="cntLibrary"></span></a>
+      <a href="#/kutuphane" data-nav="kutuphane"><i data-icon="bookmark"></i><span class="nav-label">Kütüphanem</span><span class="count" id="cntLibrary"></span></a>
     </nav>
 
     <div class="side-foot">
-      <a class="side-link" href="#/sistem" data-nav="sistem"><i data-icon="settings"></i>Ayarlar</a>
+      <a class="side-link" href="#/sistem" data-nav="sistem"><i data-icon="settings"></i><span class="nav-label">Ayarlar</span></a>
       <div class="env" id="env"><span class="dot"></span><span>Kontrol ediliyor…</span></div>
     </div>
   </aside>
@@ -48,7 +49,7 @@
 
   <main class="main">
     <header class="top">
-      <button class="icon-btn menu-btn" id="menuBtn" type="button" aria-label="Menü"><i data-icon="menu"></i></button>
+      <button class="icon-btn menu-btn" id="menuBtn" type="button" aria-label="Menüyü daralt" aria-controls="side" aria-expanded="true" title="Menüyü daralt"><i data-icon="menu"></i></button>
       <nav class="crumbs" id="crumbs" aria-label="Konum"></nav>
       <button class="icon-btn theme-btn" id="themeBtn" type="button" aria-label="Temayı değiştir">
         <span class="i-moon"><i data-icon="moon"></i></span><span class="i-sun"><i data-icon="sun"></i></span>

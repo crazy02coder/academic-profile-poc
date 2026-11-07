@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import time
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -293,6 +293,18 @@ def access_gate():
     return _GATE
 
 
+@asynccontextmanager
+async def _queued_access(state):
+    gate = access_gate()
+    state['phase'] = 'queued'
+    async with wos_verification.time_budget(120):
+        await gate.acquire()
+    try:
+        yield
+    finally:
+        gate.release()
+
+
 async def _run(result: dict, retry: bool, on_publications=None):
     from . import wos_enrichment, wos_publications
 
@@ -343,14 +355,16 @@ async def _run(result: dict, retry: bool, on_publications=None):
 
     try:
         # Tek tarayıcı işi: aynı anda açılan profiller WoS'a yük bindirmez.
-        async with access_gate():
+        # Tüm makalelere ayrı ayrı 90 sn verip saatlerce süren bir iş yaratma.
+        # İnsan doğrulamasında bu bütçe mevcut mekanizmayla duraklatılır.
+        async with wos_verification.time_budget(600), _queued_access(state):
             async with AsyncExitStack() as stack:
                 session = None
                 # WoS tam bir yayın kaynağıdır; konferanslar da bu aşamada toplanır.
                 # Çeyrek sorgusu bundan ayrı ve yalnız uygun dergi yayınları içindir.
                 if (result.get('profile') or {}).get('name'):
                     report = wos_enrichment.cached(result['profile'])
-                    if report is None or retry and report.get('status') != 'done':
+                    if report is None or retry:
                         state['phase'] = 'publications'
                         previous = wos_enrichment.cached(result['profile'], allow_stale=True) or {}
                         if previous.get('records'):
@@ -395,6 +409,7 @@ async def _run(result: dict, retry: bool, on_publications=None):
                     papers = sorted((p for p in result.get('publications', []) if eligible(p)),
                                     key=lambda p: not bool(known_urls(p)))
                     state.update(total=len(papers), checked=0, phase='quartiles')
+                consecutive_errors = 0
                 for p in papers:
                     entry = cached(p)
                     if entry is None or retry and entry.get('status') != 'ok':
@@ -425,7 +440,21 @@ async def _run(result: dict, retry: bool, on_publications=None):
                     state['checked'] += 1
                     if entry.get('status') == 'error':
                         state['errors'] += 1
-                state['status'] = 'done'
+                        consecutive_errors += 1
+                    else:
+                        consecutive_errors = 0
+                    if consecutive_errors >= 3:
+                        state.update(status='partial', reason='repeated_errors',
+                                     message='WoS art arda yanıt vermedi; alınan yayınlar korundu. Yenile ile yeniden deneyebilirsiniz.')
+                        return
+                report_status = (state.get('publications') or {}).get('status')
+                state['status'] = 'partial' if state['errors'] or report_status in ('error', 'partial') else 'done'
+                if state['status'] == 'partial':
+                    state['reason'] = (state.get('publications') or {}).get('reason') or 'incomplete_checks'
+    except asyncio.TimeoutError:
+        queued = state.get('phase') == 'queued'
+        state.update(status='error' if queued else 'partial', reason='queue_timeout' if queued else 'time_budget',
+                     message='WoS sıra bekleme süresi doldu.' if queued else 'WoS taramasının süre sınırına ulaşıldı; alınan yayınlar korundu.')
     except asyncio.CancelledError:
         state['status'] = 'cancelled'
         raise
@@ -450,6 +479,7 @@ def start(result: dict, retry: bool = False, on_publications=None) -> dict:
             return snapshot(result)
         RUNS[jid] = {'status': 'running', 'checked': 0, 'errors': 0,
                      'manual_verification_version': MANUAL_VERIFICATION_VERSION,
+                     'started_at': time.time(), 'phase': 'queued',
                      'total': sum(eligible(p) for p in result.get('publications', []))}
         TASKS[jid] = asyncio.create_task(_run(result, retry, on_publications))
     return snapshot(result)

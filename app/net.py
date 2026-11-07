@@ -12,8 +12,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
 import ssl
+import subprocess
 import tempfile
+import threading
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -78,6 +81,58 @@ def soft_404(html: str) -> bool:
 # --------------------------------------------------------------------------- TLS
 _bundle_cache: dict[str, str] = {}
 _GLOBAL_BUNDLE = CACHE_DIR / "ca-augmented.pem"  # certifi + keşfedilen tüm ara sertifikalar
+_BUNDLE_LOCK = threading.RLock()
+_PEM_CERT = re.compile(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.S)
+
+
+def _certificate_info(pem: str) -> dict:
+    with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as fh:
+        fh.write(pem)
+        path = fh.name
+    try:
+        return ssl._ssl._test_decode_cert(path)  # noqa: SLF001
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def _intermediate_info(pem: str) -> dict | None:
+    """Leaf ve kendinden imzalı kökler ortak güven paketine eklenmez."""
+    try:
+        decoded = _certificate_info(pem)
+        if not decoded.get("subject") or decoded.get("issuer") == decoded["subject"]:
+            return None
+        # Ayrı, yalnız ayrıştırma amaçlı store: get_ca_certs CA olmayan leaf'i dışlar.
+        # Bu context herhangi bir ağ bağlantısında/güven kararında kullanılmaz.
+        inspection = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        inspection.load_verify_locations(cadata=pem)
+        return decoded if inspection.get_ca_certs() else None
+    except (ssl.SSLError, ValueError):
+        return None
+
+
+def _issuer_certificates(data: bytes) -> list[str]:
+    """AIA tek DER/PEM sertifika veya PKCS#7 (.p7c) zincir paketi döndürebilir."""
+    text = data.decode("ascii", errors="ignore")
+    blocks = _PEM_CERT.findall(text)
+    if blocks:
+        return blocks[:32]
+    try:
+        pem = ssl.DER_cert_to_PEM_cert(data)
+        _certificate_info(pem)
+        return [pem]
+    except (ssl.SSLError, ValueError):
+        pass
+    executable = shutil.which("openssl")
+    if not executable:
+        raise RuntimeError("PKCS#7 AIA paketi için OpenSSL komutu bulunamadı")
+    result = subprocess.run(
+        [executable, "pkcs7", "-inform", "PEM" if b"-----BEGIN" in data[:80] else "DER", "-print_certs"],
+        input=data, capture_output=True, timeout=10, check=True,
+    )
+    blocks = _PEM_CERT.findall(result.stdout.decode("ascii", errors="ignore"))
+    if not blocks:
+        raise RuntimeError("AIA yanıtında sertifika bulunamadı")
+    return blocks[:32]
 
 
 def _aia_chain(host: str, port: int = 443, depth: int = 3) -> list[str]:
@@ -87,26 +142,34 @@ def _aia_chain(host: str, port: int = 443, depth: int = 3) -> list[str]:
     certifi kök sertifikalarıyla curl tarafından verilir.
     """
     pem = ssl.get_server_certificate((host, port), timeout=10)
-    chain: list[str] = []
-    current = pem
-    for _ in range(depth):
-        with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as fh:
-            fh.write(current)
-            path = fh.name
-        try:
-            decoded = ssl._ssl._test_decode_cert(path)  # noqa: SLF001 - stdlib, cryptography gerektirmez
-        finally:
-            Path(path).unlink(missing_ok=True)
-        issuers = decoded.get("caIssuers") or ()
-        if not issuers or decoded.get("issuer") == decoded.get("subject"):
-            break
-        with urllib.request.urlopen(issuers[0], timeout=10) as resp:  # noqa: S310 - http AIA beklenen
-            der = resp.read()
-        if der.startswith(b"-----BEGIN"):
-            current = der.decode()
-        else:
-            current = ssl.DER_cert_to_PEM_cert(der)
-        chain.append(current)
+    pending = [(_certificate_info(pem), 0)]
+    chain, seen, fetched = [], set(), {}
+    for decoded, level in pending:
+        if level >= depth or decoded.get("issuer") == decoded.get("subject"):
+            continue
+        for issuer_url in (decoded.get("caIssuers") or ())[:3]:
+            if urlparse(issuer_url).scheme not in {"http", "https"}:
+                continue
+            if issuer_url not in fetched:
+                try:
+                    with urllib.request.urlopen(issuer_url, timeout=10) as resp:  # noqa: S310 - public CA AIA
+                        data = resp.read(1_000_001)
+                    if len(data) > 1_000_000:
+                        raise ValueError("AIA yanıtı fazla büyük")
+                    fetched[issuer_url] = _issuer_certificates(data)
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                    # Üst zincir okunamazsa önceden bulunan geçerli ara sertifikayı kaybetme.
+                    fetched[issuer_url] = []
+            for candidate in fetched[issuer_url]:
+                candidate = candidate.strip() + "\n"
+                if candidate in seen:
+                    continue
+                info = _intermediate_info(candidate)
+                if not info or info.get("subject") != decoded.get("issuer"):
+                    continue
+                seen.add(candidate)
+                chain.append(candidate)
+                pending.append((info, level + 1))
     return chain
 
 
@@ -117,17 +180,28 @@ def augmented_bundle() -> str | None:
 def repaired_bundle(url: str) -> str:
     """Eksik ara sertifikayı ortak pakete ekler; tüm alt alan adları bundan yararlanır."""
     host = urlparse(url).hostname or ""
-    if host in _bundle_cache:
-        return _bundle_cache[host]
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    chain = _aia_chain(host)
+    with _BUNDLE_LOCK:
+        if host in _bundle_cache:
+            return _bundle_cache[host]
+    chain = _aia_chain(host, urlparse(url).port or 443)
     if not chain:
         raise RuntimeError("AIA ile ara sertifika bulunamadı")
-    current = _GLOBAL_BUNDLE.read_text() if _GLOBAL_BUNDLE.exists() else Path(certifi.where()).read_text()
-    added = [c for c in chain if c.strip() not in current]
-    if added:
-        _GLOBAL_BUNDLE.write_text(current + "\n" + "\n".join(added))
-    _bundle_cache[host] = str(_GLOBAL_BUNDLE)
+    with _BUNDLE_LOCK:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        roots = Path(certifi.where()).read_text()
+        current = _GLOBAL_BUNDLE.read_text() if _GLOBAL_BUNDLE.exists() else ""
+        extra = []
+        for candidate in [*_PEM_CERT.findall(current), *chain]:
+            candidate = candidate.strip()
+            if candidate not in roots and candidate not in extra and _intermediate_info(candidate):
+                extra.append(candidate)
+        # Her onarımda kök güveni certifi'den kurulur; geçmişte indirilen kök/leaf kalmaz.
+        content = roots + "\n" + "\n".join(extra) + "\n"
+        if content != current:
+            temporary = _GLOBAL_BUNDLE.with_suffix(".tmp")
+            temporary.write_text(content)
+            temporary.replace(_GLOBAL_BUNDLE)
+        _bundle_cache[host] = str(_GLOBAL_BUNDLE)
     return str(_GLOBAL_BUNDLE)
 
 

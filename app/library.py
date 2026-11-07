@@ -44,15 +44,20 @@ def paper_key(p: dict) -> str:
 def _load() -> dict:
     if FAV_PATH.exists():
         try:
-            return json.loads(FAV_PATH.read_text())
+            data = json.loads(FAV_PATH.read_text())
+            for kind in ("papers", "people", "universities", "firms"):
+                data.setdefault(kind, [])
+            return data
         except ValueError:
             pass
-    return {"papers": [], "people": []}
+    return {"papers": [], "people": [], "universities": [], "firms": []}
 
 
 def _save(data: dict):
     FAV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    FAV_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    tmp = FAV_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    tmp.replace(FAV_PATH)
 
 
 def favorites() -> dict:
@@ -109,6 +114,27 @@ def remove_person(key: str) -> bool:
     data["people"] = [x for x in data["people"] if x["key"] != key]
     _save(data)
     return len(data["people"]) < before
+
+
+def add_org(kind: str, org: dict) -> dict:
+    if kind not in {"universities", "firms"} or not org.get("id") or not org.get("name"):
+        raise ValueError("Geçerli bir kurum seçin.")
+    data = _load()
+    item = {k: org[k] for k in ("id", "name", "home", "domain", "cities", "sectors", "centers") if k in org}
+    item.update(key=str(org["id"]), added=time.strftime("%Y-%m-%d %H:%M"))
+    data[kind] = [x for x in data[kind] if x["key"] != item["key"]] + [item]
+    _save(data)
+    return item
+
+
+def remove_org(kind: str, key: str) -> bool:
+    if kind not in {"universities", "firms"}:
+        raise ValueError("Geçersiz kurum türü.")
+    data = _load()
+    before = len(data[kind])
+    data[kind] = [x for x in data[kind] if x["key"] != key]
+    _save(data)
+    return len(data[kind]) < before
 
 
 # ---------------------------------------------------------------------- konu araması
@@ -245,10 +271,14 @@ def _relevance(p: dict, terms: list[str]) -> float:
     return hits + 0.6 * len(p["sources"]) + min(3.0, (p.get("citations") or 0) ** 0.25)
 
 
-async def topic_search(q: str, llm=None, n: int = 25) -> dict:
+TOPIC_SOURCES = {"openalex", "crossref", "semantic_scholar", "openaire", "trdizin", "wos"}
+
+
+async def topic_search(q: str, llm=None, n: int = 25, sources: set[str] | None = None) -> dict:
     q = clean(q)
     n = max(1, min(int(n), 50))
-    cache_key = f'{fold(q)}:{n}'
+    selected = TOPIC_SOURCES if sources is None else sources & TOPIC_SOURCES
+    cache_key = f'{fold(q)}:{n}:{",".join(sorted(selected))}'
     hit = _SEARCH_CACHE.get(cache_key)
     if hit and time.time() - hit[0] < SEARCH_TTL and hit[1].get('search_id') in _TOPIC_JOBS:
         job = _TOPIC_JOBS[hit[1]['search_id']]
@@ -271,16 +301,19 @@ async def topic_search(q: str, llm=None, n: int = 25) -> dict:
     job = {'id': search_id, 'cache_key': cache_key, 'started': started, 'query': q, 'english': en,
            'rows': [], 'wos_rows': [], 'sources': {}, 'base_ready': False,
            'terms': [t for t in fold(' '.join(queries)).split() if len(t) > 2],
-           'revision': 0, 'wos': _pending_wos(min(n, WOS_TOPIC_LIMIT))}
+           'revision': 0, 'wos': _pending_wos(min(n, WOS_TOPIC_LIMIT)) if 'wos' in selected else {'status': 'skipped'}}
     _TOPIC_JOBS[search_id] = job
     _publish_topic(job)
-    _TOPIC_TASKS[search_id] = asyncio.create_task(_run_topic_wos(job))
+    if 'wos' in selected:
+        _TOPIC_TASKS[search_id] = asyncio.create_task(_run_topic_wos(job))
     async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
         calls = [(name, fn(client, query, n)) for query in queries
-                 for name, fn in (("OpenAlex", _openalex), ("Crossref", _crossref), ("Semantic Scholar", _semantic),
-                                  ("OpenAIRE", trsources.openaire_topic))]
+                 for key, name, fn in (("openalex", "OpenAlex", _openalex), ("crossref", "Crossref", _crossref),
+                                      ("semantic_scholar", "Semantic Scholar", _semantic), ("openaire", "OpenAIRE", trsources.openaire_topic))
+                 if key in selected]
         # TR Dizin ulusal dizin: Türkçe sorgu yeterli (İngilizce başlıklı Türk makaleleri de dizinde)
-        calls.append(("TR Dizin", trsources.trdizin_topic(client, q, n)))
+        if "trdizin" in selected:
+            calls.append(("TR Dizin", trsources.trdizin_topic(client, q, n)))
         results = await asyncio.gather(*(c for _, c in calls), return_exceptions=True)
     rows, status = [], {}
     for (name, _), res in zip(calls, results):
@@ -307,7 +340,9 @@ def _publish_topic(job: dict):
         paper['key'] = paper_key(paper)
     status = dict(job['sources'])
     meta = job['wos']
-    if meta['status'] in ('pending', 'running'):
+    if meta['status'] == 'skipped':
+        pass
+    elif meta['status'] in ('pending', 'running'):
         status['WoS'] = 'aranıyor'
     elif job['wos_rows'] or meta['status'] in ('done', 'partial'):
         status['WoS'] = len(job['wos_rows'])

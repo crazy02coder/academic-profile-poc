@@ -541,7 +541,7 @@ def _yok_collaborators(html: str, self_id: str) -> list[dict]:
     return out[:60]
 
 
-def _yok_extra(bridge, page, link: str, emit) -> dict:
+def _yok_extra(bridge, page, link: str, emit, sections: set[str] | None = None) -> dict:
     """Profilin yayın dışı her şeyi: fotoğraf, e-posta, görev/öğrenim, bölümler ve birlikte çalıştığı kişiler."""
     photo = next((img.attrib.get("src", "") for img in page.css("img.img-circle")
                   if (img.attrib.get("src") or "").startswith("data:image")), "")
@@ -553,26 +553,38 @@ def _yok_extra(bridge, page, link: str, emit) -> dict:
              "education": next((v for k, v in timelines.items() if "Öğrenim" in k), []),
              "sections": {}, "collaborators": []}
     self_id = (re.search(r"authorId=([A-Z0-9]+)", link) or [None, ""])[1]
-    try:  # graf sayfası oturumdaki son profile göre oluşur; profil açıldıktan hemen sonra okunmalı
-        graph = bridge.fetch(urljoin(YOK, "view/viewAuthorGraphs.jsp"), network_idle=False)
-        extra["collaborators"] = _yok_collaborators(graph.html_content or "", self_id)
-    except Exception as exc:  # noqa: BLE001
-        emit(f"YÖK birlikte çalıştığı kişiler okunamadı ({type(exc).__name__}).")
+    if sections is None or "industry" in sections:
+        try:  # graf sayfası oturumdaki son profile göre oluşur
+            graph = bridge.fetch(urljoin(YOK, "view/viewAuthorGraphs.jsp"), network_idle=False)
+            extra["collaborators"] = _yok_collaborators(graph.html_content or "", self_id)
+        except Exception as exc:  # noqa: BLE001
+            extra.pop("collaborators", None)
+            emit(f"YÖK birlikte çalıştığı kişiler okunamadı ({type(exc).__name__}).")
+    else:
+        extra.pop("collaborators", None)
     menu = {clean(a.get_all_text()): urljoin(YOK, a.attrib.get("href", "")) for a in page.css("a[href]")}
     for label, key in YOK_SECTIONS.items():
+        group = "career" if key in {"admin", "experience"} else "projects" if key in {"projects", "awards", "memberships", "art"} else key
+        if sections is not None and group not in sections:
+            continue
         if label not in menu:
             continue
         try:
-            rows = _yok_section(bridge.fetch(menu[label], network_idle=False))
+            section_page = bridge.fetch(menu[label], network_idle=False)
+            rows = _yok_section(section_page)
         except Exception as exc:  # noqa: BLE001
             emit(f"YÖK {label} okunamadı ({type(exc).__name__}).")
             continue
-        if rows:
+        explicitly_empty = re.search(r"kayit (?:bulunamadi|bulunmamaktadir|yok)", fold(section_page.get_all_text()))
+        if rows or sections is not None and explicitly_empty:
             extra["sections"][key] = rows
     counts = ", ".join(f"{label} {len(extra['sections'][key])}" for label, key in YOK_SECTIONS.items()
                        if key in extra["sections"])
     emit(f"YÖK profil ayrıntıları: görev {len(extra['career'])}, öğrenim {len(extra['education'])}, "
-         f"birlikte çalıştığı {len(extra['collaborators'])} kişi" + (f", {counts}" if counts else "") + ".")
+         f"birlikte çalıştığı {len(extra.get('collaborators', []))} kişi" + (f", {counts}" if counts else "") + ".")
+    if sections is not None and "career" not in sections:
+        extra.pop("career", None)
+        extra.pop("education", None)
     return extra
 
 
@@ -697,7 +709,7 @@ def yok_detail_sync(paper: dict, profile_url: str, emit) -> dict:
     return out
 
 
-def yok_sync(name: str, institution: str, link: str, emit) -> dict:
+def yok_sync(name: str, institution: str, link: str, emit, sections: set[str] | None = None, publications: bool = True) -> dict:
     """Scrapling stealth tarayıcı + REA CDP köprüsü ile YÖK Akademik.
 
     `emit(msg)` iş parçacığından güvenli log fonksiyonudur.
@@ -799,10 +811,12 @@ def yok_sync(name: str, institution: str, link: str, emit) -> dict:
         result["profile_url"] = link
         emit(f"YÖK profili: {prof.get('title_raw')} · {' / '.join(prof.get('path', [])[:3])}"
              + (f" · ORCID {prof['orcid']}" if prof.get("orcid") else ""))
-        result["extra"] = _yok_extra(bridge, page, link, emit)
+        result["extra"] = _yok_extra(bridge, page, link, emit, sections)
         pub_links = [(clean(a.get_all_text()), urljoin(YOK, a.attrib.get("href", ""))) for a in page.css("a")
                      if "AkademisyenYayinBilgileri" in (a.attrib.get("href") or "")]
         for label, url in pub_links:
+            if not publications:
+                break
             if label not in ("Makaleler", "Bildiriler", "Kitaplar"):
                 continue
             pubs = _yok_pubs(bridge.fetch(url), {"Makaleler": "article", "Bildiriler": "proceedings",
@@ -812,14 +826,14 @@ def yok_sync(name: str, institution: str, link: str, emit) -> dict:
     return result
 
 
-async def yok_works(profile: Profile, log) -> tuple[list[dict], dict | None]:
+async def yok_works(profile: Profile, log, *, sections: set[str] | None = None, publications: bool = True) -> tuple[list[dict], dict | None]:
     loop = asyncio.get_running_loop()
 
     def emit(msg: str):
         asyncio.run_coroutine_threadsafe(log("yok", "running", msg), loop)
 
     res = await asyncio.to_thread(yok_sync, profile.name or profile.query_name, profile.get("institution", ""),
-                                  profile.links.get("yok", ""), emit)
+                                  profile.links.get("yok", ""), emit, sections, publications)
     prof = res.get("profile") or {}
     if prof:
         if res.get("profile_url"):
@@ -833,9 +847,9 @@ async def yok_works(profile: Profile, log) -> tuple[list[dict], dict | None]:
             profile.set("department", tr_title(re.sub(r"\s*PR\.$", " Programı", prof["department"])), "yok", src,
                         override=True)
         if prof.get("field"):
-            profile.set("field", prof["field"], "yok", src)
+            profile.set("field", prof["field"], "yok", src, override=sections is not None and "profile" in sections)
         if prof.get("keywords"):
-            profile.set("interests", prof["keywords"], "yok", src)
+            profile.set("interests", prof["keywords"], "yok", src, override=sections is not None and "profile" in sections)
         if prof.get("orcid"):
             profile.links.setdefault("orcid", prof["orcid"])
             profile.observe("orcid", prof["orcid"], "yok", src)

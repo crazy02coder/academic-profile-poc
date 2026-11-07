@@ -75,15 +75,31 @@ Sağlayıcı, API adresi ve anahtar yalnızca **Ayarlar** sayfasından girilir (
 |---|---|
 | **Ana sayfa** | Tek arama kutusu: incelenen akademisyen, üniversite ve firma önerir; ayrıca adı YÖK'te ya da konuyu yayınlarda aratır. |
 | **Akademisyenler** | YÖK'te ad araması ve aday seçimi, incelenen profillerin listesi. YÖK'te olmayan kişi için "Site bağlantısıyla başlat". |
-| **Üniversiteler** | YÖK'teki tüm üniversiteler. Fakülte → bölüm → akademisyen, birim yayınları. "Site dizini" aynı ağacı kurumun kendi sitesinden okur. |
+| **Üniversiteler** | Akademisyen bakışı: fakülte → bölüm → akademisyen ve birim yayınları. Öğrenci bakışı: lisans ve lisansüstü programlar, ders içerikleri, ücretler, Erasmus ve kampüs bilgileri; başlıklar açıldıkça yüklenir. "Site dizini" kurumun kendi sitesini okur. |
 | **Firmalar** | Resmi Ar-Ge ve Tasarım Merkezi olan firmalar. Firma sayfasında Akademisyenler, TÜBİTAK ve Patentler sekmeleri. |
-| **Konular** | Bir alanda yazılmış yayınlar: OpenAlex, Crossref, Semantic Scholar, OpenAIRE ve TR Dizin birlikte aranır. Türkçe sorgu İngilizceye de çevrilir. |
-| **Kütüphanem** | Favori makaleler ve akademisyenler. Yayın listeleri CSV ve BibTeX olarak indirilir. |
+| **Konular** | Kaynaklar menüsünde seçilen OpenAlex, Crossref, Semantic Scholar, OpenAIRE, TR Dizin ve WoS taranır. Türkçe sorgu İngilizceye de çevrilir. |
+| **Kütüphanem** | Kaydedilen makaleler, akademisyenler, üniversiteler ve firmalar. Yayın listeleri dışa aktarılabilir. |
 | **Sistem** | Servis durumu (yapay zekâ, REA, tarayıcı, EPO), öğrenilen site tarifleri, değişiklik taraması. |
 
-**Profil sekmeleri:** Genel bakış, Yayınlar, Akademik geçmiş, Dersler, Tezler, Projeler ve diğer, İş birlikleri, Patentler, Asistan. "Yenile" düğmesi profili kaynaklardan baştan toplar; kayıt, sohbet ve favori korunur.
+**Profil sekmeleri:** Genel bakış, Yayınlar, Akademik geçmiş, Dersler, Tezler, Projeler ve diğer, İş birlikleri, Patentler, Asistan. **Yenile** penceresinde YÖK profili, kurum sayfası, yayınlar, akademik geçmiş, dersler, tezler, projeler, iş birlikleri ve patentler ayrı seçilir. Yayınlar seçilirse taranacak kaynaklar da belirlenir. Yayın sekmesindeki **Kaynaklar** menüsü aynı seçimi doğrudan başlatır; tablo başlığındaki kaynak filtresi ise yalnız görünümü süzer. Seçilmeyen bilgiler, eski yayın kimlikleri, sohbet ve favoriler korunur; kaynak hatası eski kayıtları silmez. Bağımsız seçili yayın kaynakları paralel çalışır. Kayıtlı profili açmak WoS veya EPO taramasını yeniden başlatmaz.
 
-**Tema:** Sağ üstteki düğmeyle beyaz ya da kara; seçim hatırlanır, ilk açılışta bilgisayarın teması kullanılır. Hareketler sistemin "hareketi azalt" ayarına uyar.
+**Öğrenci bakışı:** İlk açılış yalnız kapalı accordion başlıklarını gösterir; toplu site taraması veya model isteği başlatmaz. **Lisans programları → fakülte → bölüm** yolunda program/ders içeriği ile akademik kadro ayrı açılır. Bölüm listesi seçilen fakültenin YÖK kadrosundan türetilir; öğrenci görünümü için yayın/atıf metrikleri veya akademisyen profilleri toplanmaz. Kadro alt başlığı bu listeyi gösterir. Program ve ders içeriği ise ilgili alt başlık açılınca, fakülte ve bölüm bağlamıyla üniversitenin resmî sitesinden okunur.
+
+Yüksek lisans/doktora (varsa tezli/tezsiz ve başvuru koşulları), genel ders kataloğu, ücret/burslar, Erasmus, Work and Travel ve kampüs başlıkları da birbirinden bağımsız yüklenir. Birden fazla başlık açık kalabilir; açılma/kapanma ve sonradan gelen içerik yüksekliği animasyonla değişir. Her kategori ve bölüm ayrı saklanır; aynı başlık için eşzamanlı istekler ortak işi bekler. Seçilen kategori en fazla 10 sayfa ve 90 saniye bütçeyle taranır; bölüme ait ders içeriğinde 6 sayfa sınırı korunur. Öğrenci sayfası istekleri ortak eşzamanlılık sınırını kullanır. Kayıt varsa yeniden taranmaz; **Bu bilgiyi yenile** yalnız açık başlığı yeniler. Her özet kaynak bağlantısına ve metinde bulunan alıntıya dayanır; bölüm ve dönem kanıtı olmayan bilgi tahmin edilmez. Başlık, liste, tablo ve ofis istatistikleri doğrudan ayrıştırılabilir; model kullanılamadığında da bu kanıtlar ve resmî bağlantılar korunur. Erişim sorunu önceki bilgiyi silmez. PDF metinleri `pypdf` ile okunur, görüntü PDF'lerine OCR uygulanmaz.
+
+**Öğrenci asistanı:** Üniversiteye özel sohbet yalnız soru gönderilince çalışır. Mevcut resmî kaynak alıntılarını kullanır; gereken kategori kayıtlı değilse yalnız o kategori toplanır. Seçilen bölümün ders/program bağlamı korunur; Erasmus ve Work and Travel üniversite genelinde değerlendirilir. Yanıtların bağlantıları uygulamanın kaynak kayıtlarından gelir; modelin alıntısı, sayı ve tarihleri bu kanıtlarda kontrol edilir. Kanıt yoksa eksiklik açıkça belirtilir. Sohbet geçmişi olgusal kaynak sayılmaz. Sayfa açılışında sohbet için model çağrısı yapılmaz.
+
+**Kurum kimliği ve yerleşim:** Üniversite ve firma logoları kurum sitesi veya eşleşen kurum kaydından bulunur, yerelde önbelleğe alınır. Logo bulunamazsa baş harfler kalır. Boş HTML öznitelikleri, lazy görseller ve inline logo SVG’leri desteklenir; başarısız logo kaydı 10 dakika sonra yeniden denenebilir, eski başarısız kayıtlar sürüm değişikliğinde atlanır. Başarılı logolar geçici erişim hatasında korunur. Üniversite, firma ve akademisyen sayfalarında geniş kapak, kapak kenarına taşan büyük logo/fotoğraf, altta ad ve işlem düğmeleri kullanılır. Kurum logosu kapakta filigran olarak görünür; kapak rengi logodaki baskın renkli alandan alınır. Üniversite kartları ve akademisyen listesi de aynı rengi kullanır. Monokrom veya okunamayan logo için kurum rengi tahmin edilmez. Geniş içerik alanı ve daraltılabilir yan menü kullanılır; menü tercihi hatırlanır. Kitap ve bağlantı izinden oluşan uygulama simgesiyle her tarayıcı oturumunda bir kez kapanabilir karşılama bildirimi gösterilir.
+
+Firma logosu keşfi kayıtlı site/kurum metadatasını, OpenAlex eşleşmesini ve gerektiğinde sınırlı resmî site aramasını kullanır. Arama sonucu doğrudan logo kabul edilmez; erişilen sayfada firma kimliği doğrulanır. HTML logo işaretleri ve Organization JSON-LD kayıtları okunur. Görünen kartların logo istekleri tembel yüklenir; firma dizininin tamamı taranmaz.
+
+**Tema ve hareket:** Sağ üstteki düğmeyle beyaz ya da kara; seçim hatırlanır, ilk açılışta bilgisayarın teması kullanılır. Yan menü genişliği, yazıları ve seçili menü işareti yumuşak geçişle değişir. Akademisyen kartları arasında boşluk bulunur; fare ve klavye odağında kart öne çıkar. Hareketler sistemin "hareketi azalt" ayarına uyar.
+
+Logo ve öğrenci rehberi istekleri eksik TLS ara sertifikalarını ortak bağlantı katmanında tamamlar; sertifika ve alan adı doğrulaması açık kalır. AIA'nın PKCS#7 sertifika paketleri de okunur. Kayıtlı HTTPS ana sayfası açılmazsa aynı kurum alan adının `www` olan/olmayan adresi denenir; başka kurum adresi tahmin edilmez.
+
+Seçili bölümün ders tablosu veya ders kodu/adı/açıklaması içeren katalog sayfası bulunduğunda içerik doğrudan ayrıştırılır; model çağrısı gerekmez. Fakülte → bölüm → ders sayfası bağlantısı doğrulanır, farklı dildeki programlar karıştırılmaz. Dersler dönem ve ders başlıkları açılarak görüntülenir. Önceki okuyucunun bıraktığı boş/başarısız kayıtlar yeni okuyucuyla bir kez yeniden alınır; erişim hatası “bilgi bulunamadı” olarak gösterilmez.
+
+Öğrenci rehberi keşfinde kategoriye uygun ofis, dil merkezi ve ayrıntı sayfaları önceliklendirilir; alt alan adında “erasmus” yazması tüm sayfaları aynı derecede ilgili yapmaz. Eski sürümün yalnız takvimden oluşan veya içeriksiz kaydı, ilgili başlık tekrar açıldığında yeni okuyucuyla bir kez yükseltilir. Başarılı ders katalogları korunur. Ücretin kaynakta yazan dönemi alıntıda saklanır; başka döneme ait tanıtım duyurusu bu ücreti güncel yapmaz.
 
 ---
 
@@ -111,7 +127,7 @@ Sağlayıcı, API adresi ve anahtar yalnızca **Ayarlar** sayfasından girilir (
  │ İş birlikleri│   firmalar, resmi Ar-Ge / Tasarım Merkezi listesiyle eşleştirilir
  └──────┬───────┘
         ▼
-   Profil açılır ──► Patentler      EPO'dan, anahtar tanımlıysa
+   Profil açılır ──► Patentler      Yenile'de seçilince EPO'dan; anahtar tanımlıysa
         │
         ├──────────► Analiz         "Yapay zekâ ile analiz et" denince; her cümle bir yayın kimliğine bağlı
         │
@@ -222,7 +238,7 @@ Tarifler `data/recipes/<alan-adı>.json` altında, REA kanıt kimliğiyle (`evid
 | OpenAIRE | DergiPark, üniversite açık arşivleri, AVESİS, Aperta ve YÖK Açık Bilim kayıtları. DergiPark'a bu yoldan ulaşılır. |
 | YÖK Tez Merkezi | REA tarifiyle, tarayıcısız. |
 | Google Scholar | Best-effort; engellenirse akış bozulmaz, CAPTCHA çözülmez. |
-| Web of Science | Profil açılınca Scrapling ile arka planda toplanır. Yazar kimliği doğrulanan makale ve bildiriler eklenir; mevcut yayınlarda WoS kaynak bağlantısı görünür. |
+| Web of Science | İlk profil toplamasında veya seçilen WoS yenilemesinde Scrapling ile arka planda toplanır. Yazar kimliği doğrulanan makale ve bildiriler eklenir; mevcut yayınlarda WoS kaynak bağlantısı görünür. |
 
 **Tekilleştirme** (`app/dedup.py`):
 
@@ -245,7 +261,7 @@ Tarifler `data/recipes/<alan-adı>.json` altında, REA kanıt kimliğiyle (`evid
 
 ## WoS yayınları ve JCR dergi çeyrekleri
 
-Profil açılınca WoS'un kendi arama ekranında yazar kimliğiyle yayın aranır. ORCID/ResearcherID,
+İlk profil toplamasında veya yayın yenilemesinde WoS seçildiğinde kendi arama ekranında yazar kimliğiyle yayın aranır. ORCID/ResearcherID,
 mevcut yayın eşleşmeleri ve destekleyici yazar/kurum bilgileri kullanılır; yalnız benzer ad yeni bir yayını
 profile eklemek için yeterli değildir. DOI aynıysa kaynaklar aynı satırda birleşir. DOI yoksa başlık,
 yıl ve yazar birlikte kontrol edilir; çelişkili DOI'ler birleştirilmez. Eksik yayınlar yeni satır olarak
@@ -270,14 +286,23 @@ panel kapanır ve profil, konu veya birim taraması kaldığı yerden devam eder
 panel yeniden açılabilir; **Taramayı atla** o doğrulama bekleyişini sonlandırır. Diğer kaynaklardan
 toplanan sonuçlar korunur. Ayrı bir WoS oturumu açılmaz; ücretli çözücü, API anahtarı veya tarayıcı
 eklentisi gerekmez. Bu işlem kurum aboneliği veya WoS giriş gereksiniminin yerini almaz.
-Panel eklenmeden önce kaydedilmiş insan doğrulaması hataları ilk yeniden açılışta bir kez daha
-denenir; eski hata önbelleği panelin açılmasını engellemez. Kullanıcının atladığı veya süresi dolan
-yeni doğrulamalar bu geçiş kuralıyla tekrar tekrar başlatılmaz.
-Profil açıkken bağlantı kesilirse WoS sonuç takibi yeniden bağlanır; sunucu yeniden başladığı için
-iş kaybolmuşsa sınırlı sayıda yeniden başlatır. Doğrulama tamamlandığında sonuç takibi de uyanır.
+Panel eklenmeden önce kaydedilmiş insan doğrulaması hataları yeni bir tarama istendiğinde panelin
+açılmasını engellemez. Kayıtlı profili açmak veya durumunu okumak yeni tarama başlatmaz.
+Profil açıkken bağlantı kesilirse WoS sonuç takibi en fazla beş hatalı durum isteğinden sonra durur.
+Sunucu yeniden başladığı için iş kaybolmuşsa kullanıcı **Yenile → Yayınlar → Web of Science** ile
+başlatır. Doğrulama tamamlandığında sonuç takibi de uyanır.
 Sunucu yeniden başlatılırsa açık WoS tarayıcı oturumu korunmaz ve doğrulama tekrar istenebilir.
 
-Profil açıldığında DOI'si olan makaleler için WoS/JCR kontrolü arka planda başlar; profilin açılmasını bekletmez.
+İstenen WoS taramasında yayın toplamadan sonra DOI'si olan makaleler için WoS/JCR kontrolü yapılır.
+Bir profil taraması 600 saniyelik bütçeyle, tarayıcı sırası bekleyişi 120 saniyeyle sınırlıdır;
+insan doğrulamasında bütçe duraklatılır. Art arda üç JCR erişim hatasında kalan kontroller durur.
+Hata içeren tarama tamamlandı diye gösterilmez; kısmi sonuç ve mevcut kayıtlar korunur.
+Doğrulama durumu yalnız WoS içeren bir toplama hazırlanırken, WoS çalışırken veya bekleyen
+doğrulama varken sorgulanır; iş bittiğinde ve görünmeyen sekmede durur. Boşta sayfa açılışı
+ve sekmeye dönüş doğrulama isteği oluşturmaz. Uygulamanın mevcut sağlık yanıtındaki yerel
+iş özeti, sayfa yenilenmeden önce başlatılmış gerçek bir WoS işinin takibini sürdürebilir.
+WoS seçilmeyen yenilemeler bu kontrolü başlatmaz. Ardışık durum bağlantısı hatalarında tekrarlar sınırlıdır.
+Bu GET durum istekleri yeni bir tarama başlatmaz.
 Mevcut SJR etiketi korunur, WoS/JCR sonucu ayrı ve kaynak sayfasına bağlı bir etiketle gösterilir.
 WoS kaydındaki DOI yayınla birebir eşleşmelidir. JCR yılı sayfada açıklanmıyorsa yıl etikete eklenmez;
 yayın yılı veya JCI yılı yerine geçirilmez. Yılın açıklanmadığı bilgisi ve kategoriler etiketin açıklamasında görünür.
@@ -291,7 +316,7 @@ Doğru kayıt bulunmuş ancak JCR bilgisi yoksa başka aramalarla çeyrek tahmin
 Her yayının kaydının bulunması garanti edilmez.
 Scrapling kayıt sayfasını okur; giriş/erişim engelinde tarama durur. Arayüzde yalnızca bulunan çeyrekler gösterilir.
 Başarılı sonuçlar `data/wos/` altında 7 gün, sonuçsuz/hatalı kontroller 15 dakika saklanır.
-Profil yeniden açıldığında süresi dolmuş kontroller otomatik yenilenir.
+Süresi dolmuş kontroller kullanıcı yeni WoS taraması istediğinde yenilenir.
 SJR filtreleri ve sayımları yalnızca SJR verisini kullanmaya devam eder.
 
 ---

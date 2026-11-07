@@ -66,7 +66,7 @@ function hydrateIcons(root = document) {
 
 // ------------------------------------------------------------------- durum
 const S = {
-  fav: { papers: [], people: [] }, chats: [],
+  fav: { papers: [], people: [], universities: [], firms: [] }, chats: [],
   result: null, jobId: null, chatId: null, chatRequest: null, paperRequest: null,
   jobs: {},            // iş id → { node, es, name, done }
   dir: null,           // kurum sitesi dizini durumu
@@ -183,6 +183,7 @@ function setNav(key) {
     pill.style.opacity = 1; pill.style.height = `${active.offsetHeight}px`; pill.style.transform = `translateY(${active.offsetTop}px)`;
   } else pill.style.opacity = 0;
   $("#app").classList.remove("menu-open");
+  syncSidebar();
 }
 
 function toast(html, ms = 4200) {
@@ -195,9 +196,10 @@ function toast(html, ms = 4200) {
 let busyN = 0;
 function busy(d) { busyN += d; document.body.classList.toggle("is-busy", busyN > 0); }
 async function api(url, opts = {}) {
-  busy(1);
+  const { quiet = false, ...requestOptions } = opts;
+  if (!quiet) busy(1);
   try {
-    const res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts });
+    const res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...requestOptions });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       const error = new Error(typeof err.detail === "string" ? err.detail : `İstek başarısız (HTTP ${res.status}).`);
@@ -205,7 +207,7 @@ async function api(url, opts = {}) {
       throw error;
     }
     return await res.json();
-  } finally { busy(-1); }
+  } finally { if (!quiet) busy(-1); }
 }
 const post = (url, body) => api(url, { method: "POST", body: JSON.stringify(body) });
 
@@ -376,19 +378,37 @@ function createWosVerification() {
     if (!dialog.open) { previousFocus = document.activeElement; dialog.showModal(); }
     syncList(); connect();
   };
+  let verificationActive = false, probeRequested = false, pollFailures = 0;
   const schedulePoll = (delay = 2500) => {
     clearTimeout(pollTimer);
-    if (!stopped) pollTimer = setTimeout(poll, delay);
+    pollTimer = null;
+    // Yalnız kullanıcının başlattığı veya sunucuda zaten çalışan WoS işi uyandırır.
+    if (!stopped && !document.hidden && (probeRequested || (pollFailures < 3 && (verificationActive || items.size)))) {
+      pollTimer = setTimeout(poll, delay);
+    }
+  };
+  const requestProbe = () => {
+    if (stopped) return;
+    pollFailures = 0;
+    // Yanıt alınırken yeni iş başladıysa eski "boş" yanıtın bildirimi yutmasını önle.
+    if (pollRequest) { probeRequested = true; return; }
+    if (pollTimer) return;
+    probeRequested = true; schedulePoll(0);
   };
   const poll = async () => {
-    if (stopped || pollRequest) return;
+    pollTimer = null;
+    if (stopped || document.hidden || pollRequest) return;
+    probeRequested = false;
     const controller = new AbortController(); pollRequest = controller;
     const timeout = setTimeout(() => controller.abort(), 10000);
     try {
       const response = await fetch("/api/wos/verification", { cache: "no-store", credentials: "same-origin", signal: controller.signal });
-      if (!response.ok) return;
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
-      if (stopped || controller.signal.aborted || !Array.isArray(data.items)) return;
+      if (stopped || controller.signal.aborted) return;
+      if (!Array.isArray(data.items)) throw new Error("Geçersiz doğrulama durumu");
+      pollFailures = 0;
+      verificationActive = Boolean(data.active_jobs || data.pending_jobs);
       const previous = items.get(selectedId);
       items = new Map(data.items.filter((item) => typeof item.id === "string" && item.status === "waiting" && !finished.has(item.id)).map((item) => [item.id, item]));
       listedIds = new Set(items.keys());
@@ -409,10 +429,10 @@ function createWosVerification() {
         clearTimeout(missingTimer); missingTimer = null; missingId = null;
       }
       syncList(); showNext();
-    } catch { /* Bir geçici listeleme hatası mevcut canlı oturumu kapatmaz. */ }
+    } catch { if (!stopped && !document.hidden) pollFailures += 1; /* Geçici hata canlı oturumu kapatmaz; tekrarlar sınırlıdır. */ }
     finally {
       clearTimeout(timeout); if (pollRequest === controller) pollRequest = null;
-      schedulePoll();
+      schedulePoll(probeRequested ? 0 : pollFailures ? Math.min(15000, 2500 * 2 ** pollFailures) : 2500);
     }
   };
   const coords = (event) => {
@@ -494,15 +514,19 @@ function createWosVerification() {
   cancel.onclick = () => { if (!ready || cancelPending) return; release(); cancelPending = send({ type: "cancel" }); setStatus("Tarama atlanıyor…"); updateControls(); };
   window.addEventListener("blur", release);
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) disconnect();
+    if (document.hidden) {
+      probeRequested = probeRequested || Boolean(pollRequest);
+      disconnect(); clearTimeout(pollTimer); pollTimer = null; pollRequest?.abort();
+    }
     else { if (dialog.open) connect(); schedulePoll(0); }
   });
   window.addEventListener("pagehide", () => {
-    stopped = true; clearTimeout(pollTimer); clearTimeout(missingTimer); missingTimer = null; missingId = null;
+    probeRequested = probeRequested || Boolean(pollRequest);
+    stopped = true; clearTimeout(pollTimer); pollTimer = null; clearTimeout(missingTimer); missingTimer = null; missingId = null;
     pollRequest?.abort(); disconnect();
   });
   window.addEventListener("pageshow", () => { if (stopped) { stopped = false; if (dialog.open) connect(); schedulePoll(0); } });
-  schedulePoll(0);
+  document.addEventListener("wos-work-requested", requestProbe);
   return { hide, isOpen: () => dialog.open };
 }
 
@@ -514,6 +538,163 @@ function avatar(name, photo, cls = "av") {
 }
 const profilePhoto = (c) => (c.job_id ? `/api/jobs/${encodeURIComponent(c.job_id)}/photo` : "");
 
+const orgId = (name) => fold(name).replace(/\s+/g, "-");
+const organizationColors = new Map();
+function organizationColor(img) {
+  const url = img.currentSrc || img.src;
+  if (organizationColors.has(url)) return organizationColors.get(url);
+  let color = null;
+  try {
+    // Beyaz zemin ve siyah yazı yerine logodaki baskın renkli alanı kullan.
+    const canvas = document.createElement("canvas"); canvas.width = canvas.height = 48;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context || !img.naturalWidth || !img.naturalHeight) return null;
+    const scale = Math.min(48 / img.naturalWidth, 48 / img.naturalHeight);
+    context.drawImage(img, 0, 0, img.naturalWidth * scale, img.naturalHeight * scale);
+    const pixels = context.getImageData(0, 0, 48, 48).data, buckets = new Map();
+    for (let i = 0; i < pixels.length; i += 4) {
+      const [r, g, b, a] = pixels.subarray(i, i + 4);
+      const high = Math.max(r, g, b), low = Math.min(r, g, b), saturation = high ? (high - low) / high : 0;
+      if (a < 160 || high < 35 || low > 225 || saturation < .2) continue;
+      const key = `${r >> 5}:${g >> 5}:${b >> 5}`, weight = saturation * a / 255;
+      const bucket = buckets.get(key) || { weight: 0, r: 0, g: 0, b: 0 };
+      bucket.weight += weight; bucket.r += r * weight; bucket.g += g * weight; bucket.b += b * weight;
+      buckets.set(key, bucket);
+    }
+    const best = [...buckets.values()].sort((a, b) => b.weight - a.weight)[0];
+    if (best) color = `rgb(${[best.r, best.g, best.b].map((v) => Math.round(v / best.weight)).join(", ")})`;
+  } catch { /* Renk okunamasa da logo gösterilir; kurum için renk uydurulmaz. */ }
+  organizationColors.set(url, color);
+  return color;
+}
+function applyOrganizationBrand(img) {
+  img.parentElement.classList.add("has-logo");
+  const card = img.closest("[data-org-brand]");
+  if (!card) return;
+  // Yalnız uygulamanın yerel logo adresi CSS arka planına aktarılır.
+  const url = new URL(img.currentSrc || img.src, location.href);
+  if (url.origin !== location.origin || !url.pathname.startsWith("/api/organization-logo/")) return;
+  card.style.setProperty("--org-logo", `url("${url.href}")`);
+  const color = organizationColor(img);
+  if (color) { card.style.setProperty("--org-color", color); card.classList.add("has-org-color"); }
+  card.classList.add("has-org-logo");
+}
+function organizationLogo(kind, id, name, cls = "org-logo") {
+  return `<span class="${cls} organization-logo" title="${esc(name || "Kurum")}"><span class="logo-fallback">${esc(initials(name))}</span>${id ? `<img src="/api/organization-logo/${kind}/${encodeURIComponent(id)}?v=4" alt="" loading="lazy" decoding="async" onload="applyOrganizationBrand(this)" onerror="this.remove()">` : ""}</span>`;
+}
+function organizationSaveButton(kind, id) {
+  const on = (S.fav[kind] || []).some((x) => x.key === id);
+  return `<button class="btn sm org-save ${on ? "saved" : ""}" data-save-org="${kind}" data-org-id="${esc(id)}" type="button" aria-pressed="${on}">${icon("bookmark")}${on ? "Kütüphanemde" : "Kaydet"}</button>`;
+}
+async function toggleOrganization(btn) {
+  const kind = btn.dataset.saveOrg, id = btn.dataset.orgId;
+  btn.disabled = true;
+  try {
+    if ((S.fav[kind] || []).some((x) => x.key === id)) {
+      await api(`/api/favorites/${kind}/${encodeURIComponent(id)}`, { method: "DELETE" });
+      toast("Kütüphaneden çıkarıldı.");
+    } else {
+      await post(`/api/favorites/${kind}`, { item: { id } });
+      toast(`${icon("bookmark")}Kütüphanene kaydedildi.`);
+    }
+    await loadFav();
+    if (location.hash.startsWith("#/kutuphane")) { viewLibrary(kind); return; }
+    btn.outerHTML = organizationSaveButton(kind, id);
+  } catch (e) { toast(esc(e.message)); btn.disabled = false; }
+}
+
+function syncSidebar() {
+  const mobile = matchMedia("(max-width: 860px)").matches;
+  const expanded = mobile ? $("#app").classList.contains("menu-open") : !$("#app").classList.contains("side-collapsed");
+  const btn = $("#menuBtn");
+  btn.setAttribute("aria-expanded", String(expanded));
+  btn.setAttribute("aria-label", expanded ? "Menüyü daralt" : "Menüyü aç");
+  btn.title = expanded ? "Menüyü daralt" : "Menüyü aç";
+  $("#side").inert = mobile && !expanded;
+  const active = $("#nav a.active");
+  if (active) { $("#navPill").style.height = `${active.offsetHeight}px`; $("#navPill").style.transform = `translateY(${active.offsetTop}px)`; }
+}
+function toggleSidebar() {
+  if (matchMedia("(max-width: 860px)").matches) $("#app").classList.toggle("menu-open");
+  else {
+    const on = $("#app").classList.toggle("side-collapsed");
+    try { localStorage.setItem("sidebar-collapsed", on ? "1" : "0"); } catch { /* tercih */ }
+  }
+  syncSidebar();
+}
+function setupSidebar() {
+  try { $("#app").classList.toggle("side-collapsed", localStorage.getItem("sidebar-collapsed") === "1"); } catch { /* tercih */ }
+  $$("[data-nav]").forEach((el) => { el.title = el.querySelector(".nav-label")?.textContent.trim() || el.textContent.trim(); el.setAttribute("aria-label", el.title); });
+  matchMedia("(max-width: 860px)").addEventListener("change", syncSidebar);
+  $("#app").addEventListener("transitionend", (event) => {
+    if (event.target === $("#app") && event.propertyName === "grid-template-columns") syncSidebar();
+  });
+  syncSidebar();
+}
+function showWelcome() {
+  try { if (sessionStorage.getItem("academic-welcome-v2")) return; sessionStorage.setItem("academic-welcome-v2", "1"); } catch { /* oturum depolaması kapalı */ }
+  const box = document.createElement("aside");
+  box.className = "welcome-toast";
+  box.setAttribute("aria-label", "Akademik İz'e hoş geldiniz");
+  box.innerHTML = `<div class="welcome-symbol"><img src="/static/brand-mark.svg" alt=""></div><div class="welcome-copy"><span class="eyebrow">KEŞFET · İLİŞKİLENDİR · KAYDET</span><strong>Bilginin izini birlikte sürelim.</strong><p>Akademisyenler, üniversiteler ve firmalar.<br>Kaynaklarıyla, tek yerde.</p><a href="#/" class="welcome-link">Keşfetmeye başla ${icon("arrow")}</a></div><button class="icon-btn" type="button" aria-label="Karşılama mesajını kapat">${icon("x")}</button><div class="welcome-timer"></div>`;
+  document.body.appendChild(box);
+  const close = () => { clearTimeout(timer); box.classList.add("leaving"); setTimeout(() => box.remove(), 280); };
+  let timer = setTimeout(close, 9000);
+  $("button", box).onclick = close;
+  $("a", box).onclick = close;
+  box.onmouseenter = box.onfocusin = () => { clearTimeout(timer); box.classList.add("paused"); };
+  box.onmouseleave = box.onfocusout = () => { timer = setTimeout(close, 5000); box.classList.remove("paused"); };
+}
+
+const PROFILE_SOURCES = ["yok", "openalex", "crossref", "orcid", "scholar", "trdizin", "openaire", "tez", "wos"];
+const TOPIC_SOURCES = ["openalex", "crossref", "semantic_scholar", "trdizin", "openaire", "wos"];
+const REFRESH_SECTIONS = [
+  ["profile", "YÖK profili", "Kimlik, unvan, kurum ve fotoğraf", "user"],
+  ["institution", "Kurum sayfası", "Üniversite sitesindeki profil bilgileri", "building"],
+  ["publications", "Yayınlar", "Seçtiğin akademik kaynaklar", "book"],
+  ["career", "Akademik geçmiş", "Görevler, eğitim ve deneyim", "award"],
+  ["courses", "Dersler", "YÖK'teki ders kayıtları", "layers"],
+  ["theses", "Tezler", "YÖK ve Tez Merkezi kayıtları", "file"],
+  ["projects", "Projeler ve diğer", "TÜBİTAK, projeler ve faaliyetler", "grid"],
+  ["industry", "İş birlikleri", "Akademisyenler ve firmalar", "users"],
+  ["patents", "Patentler", "YÖK ve varsa EPO kayıtları", "briefcase"],
+];
+const refreshNotices = new Set();
+function sourcePicker(id, available, selected, action = false) {
+  const on = new Set(Array.isArray(selected) ? selected : available);
+  return `<details class="source-picker" id="${id}"><summary class="btn sm">${icon("layers")}Kaynaklar <span class="source-count">${available.filter((s) => on.has(s)).length}</span>${icon("chevron")}</summary><div class="source-menu"><b>Hangi kaynaklar taransın?</b><p>Seçim, yeni taramada kullanılacak kaynakları belirler.</p><div class="source-options">${available.map((s) => `<label><input type="checkbox" name="scan-source" value="${s}" ${on.has(s) ? "checked" : ""}><span>${esc(SRC_TR[s] || s)}</span></label>`).join("")}</div><div class="source-menu-foot"><button class="link" type="button" data-sources-all>Tümünü seç</button><button class="btn sm primary" type="button" data-sources-apply>${action ? "Seçilenleri tara" : "Uygula"}</button></div></div></details>`;
+}
+function selectedSources(root) { return $$("input[name=scan-source]:checked", root).map((el) => el.value); }
+function bindSourcePicker(root, onApply) {
+  if (!root) return;
+  const update = () => { const count = selectedSources(root).length; $(".source-count", root).textContent = count; $("[data-sources-apply]", root).disabled = !count; };
+  root.addEventListener("change", update);
+  $("[data-sources-all]", root).onclick = () => { $$("input", root).forEach((el) => { el.checked = true; }); update(); };
+  $("[data-sources-apply]", root).onclick = () => { const sources = selectedSources(root); if (sources.length) { root.open = false; onApply(sources); } };
+  update();
+}
+async function runProfileRefresh(r, sections, sources) {
+  wosProfileWatch?.stop();
+  await startJob(r.profile.institution || r.profile.source_url || "", r.profile.name,
+    () => post(`/api/jobs/${r.job_id}/refresh`, { sections, sources }), "yenileniyor", sections,
+    sections.includes("publications") && sources.includes("wos"));
+}
+function refreshProfileModal(r) {
+  const prefs = r.refresh_preferences || {};
+  const chosen = new Set(prefs.sections || ["publications"]);
+  openModal(`<form id="refreshForm"><div class="modal-heading"><span class="modal-emblem">${icon("refresh")}</span><div><h2 id="refreshTitle">Neyi yenileyelim?</h2><p class="muted">${esc(r.profile.name)} · Yalnız seçtiğin bilgiler taranır.</p></div></div><div class="refresh-grid">${REFRESH_SECTIONS.map(([id, title, desc, ic]) => `<label class="refresh-choice"><input type="checkbox" name="section" value="${id}" ${chosen.has(id) ? "checked" : ""}><span class="choice-icon">${icon(ic)}</span><span><b>${title}</b><small>${desc}</small></span></label>`).join("")}</div><fieldset class="refresh-sources" id="refreshSources"><legend>Yayın kaynakları</legend><div class="source-options">${PROFILE_SOURCES.map((s) => `<label><input type="checkbox" name="scan-source" value="${s}" ${(prefs.sources || PROFILE_SOURCES).includes(s) ? "checked" : ""}><span>${esc(SRC_TR[s] || s)}</span></label>`).join("")}</div></fieldset><p class="refresh-note">Seçmediğin bilgiler, sohbetin ve kayıtlı yayınların korunur.</p><div class="modal-footer"><button class="btn" type="button" data-close>Vazgeç</button><button class="btn primary" id="refreshSubmit" type="submit">${icon("refresh")}Seçilenleri yenile</button></div></form>`);
+  $(".modal-box").setAttribute("aria-labelledby", "refreshTitle");
+  const form = $("#refreshForm");
+  const update = () => {
+    const sections = $$("[name=section]:checked", form).map((el) => el.value);
+    $("#refreshSources").hidden = !sections.includes("publications");
+    $("#refreshSubmit").disabled = !sections.length || sections.includes("publications") && !selectedSources(form).length;
+  };
+  form.onchange = update;
+  form.onsubmit = (e) => { e.preventDefault(); const sections = $$("[name=section]:checked", form).map((el) => el.value); if (!sections.length) return; const sources = selectedSources(form); closeModal(); runProfileRefresh(r, sections, sources); };
+  update();
+}
+
 // ------------------------------------------------------------------- ortam, geçmiş, favoriler
 async function loadEnv() {
   const el = $("#env");
@@ -521,6 +702,11 @@ async function loadEnv() {
     const h = await api("/api/health");
     el.className = `env ${h.llm_ready ? "ok" : "warn"}`;
     el.innerHTML = `<span class="dot"></span><span title="REA ${h.rea ? "hazır" : "yok"} · Chromium ${h.chromium ? "hazır" : "yok"}">${esc(h.llm)}</span>`;
+    // Normal açılış isteğinin yerel iş özeti: boşta doğrulama isteği gönderme.
+    const activity = h.wos_activity;
+    if (activity && (activity.active_jobs || activity.pending_jobs || activity.waiting_verifications)) {
+      document.dispatchEvent(new Event("wos-work-requested"));
+    }
   } catch { el.className = "env warn"; el.innerHTML = `<span class="dot"></span><span>Sunucuya ulaşılamadı</span>`; }
 }
 
@@ -530,8 +716,8 @@ async function loadChats() {
 }
 
 async function loadFav() {
-  try { S.fav = await api("/api/favorites"); } catch { /* sunucu yok */ }
-  $("#cntLibrary").textContent = (S.fav.papers.length + S.fav.people.length) || "";
+  try { S.fav = { papers: [], people: [], universities: [], firms: [], ...await api("/api/favorites") }; } catch { /* sunucu yok */ }
+  $("#cntLibrary").textContent = Object.values(S.fav).reduce((n, items) => n + (Array.isArray(items) ? items.length : 0), 0) || "";
 }
 const favPaper = (p) => S.fav.papers.find((f) => (p.doi && f.doi && normDoi(f.doi) === normDoi(p.doi)) || fold(f.title) === fold(p.title));
 const favPerson = (key) => S.fav.people.find((f) => f.key === key);
@@ -924,13 +1110,13 @@ async function loadWos(r, drawPubs) {
   const read = async (method) => {
     const controller = new AbortController(); request = controller;
     const timeout = setTimeout(() => controller.abort(), 15000);
-    try { return await api(endpoint, { method, ...(method === "POST" ? { body: "{}" } : {}), signal: controller.signal }); }
+    try { return await api(endpoint, { method, ...(method === "POST" ? { body: "{}" } : {}), signal: controller.signal, quiet: true }); }
     finally { clearTimeout(timeout); if (request === controller) request = null; }
   };
   const notifyFailure = (data) => {
     const report = data.publications || {}, reason = data.reason || report.reason || "";
-    const status = ["blocked", "error"].includes(data.status) ? data.status : report.status;
-    if (!["blocked", "error"].includes(status)) return;
+    const status = ["blocked", "error", "partial"].includes(data.status) ? data.status : report.status;
+    if (!["blocked", "error", "partial"].includes(status)) return;
     const key = `${r.job_id}:${status}:${data.finished_at ?? data.revision ?? report.at ?? ""}:${reason}`;
     if (wosFinishNotices.has(key)) return;
     wosFinishNotices.add(key);
@@ -944,6 +1130,14 @@ async function loadWos(r, drawPubs) {
   };
   const apply = (data) => {
     let changed = false;
+    const scanState = $("#profileWosState");
+    if (scanState) {
+      const running = ["running", "pending"].includes(data.status);
+      const phases = { queued: "WoS sırası bekleniyor", publications: "WoS yayınları alınıyor", quartiles: "JCR bilgileri kontrol ediliyor" };
+      const label = running ? `${phases[data.phase] || "WoS taranıyor"}${data.total ? ` · ${data.checked || 0}/${data.total}` : ""}`
+        : ["partial", "error", "blocked"].includes(data.status) ? "WoS kısmen tamamlandı · alınan kayıtlar korundu" : "";
+      scanState.innerHTML = `${running ? '<span class="spinner"></span>' : ""}${esc(label)}`;
+    }
     const update = data.publication_update;
     if (Array.isArray(update?.publications) && (data.revision == null || data.revision !== publicationRevision)) {
       for (const key of ["publications", "unique_count", "raw_count", "by_source", "paper_verification", "languages", "summary"]) {
@@ -978,7 +1172,7 @@ async function loadWos(r, drawPubs) {
   const run = async (getFirst = false) => {
     if (!active() || removed || watch.running) return;
     watch.running = true; tbody.dataset.wosLoading = "1";
-    let method = getFirst ? "GET" : "POST", failures = 0, idleRestarts = 0;
+    let method = "GET", failures = 0;
     try {
       while (active()) {
         wakeRequested = false;
@@ -991,27 +1185,22 @@ async function loadWos(r, drawPubs) {
             notifyFailure({ status: "error", reason: "profile_missing", message: "WoS kontrolü durdu: profil kaydına artık ulaşılamıyor." });
             break;
           }
-          // POST yanıtı kaybolduysa önce mevcut işi sor; ikinci bir iş başlatma.
+          // Durum isteğini sınırlı sayıda yeniden dene; yeni tarama başlatma.
           method = "GET";
-          await delay(Math.min(15000, 2500 * 2 ** Math.min(failures++, 3)));
+          if (++failures >= 5) { notifyFailure({ status: "error", reason: "connection_lost", message: "WoS durum bağlantısı kesildi. Kayıtlı veriler korunuyor." }); break; }
+          await delay(Math.min(15000, 2500 * 2 ** Math.min(failures, 3)));
           continue;
         }
         if (!active()) break;
         failures = 0; apply(data);
         if (["running", "pending"].includes(data.status)) {
-          method = "GET"; await delay(2500); continue;
+          document.dispatchEvent(new Event("wos-work-requested"));
+          method = "GET"; await delay(document.hidden ? 15000 : 4000); continue;
         }
         if (wakeRequested) { method = "GET"; continue; }
         if (data.status === "idle") {
-          // Sunucu yeniden başlamış olabilir. Normal POST en fazla iki kez;
-          // sonra GET ile bekle, sürekli yeni tarama başlatma.
-          if (idleRestarts < 2) {
-            idleRestarts += 1; await delay(2500 * idleRestarts); method = "POST";
-          } else {
-            notifyFailure({ status: "error", reason: "job_interrupted", message: "WoS taraması yeniden başlayamadı; bağlantı izlenmeye devam ediyor." });
-            method = "GET"; await delay(15000);
-          }
-          continue;
+          // Kayıtlı profili açmak yeni tarama başlatmaz. Yenile seçimi sunucuda başlatır.
+          break;
         }
         notifyFailure(data);
         break;
@@ -1225,18 +1414,31 @@ function exportModal(listKey) {
 }
 
 // ------------------------------------------------------------------- yayın ayrıntısı (modal)
+let modalPreviousFocus = null;
 function openModal(html) {
+  $(".welcome-toast")?.remove();
+  const modal = $("#modal"), box = $(".modal-box", modal);
+  if (modal.hidden) modalPreviousFocus = document.activeElement;
   $("#modalBody").innerHTML = html; hydrateIcons($("#modalBody"));
-  $("#modal").classList.remove("closing");
-  $("#modal").hidden = false;
+  box.removeAttribute("aria-labelledby");
+  const title = $("h2", box);
+  if (title) { title.id ||= "modalTitle"; box.setAttribute("aria-labelledby", title.id); }
+  modal.classList.remove("closing"); modal.hidden = false;
+  $("#app").inert = true;
+  requestAnimationFrame(() => { if (!modal.hidden) $("input:not([disabled]), button", box)?.focus({ preventScroll: true }); });
 }
 function closeModal() {
   S.paperRequest?.abort(); S.paperRequest = null;
-  const m = $("#modal");
-  if (m.hidden) return;
-  if (calmMotion()) { m.hidden = true; return; }
-  m.classList.add("closing");
-  setTimeout(() => { if (m.classList.contains("closing")) { m.hidden = true; m.classList.remove("closing"); } }, 170);
+  const modal = $("#modal");
+  if (modal.hidden) return;
+  const finish = () => {
+    modal.hidden = true; modal.classList.remove("closing"); $("#app").inert = false;
+    if (modalPreviousFocus?.isConnected) modalPreviousFocus.focus({ preventScroll: true });
+    modalPreviousFocus = null;
+  };
+  if (calmMotion()) { finish(); return; }
+  modal.classList.add("closing");
+  setTimeout(() => { if (modal.classList.contains("closing")) finish(); }, 170);
 }
 
 function formatAnswer(text) {
@@ -1337,7 +1539,7 @@ function viewHome() {
       <span class="fi">${icon(ic)}</span><b>${title}</b><span class="e-sub">${id ? `<span id="${id}">—</span> ` : ""}${sub}</span><span class="e-go">${icon("arrow")}</span></a>`).join("")}</div>
     ${recent.length ? `<div class="card list-card" style="margin-top:18px">
       <div class="lc-head"><h3>Son incelenenler</h3><a href="#/akademisyenler" class="faint">Tümü →</a></div>
-      <div class="stagger">${recent.map((c, i) => profileRow(c, i + 6)).join("")}</div></div>` : ""}`);
+      <div class="stagger profile-card-list">${recent.map((c, i) => profileRow(c, i + 6)).join("")}</div></div>` : ""}`);
   setupOmni();
   api("/api/overview").then((o) => {
     [["cProfiles", o.profiles], ["cUnis", o.universities], ["cFirms", o.firms]].forEach(([id, n]) => {
@@ -1405,13 +1607,18 @@ const chatInterests = (c) => [...new Map((c.interests || []).map(cleanInterest).
 
 function profileRow(c, i = 0) {
   const ints = chatInterests(c);
-  return `<div class="person-row" style="--i:${Math.min(i, 24)}" data-chat="${esc(c.id)}" data-q="${esc(fold(`${c.name} ${c.institution || ""}`))}" data-ints="${esc(ints.map(fold).join("|"))}">
+  return `<div class="person-row" data-org-brand role="link" tabindex="0" aria-label="${esc(c.name)} profilini aç" style="--i:${Math.min(i, 24)}" data-chat="${esc(c.id)}" data-q="${esc(fold(`${c.name} ${c.institution || ""}`))}" data-ints="${esc(ints.map(fold).join("|"))}">
     ${avatar(c.name, profilePhoto(c))}
     <div class="pr-main"><b>${esc(c.name || "?")}</b><span>${esc([c.title, c.institution].filter(Boolean).join(" · "))}</span>
       ${ints.length ? `<span class="faint">${esc(ints.slice(0, 3).join(" · "))}</span>` : ""}</div>
-    <span class="chip">${fmtNum(c.papers)} yayın</span>
+    ${c.institution ? organizationLogo("universities", orgId(c.institution), c.institution, "person-brand") : ""}<span class="chip">${fmtNum(c.papers)} yayın</span>
     <button class="h-del" data-delchat="${esc(c.id)}" type="button" aria-label="Sil" title="Profili sil">${icon("x")}</button></div>`;
 }
+document.addEventListener("keydown", (event) => {
+  if (event.target.matches?.('.person-row[role="link"][data-chat]') && ["Enter", " "].includes(event.key)) {
+    event.preventDefault(); event.target.click();
+  }
+});
 
 // =================================================================== AKADEMİSYENLER
 const existingChat = (p) => S.chats.find((c) => fold(c.name) === fold(p.name)
@@ -1436,7 +1643,7 @@ async function viewPeople(q = "") {
     <div class="row-head"><h3>İncelenen profiller</h3><span class="count">${S.chats.length}</span><span class="spacer"></span>
       ${S.chats.length ? `${interestOpts.length ? `<select class="select int-select" id="pInterest" aria-label="İlgi alanı"><option value="">Tüm ilgi alanları</option>${interestOpts.map(([k, l, n]) => `<option value="${esc(k)}">${esc(l)} (${n})</option>`).join("")}</select>` : ""}
         <div class="input slim">${icon("search")}<input data-filter="pList" placeholder="Listede ara"></div><button class="link" type="button" data-clearall>Tümünü sil</button>` : ""}</div>
-    <div class="card list-card" id="pList">${S.chats.length ? `<div class="stagger">${S.chats.map(profileRow).join("")}</div>`
+    <div class="card list-card" id="pList">${S.chats.length ? `<div class="stagger profile-card-list">${S.chats.map(profileRow).join("")}</div>`
       : emptyState("users", "Henüz profil yok", "Yukarıdan bir akademisyen arayın.")}</div>`);
   $("#pSearch").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -1513,15 +1720,17 @@ function phaseOf(ev) {
   return { rea: "reverse", scrape: "scrape", crawl: "scrape", yok: "collect", publications: "collect", dedup: "merge", verify: "merge", analysis: "ai" }[ev.step] || "scrape";
 }
 
-async function startJob(sub, name, create, verb = "hazırlanıyor") {
+async function startJob(sub, name, create, verb = "hazırlanıyor", selection = null, expectWos = selection === null) {
   let job;
   try { job = await (create ? create() : post("/api/jobs", { url: sub, name })); } catch (e) { toast(esc(e.message)); return; }
+  if (expectWos) document.dispatchEvent(new Event("wos-work-requested"));
+  const phases = selection ? PHASES.filter(([key]) => ["collect", "merge"].includes(key) || key === "scrape" && selection.includes("institution")) : PHASES;
   const node = document.createElement("div");
   node.className = "card job enter";
   node.innerHTML = `<div class="m-kicker"><span class="spinner"></span>Profil ${verb}</div>
     <h2 style="margin-top:10px">${esc(name)}</h2><div class="job-sub">${esc(sub)}</div>
     <div class="progress"><div></div></div>
-    <div class="steps">${PHASES.map(([k, l]) => `<div class="step" data-phase="${k}" ${k === "bot" ? "hidden" : ""}><span class="dot"></span>${esc(l)}</div>`).join("")}</div>
+    <div class="steps">${phases.map(([k, l]) => `<div class="step" data-phase="${k}" ${k === "bot" ? "hidden" : ""}><span class="dot"></span>${esc(l)}</div>`).join("")}</div>
     <div class="now"></div>
     <details class="tech"><summary>Teknik ayrıntılar</summary><div class="log"></div></details>`;
   S.jobs[job.id] = { node, name, done: false };
@@ -1539,7 +1748,7 @@ async function startJob(sub, name, create, verb = "hazırlanıyor") {
           if (x !== st && (order.indexOf(x.dataset.phase) < order.indexOf(phase) || x.dataset.phase === "bot")) { x.className = "step done"; $(".dot", x).textContent = "✓"; }
         });
         if (!st.classList.contains("done")) st.className = "step running";
-        $(".now", node).textContent = PHASE_NOW[phase] || "";
+        $(".now", node).textContent = selection ? ev.message : PHASE_NOW[phase] || "";
         $(".progress div", node).style.width = `${Math.max(8, ((order.indexOf(phase) + 1) / order.length) * 92)}%`;
       }
       const line = document.createElement("div");
@@ -1556,6 +1765,7 @@ async function startJob(sub, name, create, verb = "hazırlanıyor") {
   function finish(r) {
     if (S.jobs[job.id].done) return;
     S.jobs[job.id].done = true;
+    if (expectWos) document.dispatchEvent(new Event("wos-work-requested"));
     $(".progress div", node).style.width = "100%";
     $$(".step:not([hidden])", node).forEach((x) => { x.className = "step done"; $(".dot", x).textContent = "✓"; });
     loadChats();
@@ -1607,8 +1817,8 @@ async function viewUnis() {
   if (!grid) return;
   $("#uSub").textContent = `YÖK Akademik'teki ${u.items.length} üniversite. Birini seçin: fakülte, bölüm, kadro.`;
   grid.classList.add("stagger");
-  grid.innerHTML = u.items.map((x, i) => `<a class="card uni-card" href="#/universite/${esc(x.id)}" style="--i:${Math.min(i, 12)}" data-q="${esc(fold(x.name))}">
-    <span class="uni-mark">${esc(initials(x.name.replace(/Üniversitesi/g, "")))}</span><span class="uc-main"><b>${esc(x.name)}</b>${x.people.length ? `<span>${x.people.length} profil incelendi</span>` : ""}</span>${icon("chevron")}</a>`).join("");
+  grid.innerHTML = u.items.map((x, i) => `<a class="card uni-card" data-org-brand href="#/universite/${esc(x.id)}" style="--i:${Math.min(i, 12)}" data-q="${esc(fold(x.name))}">
+    ${organizationLogo("universities", x.id, x.name, "uni-mark")}<span class="uc-main"><b>${esc(x.name)}</b>${x.people.length ? `<span>${x.people.length} profil incelendi</span>` : ""}</span>${icon("chevron")}</a>`).join("");
   hydrateIcons(grid);
 }
 
@@ -1619,13 +1829,17 @@ async function viewUni(uid) {
       <div class="col-head"><span class="ch-icon">${icon(ic)}</span><h3>${title}</h3><span class="count" id="${id}N"></span></div>
       <div class="col-filter"><div class="input">${icon("search")}<input data-filter="${id}" placeholder="${ph}"></div></div>
       <div class="col-body">${body}</div></section>`;
-  setView(`<div class="card org-head">
-      <div class="org-logo">${icon("building")}</div>
-      <div style="min-width:0"><h1 id="uName">${esc(d.data?.name || "Üniversite")}</h1><div class="meta" id="uMeta"></div></div>
-      <div class="actions" id="uAct"></div></div>
-    <div class="miller">${col("colFac", "layers", "Fakülteler", "Fakültelerde ara", skeleton(7))}
+  setView(`<section class="card identity-hero identity-org" data-org-brand>
+      <div class="identity-cover" aria-hidden="true"></div>
+      <div class="identity-main">
+        <div class="identity-avatar" id="uLogo">${organizationLogo("universities", uid, d.data?.name || "Üniversite", "hero-logo")}</div>
+        <div class="identity-info"><h1 id="uName">${esc(d.data?.name || "Üniversite")}</h1><div class="meta" id="uMeta"></div></div>
+        <div class="identity-actions" id="uAct"></div>
+      </div></section>
+    <div class="audience-tabs" role="tablist" aria-label="Üniversite görünümü"><button class="active" data-audience="academic" type="button" role="tab" aria-selected="true" aria-controls="academicUniversity">${icon("users")}Akademisyen bakışı</button><button data-audience="student" type="button" role="tab" aria-selected="false" aria-controls="studentView">${icon("cap")}Öğrenci bakışı</button></div>
+    <div id="academicUniversity" role="tabpanel"><div class="miller">${col("colFac", "layers", "Fakülteler", "Fakültelerde ara", skeleton(7))}
       ${col("colDep", "grid", "Bölümler", "Bölümlerde ara", `<div class="col-empty">Soldan bir fakülte seçin.</div>`)}
-      ${col("colStaff", "users", "Akademisyenler", "Akademisyenlerde ara", `<div class="col-empty">Bir bölüm seçin.</div>`)}</div>`);
+      ${col("colStaff", "users", "Akademisyenler", "Akademisyenlerde ara", `<div class="col-empty">Bir bölüm seçin.</div>`)}</div></div><div id="studentView" role="tabpanel" hidden></div>`);
   const facultyColumn = $("#colFac");
   if (!d.data) {
     try { d.data = await api(`/api/universities/${encodeURIComponent(uid)}`); }
@@ -1633,7 +1847,343 @@ async function viewUni(uid) {
     if (S.uni !== d || !facultyColumn.isConnected) return;
   }
   renderUni();
+  $$("[data-audience]").forEach((button) => { button.onclick = () => setUniversityAudience(button.dataset.audience); });
+  setUniversityAudience(d.audience || "academic");
   if (d.facData) { renderYokDeps(); if (d.dep != null) renderYokStaff(); }
+}
+
+const STUDENT_SECTIONS = [
+  ["graduate", "Yüksek lisans ve doktora", "Tezli / tezsiz programlar ve başvuru koşulları", "cap"],
+  ["courses", "Ders kataloğu", "Üniversitenin genel ders ve program bağlantıları", "book"],
+  ["fees", "Ücretler ve burslar", "Yayımlanan tutarlar, burslar ve dönem bilgisi", "bookmark"],
+  ["erasmus", "Erasmus ve değişim", "Anlaşmalı kurumlar, ülkeler ve başvurular", "globe"],
+  ["work_travel", "Work and Travel", "Üniversitenin yayımladığı duyurular", "briefcase"],
+  ["campus", "Kampüs ve ulaşım", "Yerleşkeler, konum ve iletişim", "building"],
+];
+function studentAccordion(section, title, subtitle, ic, faculty = "", department = "") {
+  return `<details class="student-accordion" data-student-section="${section}" data-faculty="${esc(faculty)}" data-department="${esc(department)}"><summary><span class="student-summary-icon">${icon(ic)}</span><span><b>${esc(title)}</b><small>${esc(subtitle)}</small></span>${icon("chevron")}</summary><div class="student-content"></div></details>`;
+}
+function studentState(d) {
+  d.studentResults ||= new Map(); d.studentPending ||= new Map();
+  d.studentFaculties ||= new Map(); d.studentFacultyPending ||= new Map();
+  return d;
+}
+const studentChats = new Map();
+function studentChatState(d) {
+  if (!studentChats.has(d.id)) studentChats.set(d.id, { messages: [], request: null, error: "" });
+  return studentChats.get(d.id);
+}
+function studentAssistantHtml(d) {
+  return `<aside class="student-assistant" aria-labelledby="studentAssistantTitle" data-student-chat="${esc(d.id)}">
+    <header class="student-assistant-head"><span class="student-assistant-symbol">${icon("sparkle")}</span><div><h3 id="studentAssistantTitle">Öğrenci asistanı</h3><p>${esc(d.data.name)}</p></div><button class="icon-btn" type="button" data-student-chat-clear aria-label="Sohbeti temizle" title="Sohbeti temizle">${icon("trash")}</button></header>
+    <p class="student-assistant-intro">Programlar, dersler ve öğrenci yaşamı hakkında sor. Yanıtın kaynaklarını birlikte incele.</p>
+    <div class="student-chat-suggestions">${["Yüksek lisans programları neler?", "Erasmus hakkında bilgi verir misin?", "Ücret ve burs bilgileri neler?"].map((q) => `<button type="button" data-student-question="${esc(q)}">${esc(q)}</button>`).join("")}</div>
+    <div class="student-chat-scope" data-student-chat-scope hidden></div>
+    <div class="student-chat-thread" role="log" aria-live="polite" aria-relevant="additions" aria-label="Öğrenci asistanı sohbeti"></div>
+    <div class="student-assistant-status" role="status" aria-live="polite"></div>
+    <form class="student-chat-form"><label class="sr-only" for="studentQuestion">Öğrenci asistanına sor</label><textarea id="studentQuestion" rows="3" maxlength="1000" placeholder="Örneğin: İlk yıl hangi dersler var?" required></textarea><div class="student-chat-toolbar"><span>Enter gönderir · Shift+Enter yeni satır</span><button class="btn primary" type="submit" data-student-chat-submit>${icon("send")}Gönder</button></div></form>
+  </aside>`;
+}
+function drawStudentChat(d) {
+  const host = $("[data-student-chat]");
+  if (S.uni !== d || !host || host.dataset.studentChat !== d.id) return;
+  const chat = studentChatState(d), pending = Boolean(chat.request), thread = $(".student-chat-thread", host);
+  const previous = thread._messages || [];
+  const keepMessages = previous.length <= chat.messages.length && previous.every((message, i) => message === chat.messages[i]);
+  const firstNew = keepMessages ? previous.length : 0;
+  const changed = !keepMessages || firstNew < chat.messages.length;
+  const nearEnd = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 48;
+  if (!keepMessages) thread.replaceChildren();
+  if (firstNew < chat.messages.length) thread.insertAdjacentHTML("beforeend", chat.messages.slice(firstNew).map((message) => {
+    const sources = (message.sources || []).filter((source) => /^S\d+$/.test(source.id) && safeUrl(source.url));
+    let content = esc(message.content).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>");
+    if (message.role === "assistant") content = content.replace(/\[(S\d+)\]/g, (label, id) => {
+      const source = sources.find((item) => item.id === id);
+      return source ? `<a href="${esc(safeUrl(source.url))}" target="_blank" rel="noopener" title="${esc(source.title)}">${label}</a>` : label;
+    });
+    return `<article class="student-chat-message ${message.role === "user" ? "user" : "assistant"}"><div class="student-chat-bubble"><p>${content}</p>${sources.length ? `<div class="student-chat-sources">${sources.map((source) => `<a href="${esc(safeUrl(source.url))}" target="_blank" rel="noopener">${icon("external")}<span>[${source.id}] ${esc(source.title || "Resmî kaynak")}</span></a>`).join("")}</div>` : ""}</div></article>`;
+  }).join(""));
+  thread._messages = chat.messages.slice();
+  thread.hidden = !chat.messages.length;
+  host.setAttribute("aria-busy", String(pending));
+  thread.setAttribute("aria-busy", String(pending));
+  $(".student-chat-suggestions", host).hidden = chat.messages.length > 0;
+  $$("[data-student-question]", host).forEach((button) => { button.disabled = pending; });
+  $("[data-student-chat-submit]", host).disabled = pending;
+  $(".student-chat-form", host).setAttribute("aria-busy", String(pending));
+  $(".student-assistant-status", host).innerHTML = pending ? '<span class="spinner" aria-hidden="true"></span>Kaynaklar inceleniyor, yanıt hazırlanıyor…' : chat.error ? `<span class="student-chat-notice">${esc(chat.error)}</span>` : "";
+  const scope = $("[data-student-chat-scope]", host), department = d.studentChatScope?.department;
+  scope.hidden = !department;
+  scope.innerHTML = department ? `<span>${esc(department)}</span><button class="icon-btn" type="button" data-student-chat-general aria-label="Üniversite geneline dön" title="Üniversite geneline dön">${icon("x")}</button>` : "";
+  if (department) $("[data-student-chat-general]", scope).onclick = () => { d.studentChatScope = null; drawStudentChat(d); };
+  if (changed && (nearEnd || chat.messages.at(-1)?.role === "user")) thread.scrollTop = thread.scrollHeight;
+}
+function bindStudentChat(d) {
+  const host = $("[data-student-chat]"), form = $(".student-chat-form", host), input = $("textarea", form);
+  const askStudent = async (question) => {
+    const chat = studentChatState(d);
+    question = String(question || "").trim().slice(0, 1000);
+    if (!question || chat.request || S.uni !== d) return;
+    const history = chat.messages.slice(-10).map((message) => ({ role: message.role, content: message.content.slice(0, 2000) }));
+    const controller = new AbortController(), scope = d.studentChatScope || {};
+    chat.request = controller; chat.error = "";
+    chat.messages.push({ role: "user", content: question });
+    input.value = ""; drawStudentChat(d);
+    const timeout = setTimeout(() => controller.abort(), 150000);
+    try {
+      const data = await api(`/api/universities/${encodeURIComponent(d.id)}/student/chat`, {
+        method: "POST", quiet: true, signal: controller.signal,
+        body: JSON.stringify({ question, messages: history, faculty: scope.faculty || "", department: scope.department || "" }),
+      });
+      if (chat.request !== controller) return;
+      if (typeof data.answer !== "string" || !data.answer.trim()) throw new Error("Asistandan yanıt alınamadı.");
+      chat.messages.push({ role: "assistant", content: data.answer, sources: Array.isArray(data.sources) ? data.sources : [] });
+      chat.messages = chat.messages.slice(-40);
+    } catch (error) {
+      if (chat.request !== controller) return;
+      chat.error = error.name === "AbortError" ? "Yanıt bekleme süresi doldu. Sorunu yeniden gönderebilirsin." : error.status === 404 ? "Öğrenci asistanına bağlanılamadı. Uygulamanın güncel sürümünü açıp yeniden dene." : error.message;
+      if (input.isConnected && !input.value.trim()) input.value = question;
+    } finally {
+      clearTimeout(timeout);
+      if (chat.request === controller) {
+        chat.request = null;
+        if (S.uni?.id === d.id) drawStudentChat(S.uni);
+      }
+    }
+  };
+  form.onsubmit = (event) => { event.preventDefault(); void askStudent(input.value); };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); form.requestSubmit(); }
+  });
+  $$("[data-student-question]", host).forEach((button) => { button.onclick = () => { void askStudent(button.dataset.studentQuestion); }; });
+  $("[data-student-chat-clear]", host).onclick = () => {
+    const chat = studentChatState(d);
+    chat.request?.abort(); chat.request = null; chat.messages = []; chat.error = "";
+    drawStudentChat(d); input.focus();
+  };
+  drawStudentChat(d);
+}
+function renderStudentView() {
+  const box = $("#studentView"), d = S.uni;
+  if (!box || !d || box.dataset.ready) return;
+  studentState(d); box.dataset.ready = "1";
+  box.innerHTML = `<div class="student-intro"><div><span class="eyebrow">ÖĞRENCİ REHBERİ</span><h2>Ne öğrenmek istersin?</h2><p>Programları incele, öğrenci yaşamını keşfet veya asistanına sor.</p></div></div>
+    <div class="student-layout"><div class="student-guide"><div class="student-accordions"><details class="student-accordion" id="studentUndergraduate"><summary><span class="student-summary-icon">${icon("layers")}</span><span><b>Lisans programları</b><small>Fakülteler, bölümler, ders içerikleri ve akademik kadro</small></span>${icon("chevron")}</summary><div class="student-content"></div></details>
+    ${STUDENT_SECTIONS.map(([key, title, sub, ic]) => studentAccordion(key, title, sub, ic)).join("")}</div>
+    <p class="student-footnote">Program, ücret ve anlaşma bilgileri resmî kaynaklarıyla gösterilir. Başvurmadan önce ilgili dönemin kurum duyurusunu inceleyin.</p></div>${studentAssistantHtml(d)}</div>`;
+  $("#studentUndergraduate").addEventListener("toggle", (event) => {
+    const details = event.currentTarget;
+    if (details.open && !details.dataset.ready) { details.dataset.ready = "1"; renderStudentFaculties(details, d); }
+  });
+  bindStudentAccordions(box, d);
+  bindStudentChat(d);
+}
+const studentDisclosureStates = new WeakMap();
+function moveStudentDisclosure(details, expanded, fromHeight) {
+  const summary = $(":scope > summary", details), content = summary?.nextElementSibling;
+  if (!summary || !content) return;
+  const previous = studentDisclosureStates.get(details);
+  const start = fromHeight ?? details.getBoundingClientRect().height;
+  if (previous) {
+    cancelAnimationFrame(previous.frame); previous.observer?.disconnect();
+    if (previous.animation) { previous.animation.onfinish = null; previous.animation.cancel(); }
+  }
+  const state = { expanded, animation: null, frame: null, observer: null, target: null };
+  studentDisclosureStates.set(details, state);
+  summary.setAttribute("aria-expanded", String(expanded));
+  const finish = () => {
+    if (studentDisclosureStates.get(details) !== state) return;
+    state.observer?.disconnect(); state.animation = null;
+    details.open = expanded; delete details.dataset.animating;
+    content.inert = !expanded;
+  };
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches || typeof details.animate !== "function") { finish(); return; }
+  details.open = true; content.inert = !expanded; details.dataset.animating = "true";
+  const px = (value) => parseFloat(value) || 0;
+  const targetHeight = () => {
+    const outer = getComputedStyle(details), inner = getComputedStyle(content);
+    return summary.getBoundingClientRect().height + px(outer.paddingTop) + px(outer.paddingBottom)
+      + px(outer.borderTopWidth) + px(outer.borderBottomWidth)
+      + (expanded ? content.getBoundingClientRect().height + px(inner.marginTop) + px(inner.marginBottom) : 0);
+  };
+  const animate = (from) => {
+    if (!details.isConnected || studentDisclosureStates.get(details) !== state) { finish(); return; }
+    state.target = targetHeight();
+    state.animation = details.animate([{ height: `${from}px` }, { height: `${state.target}px` }],
+      { duration: 280, easing: "cubic-bezier(.22,.75,.25,1)" });
+    state.animation.onfinish = finish;
+  };
+  // Native toggle handlers can populate the selected branch before measuring it.
+  state.frame = requestAnimationFrame(() => {
+    animate(start);
+    if (expanded && typeof ResizeObserver === "function" && state.animation) {
+      state.observer = new ResizeObserver(() => {
+        if (!state.animation || Math.abs(targetHeight() - state.target) < 1) return;
+        const current = details.getBoundingClientRect().height;
+        state.animation.onfinish = null; state.animation.cancel(); animate(current);
+      });
+      state.observer.observe(content);
+    }
+  });
+}
+function bindStudentMotion(root) {
+  $$("details.student-accordion, details.student-term, details.student-course, details.student-links", root).forEach((details) => {
+    if (details.dataset.motionBound) return;
+    details.dataset.motionBound = "1";
+    const summary = $(":scope > summary", details);
+    summary.setAttribute("aria-expanded", String(details.open));
+    summary.addEventListener("click", (event) => {
+      if (event.target.closest("a, button, input, select, textarea")) return;
+      event.preventDefault();
+      moveStudentDisclosure(details, !(studentDisclosureStates.get(details)?.expanded ?? details.open));
+    });
+  });
+}
+function updateStudentContent(details, render) {
+  const previous = details.getBoundingClientRect().height;
+  render();
+  bindStudentMotion(details);
+  if (details.open && studentDisclosureStates.get(details)?.expanded !== false) moveStudentDisclosure(details, true, previous);
+}
+function bindStudentAccordions(root, d) {
+  $$("details[data-student-section]", root).forEach((details) => {
+    if (details.dataset.bound) return;
+    details.dataset.bound = "1";
+    details.addEventListener("toggle", () => { if (details.open) loadStudentSection(details, d); });
+  });
+  bindStudentMotion(root);
+}
+function studentItems(group, section) {
+  const items = group.items;
+  const source = (item) => `<a class="source-link" href="${esc(safeUrl(item.source_url))}" target="_blank" rel="noopener">${icon("external")}Kaynağı aç</a>`;
+  if (section === "courses" && group.format === "course_catalog") {
+    const periods = new Map();
+    items.forEach((item) => {
+      const key = item.period || "Dönemi belirtilmeyen dersler";
+      if (!periods.has(key)) periods.set(key, []);
+      periods.get(key).push(item);
+    });
+    return `<div class="student-catalog"><p class="student-hint">${items.length} ders kaydı · İçeriği görmek için bir dönem ve ders seçin.</p>${[...periods].map(([period, courses]) => `<details class="student-term"><summary><b>${esc(period)}</b><span>${courses.length} kayıt</span>${icon("chevron")}</summary><div class="student-term-courses">${courses.map((item) => `<details class="student-course"><summary><span>${esc(item.title)}</span>${icon("chevron")}</summary><div>${item.detail ? `<p>${esc(item.detail)}</p>` : ""}${source(item)}</div></details>`).join("")}</div></details>`).join("")}</div>`;
+  }
+  const facts = (entries) => `<div class="student-facts">${entries.map((item) => `<article class="student-fact"><h4>${esc(item.title)}</h4>${item.period ? `<span class="chip">${esc(item.period)}</span>` : section === "fees" ? '<span class="chip">Dönem belirtilmemiş</span>' : ""}<p>${esc(item.detail)}</p>${source(item)}</article>`).join("")}</div>`;
+  if (items.length <= 12) return facts(items);
+  const pages = new Map();
+  items.forEach((item) => {
+    const url = item.source_url || "";
+    if (!pages.has(url)) pages.set(url, []);
+    pages.get(url).push(item);
+  });
+  return `<p class="student-hint">${items.length} bilgi · ${pages.size} kaynak sayfası. Ayrıntılar için bir başlık aç.</p><div class="student-tree">${[...pages].map(([url, entries], i) => {
+    const title = entries.find((item) => item.source_title)?.source_title || (group.links || []).find((link) => link.url === url)?.title || `Resmî kaynak ${i + 1}`;
+    return `<details class="student-accordion student-branch"><summary><span class="student-summary-icon">${icon("file")}</span><span><b>${esc(title)}</b><small>${entries.length} bilgi</small></span>${icon("chevron")}</summary><div class="student-content">${facts(entries)}</div></details>`;
+  }).join("")}</div>`;
+}
+function studentSectionResult(data, section) {
+  const group = data.groups?.[section] || { items: [], links: [] };
+  const date = (value) => value ? new Date(value * 1000).toLocaleDateString("tr-TR") : "—";
+  const previous = (group.items?.length || group.links?.length) && group.previously_checked_at;
+  const missing = group.links?.length ? "İlgili resmî sayfalar aşağıda." : data.errors?.length ? "Bu bilgi henüz alınamadı. Yeniden deneyebilirsiniz." : "Taranan resmî sayfalarda bu bilgi bulunamadı.";
+  return `<div class="student-section-meta"><span>${previous ? "Önceki kayıt" : "Son kontrol"}: ${date(previous || data.checked_at)}</span><button class="btn sm" type="button" data-student-refresh>${icon("refresh")}Bu bilgiyi yenile</button></div>
+    ${data.errors?.length ? `<div class="notice warn"><div>${data.errors.map(esc).join(" ")}</div></div>` : ""}
+    ${group.items?.length ? studentItems(group, section) : `<p class="student-missing">${missing}</p>`}
+    ${group.links?.length ? `<details class="student-links" ${!group.items?.length ? "open" : ""}><summary>Resmî bağlantılar <span>${group.links.length}</span></summary><div>${group.links.map((link) => `<a href="${esc(safeUrl(link.url))}" target="_blank" rel="noopener"><span>${esc(link.title)}</span>${icon("external")}</a>`).join("")}</div></details>` : ""}`;
+}
+async function loadStudentSection(details, d, refresh = false) {
+  if (S.uni !== d || !details.isConnected) return;
+  studentState(d);
+  const section = details.dataset.studentSection, faculty = details.dataset.faculty || "", department = details.dataset.department || "";
+  d.studentChatScope = { faculty, department }; drawStudentChat(d);
+  const key = JSON.stringify([section, faculty, department]), box = $(":scope > .student-content", details);
+  const draw = (data) => {
+    if (S.uni !== d || !details.isConnected) return;
+    updateStudentContent(details, () => { box.innerHTML = studentSectionResult(data, section); });
+    $("[data-student-refresh]", box).onclick = () => loadStudentSection(details, d, true);
+  };
+  if (d.studentResults.has(key) && !refresh && !d.studentPending.has(key)) { draw(d.studentResults.get(key)); return; }
+  if (d.studentResults.has(key)) draw(d.studentResults.get(key));
+  else box.innerHTML = "";
+  $("[data-student-refresh]", box)?.setAttribute("disabled", "");
+  if (!$(".student-loading", box)) box.insertAdjacentHTML("afterbegin", `<div class="loading-line student-loading" role="status"><span class="spinner"></span>${esc(department || STUDENT_SECTIONS.find(([id]) => id === section)?.[1] || "Seçilen bilgiler")} alınıyor…</div>`);
+  let pending = d.studentPending.get(key);
+  if (!pending) {
+    const query = new URLSearchParams({ section });
+    if (faculty) query.set("faculty", faculty);
+    if (department) query.set("department", department);
+    if (refresh) query.set("refresh", "1");
+    pending = api(`/api/universities/${encodeURIComponent(d.id)}/student?${query}`, { quiet: true });
+    d.studentPending.set(key, pending);
+  }
+  try { const data = await pending; d.studentResults.set(key, data); draw(data); }
+  catch (error) {
+    if (S.uni !== d || !details.isConnected) return;
+    if (d.studentResults.has(key)) draw(d.studentResults.get(key)); else box.innerHTML = "";
+    box.insertAdjacentHTML("afterbegin", `<div class="notice warn"><div>${esc(error.message)} <button class="link" data-student-retry type="button">Tekrar dene</button></div></div>`);
+    $("[data-student-retry]", box).onclick = () => loadStudentSection(details, d, true);
+  } finally { if (d.studentPending.get(key) === pending) d.studentPending.delete(key); }
+}
+function renderStudentFaculties(details, d) {
+  const box = $(":scope > .student-content", details);
+  const faculties = d.data.items.map((fac, i) => ({ fac, i })).filter(({ fac }) => /fakulte|yuksekokul|faculty|school/.test(fold(fac.name)) && !/meslek|enstitu|lisansustu|graduate/.test(fold(fac.name)));
+  box.innerHTML = faculties.length ? `<p class="student-hint">Bir fakülte seçerek bölümlerini aç.</p><div class="student-tree">${faculties.map(({ fac, i }) => `<details class="student-accordion student-branch" data-student-faculty="${i}"><summary><span class="student-summary-icon">${icon("building")}</span><span><b>${esc(fac.name)}</b></span>${icon("chevron")}</summary><div class="student-content"></div></details>`).join("")}</div>` : '<p class="student-missing">YÖK dizininde lisans fakültesi veya yüksekokulu bulunamadı.</p>';
+  $$("[data-student-faculty]", box).forEach((entry) => entry.addEventListener("toggle", () => { if (entry.open) loadStudentFaculty(entry, d); }));
+  bindStudentAccordions(box, d);
+}
+async function loadStudentFaculty(details, d) {
+  if (S.uni !== d || !details.isConnected || details.dataset.ready) return;
+  const faculty = d.data.items[Number(details.dataset.studentFaculty)], box = $(":scope > .student-content", details);
+  if (!faculty) return;
+  studentState(d);
+  if (d.facData && d.data.items[d.fac]?.raw === faculty.raw) d.studentFaculties.set(faculty.raw, d.facData);
+  let data = d.studentFaculties.get(faculty.raw);
+  if (!data) {
+    box.innerHTML = '<div class="loading-line" role="status"><span class="spinner"></span>Seçilen fakültenin bölümleri alınıyor…</div>';
+    let pending = d.studentFacultyPending.get(faculty.raw);
+    if (!pending) {
+      pending = api(`/api/universities/${encodeURIComponent(d.id)}/faculty?name=${encodeURIComponent(faculty.raw)}&metrics=false`, { quiet: true });
+      d.studentFacultyPending.set(faculty.raw, pending);
+    }
+    try { data = await pending; d.studentFaculties.set(faculty.raw, data); }
+    catch (error) {
+      if (S.uni === d && details.isConnected) {
+        updateStudentContent(details, () => {
+          box.innerHTML = `<div class="notice warn"><div>${esc(error.message)} <button class="link" type="button" data-faculty-retry>Tekrar dene</button></div></div>`;
+        });
+        $("[data-faculty-retry]", box).onclick = () => loadStudentFaculty(details, d);
+      }
+      return;
+    } finally { if (d.studentFacultyPending.get(faculty.raw) === pending) d.studentFacultyPending.delete(faculty.raw); }
+  }
+  if (S.uni !== d || !details.isConnected) return;
+  details.dataset.ready = "1";
+  updateStudentContent(details, () => {
+    box.innerHTML = `<div class="student-tree">${data.departments.map((dep, i) => `<details class="student-accordion student-branch" data-student-department="${i}"><summary><span class="student-summary-icon">${icon("grid")}</span><span><b>${esc(dep.name)}</b><small>${fmtNum(dep.count)} akademisyen · YÖK Akademik</small></span>${icon("chevron")}</summary><div class="student-content"></div></details>`).join("") || '<p class="student-missing">Bu fakülte için bölüm bilgisi bulunamadı.</p>'}</div>`;
+  });
+  $$("[data-student-department]", box).forEach((entry) => entry.addEventListener("toggle", () => {
+    if (!entry.open || entry.dataset.ready) return;
+    entry.dataset.ready = "1";
+    const dep = data.departments[Number(entry.dataset.studentDepartment)], target = $(":scope > .student-content", entry);
+    target.innerHTML = studentAccordion("courses", "Program ve ders içeriği", "Ders planı, içerikler ve varsa AKTS bilgisi", "book", faculty.raw, dep.key ? dep.name : "")
+      + `<details class="student-accordion student-branch" data-student-staff><summary><span class="student-summary-icon">${icon("users")}</span><span><b>Akademik kadro</b><small>${fmtNum(dep.count)} akademisyen</small></span>${icon("chevron")}</summary><div class="student-content"></div></details>`;
+    const staff = $("[data-student-staff]", target);
+    staff.addEventListener("toggle", () => { if (staff.open && !staff.dataset.ready) { staff.dataset.ready = "1"; renderStudentStaff($(":scope > .student-content", staff), data.people.filter((p) => p.department === dep.key), d); } });
+    bindStudentAccordions(target, d);
+  }));
+  bindStudentAccordions(box, d);
+}
+function renderStudentStaff(box, people, d) {
+  box.innerHTML = `<div class="student-staff">${people.map((person) => {
+    const saved = existingChat({ name: person.name, university: d.data.name });
+    const source = safeUrl(person.site_url || person.url);
+    return `<article class="student-person">${avatar(person.name, person.photo)}<div><b>${esc(person.name)}</b><span>${esc(person.title || "")}</span></div><div class="student-person-links">${saved ? `<a class="source-link" href="#/profil/${esc(saved.id)}">Kayıtlı profil ${icon("chevron")}</a>` : ""}${source ? `<a class="source-link" href="${esc(source)}" target="_blank" rel="noopener">Kaynak ${icon("external")}</a>` : ""}</div></article>`;
+  }).join("") || '<p class="student-missing">Bu bölümde kadro kaydı bulunamadı.</p>'}</div>`;
+}
+function setUniversityAudience(audience) {
+  if (!S.uni) return;
+  S.uni.audience = audience;
+  $$("[data-audience]").forEach((button) => { const on = button.dataset.audience === audience; button.classList.toggle("active", on); button.setAttribute("aria-selected", String(on)); });
+  $("#academicUniversity").hidden = audience !== "academic";
+  $("#studentView").hidden = audience !== "student";
+  if (audience === "student") renderStudentView();
 }
 
 function renderUni() {
@@ -1641,8 +2191,9 @@ function renderUni() {
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Üniversiteler", href: "#/universiteler" }, { label: d.data.name }]);
   $("#uName").textContent = d.data.name;
   $("#uMeta").innerHTML = `<span>Kaynak: YÖK Akademik</span>${d.data.home ? `<span>${esc(new URL(d.data.home).hostname.replace(/^www\./, ""))}</span>` : ""}`;
-  $("#uAct").innerHTML = d.data.home ? `<a class="btn sm" href="${esc(safeUrl(d.data.home))}" target="_blank" rel="noopener">${icon("globe")}Kurum sitesi</a>
-    <button class="btn sm primary" id="uNewPerson" type="button">${icon("plus")}Akademisyen ara</button>` : "";
+  $("#uLogo").innerHTML = organizationLogo("universities", d.id, d.data.name, "hero-logo");
+  $("#uAct").innerHTML = organizationSaveButton("universities", d.id) + (d.data.home ? `<a class="btn sm" href="${esc(safeUrl(d.data.home))}" target="_blank" rel="noopener">${icon("globe")}Kurum sitesi</a>
+    <button class="btn sm primary" id="uNewPerson" type="button">${icon("plus")}Akademisyen ara</button>` : "");
   if ($("#uNewPerson")) $("#uNewPerson").onclick = () => newPersonModal(d.data.home);
   hydrateIcons($("#uAct"));
   $("#colFacN").textContent = items.length;
@@ -1836,6 +2387,7 @@ async function unitPapersDrawer(name, sub, file, waiting, load) {
   };
   const apply = (r) => {
     const papers = r.papers || [], people = r.staff || [], total = r.total_people ?? r.people ?? people.length;
+    if (r.status === "running") document.dispatchEvent(new Event("wos-work-requested"));
     const complete = r.completed ?? r.matched ?? 0;
     const state = r.status === "running" ? "Kaynaklar taranıyor" : r.cached
       ? `Kayıtlı sonuçlar${r.status === "error" ? " · toplama tamamlanamadı" : r.status === "partial" ? " · kısmi sonuç" : r.status === "cancelled" ? " · tarama durduruldu" : ""}`
@@ -1990,24 +2542,24 @@ function renderProfile(r, chat) {
   S.listMeta.pubs = { file: p.name, person: p.name, title: p.title, institution: p.institution, cats: true };
 
   const root = setView(`
-    <section class="card profile-hero">
-      <div class="ph-band"></div>
-      <div class="ph-body">
-        <div class="ph-photo">${safeImg(y.photo) ? `<img src="${esc(safeImg(y.photo))}" alt="${esc(p.name)}">` : avatar(p.name, "")}</div>
-        <div class="ph-info">
+    <section class="card profile-hero identity-hero" data-org-brand>
+      <div class="ph-branding"><div class="ph-band identity-cover"><div class="ph-institution">${organizationLogo("universities", orgId(p.institution), p.institution, "band-logo")}<span>${esc(p.institution || "Akademik profil")}</span></div></div>
+      <div class="ph-body identity-main">
+        <div class="ph-photo identity-avatar">${safeImg(y.photo) ? `<img src="${esc(safeImg(y.photo))}" alt="${esc(p.name)}">` : avatar(p.name, "")}</div>
+        <div class="ph-info identity-info">
           <div class="ph-title">${esc(p.title || "Unvan bilinmiyor")}${vbadge("title")}</div>
           <h1>${esc(p.name)}</h1>
           <div class="ph-lines"><span>${esc(p.department || "Bölüm bilinmiyor")}${vbadge("department")}</span>
             <span>${esc(p.institution || "Kurum bilinmiyor")}${vbadge("institution")}</span></div>
           <div class="ph-links">${links}</div>
         </div>
-        <div class="ph-actions">
+        <div class="ph-actions identity-actions">
           <button class="btn ${isFav ? "" : "primary"}" id="favPersonBtn" type="button">${icon("star")}${isFav ? "Favorilerde" : "Favorilere ekle"}</button>
           <button class="btn" data-tabgo="chat" type="button">${icon("message")}Asistana sor</button>
-          <button class="btn" id="refreshProfileBtn" type="button" title="Kaynaklardan baştan topla: yeni yayınlar, fotoğraf, güncel bilgiler. Sohbet ve favori korunur.">${icon("refresh")}Yenile</button>
+          <button class="btn" id="refreshProfileBtn" type="button" title="Yenilenecek bilgileri ve kaynakları seç">${icon("refresh")}Yenile</button>
         </div>
       </div>
-      <div class="kpis">
+      </div><div class="kpis">
         <div class="kpi"><b id="profilePubCount">${count(r.unique_count)}</b><span>benzersiz yayın</span></div>
         <div class="kpi"><b id="profileCitesCount">${count(totalCites)}</b><span>toplam atıf</span></div>
         <div class="kpi"><b>${count((sec.courses || []).length)}</b><span>ders</span></div>
@@ -2033,7 +2585,7 @@ function renderProfile(r, chat) {
       <p class="faint"><span id="profileSummary">${esc(r.summary || "")}</span> · ${r.elapsed ?? "?"} sn · ${esc(r.llm || "")}${y.updated ? ` · YÖK son güncelleme ${esc(y.updated)}` : ""}</p>
     </div></div>
 
-    <div class="panel" data-panel="pubs"><div id="profilePublications"></div></div>
+    <div class="panel" data-panel="pubs"><div class="publication-actions"><div class="pub-scan-state" id="profileWosState" role="status"></div>${sourcePicker("profileSourcesPicker", PROFILE_SOURCES, r.refresh_preferences?.sources, true)}</div><div id="profilePublications"></div></div>
 
     <div class="panel" data-panel="career"><div class="grid-2">
       <div class="card card-pad"><div class="card-title">${icon("briefcase")}Akademik görevler</div>${timeline(y.career)}</div>
@@ -2071,7 +2623,8 @@ function renderProfile(r, chat) {
   const publicationTable = mountPublicationTable($("#profilePublications"), "pub", "pubs", r.publications, "year", { rowId: "pubs", sourceFor: pubSrc });
   const drawPubs = () => publicationTable.update(r.publications);
 
-  $("#refreshProfileBtn").onclick = () => startJob(p.institution || p.source_url || "", p.name, () => post(`/api/jobs/${r.job_id}/refresh`, {}), "yenileniyor");
+  $("#refreshProfileBtn").onclick = () => refreshProfileModal(r);
+  bindSourcePicker($("#profileSourcesPicker"), (sources) => runProfileRefresh(r, ["publications"], sources));
   $("#favPersonBtn").onclick = async () => {
     const btn = $("#favPersonBtn");
     try {
@@ -2092,8 +2645,11 @@ function renderProfile(r, chat) {
   }
   // eski profiller ya da değişen eşleştirme kuralı: kayıtlı veriden yeniden hesaplanır (dış istek yok)
   if (!r.industry || r.industry_v !== INDUSTRY_V) refreshIndustry(true);
-  if (r.patents_v !== PATENTS_V && !S.patentsOff) loadPatents();
   loadWos(r, drawPubs);
+  if (r.refresh_report?.warnings?.length) {
+    const reportKey = `${r.job_id}:${r.refresh_report.at}`;
+    if (!refreshNotices.has(reportKey)) { refreshNotices.add(reportKey); toast(esc(r.refresh_report.warnings.join(" ")), 9000); }
+  }
   void root;
 }
 
@@ -2349,25 +2905,36 @@ async function ask(question) {
 
 // =================================================================== KONU ARAMASI
 function topicProgress(wos) {
+  if (wos?.status === "skipped") return "";
   if (!wos) return "";
   const count = wos.total == null ? `${fmtNum(wos.checked || 0)} kayıt incelendi` : `${fmtNum(wos.total)} kayıttan ${fmtNum(wos.checked || 0)} kayıt incelendi`;
   const state = { pending: "WoS sırası bekleniyor", running: "WoS taranıyor", done: "WoS taraması tamamlandı", partial: "WoS kısmi sonuç", blocked: "WoS erişimi sağlanamadı", error: "WoS taraması tamamlanamadı" }[wos.status] || "WoS";
   const reason = { record_limit: `Tarama ilk ${wos.limit || 20} kayıtla sınırlı.`, time_budget: "Tarama süresi doldu.", queue_timeout: "Tarama sırası için bekleme süresi doldu.", results_not_fully_loaded: "WoS sonuçlarının bir bölümü yüklenemedi.", access_unavailable: "Diğer kaynaklardan alınan yayınlar gösteriliyor." }[wos.reason] || "";
   return `${["pending", "running"].includes(wos.status) ? '<span class="spinner"></span>' : ""}${esc(state)} · ${esc(count)}${reason ? ` · ${esc(reason)}` : ""}`;
 }
-async function viewSearch(q) {
+async function viewSearch(q, requestedSources = "") {
+  let selected = requestedSources ? requestedSources.split(",").filter((key) => TOPIC_SOURCES.includes(key)) : null;
+  if (!selected?.length) { try { selected = JSON.parse(localStorage.getItem("topic-sources")); } catch { /* tercih */ } }
+  if (!Array.isArray(selected) || !selected.filter((key) => TOPIC_SOURCES.includes(key)).length) selected = [...TOPIC_SOURCES];
+  selected = selected.filter((key) => TOPIC_SOURCES.includes(key));
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Konular" }]);
   setView(`<div class="section-head"><div><h1>Konular</h1><p>OpenAlex, Crossref, Semantic Scholar, TR Dizin, OpenAIRE ve WoS kayıtları kaynaklarıyla birleştirilir.</p></div></div>
     <form class="card quick-search" id="searchForm" style="margin-top:0">
       <div class="input">${icon("search")}<input id="sInput" value="${esc(q)}" placeholder="ör. göğüs hastalıkları, makine öğrenmesi, deprem mühendisliği"></div>
-      <button class="btn primary" type="submit">Ara</button></form>
+      ${sourcePicker("topicSourcePicker", TOPIC_SOURCES, selected)}<button class="btn primary" type="submit">Ara</button></form>
     <div id="sResults" style="margin-top:18px"></div>`);
-  $("#searchForm").addEventListener("submit", (e) => {
-    e.preventDefault(); const value = $("#sInput").value.trim();
+  const search = () => {
+    const value = $("#sInput").value.trim();
     if (value.length < 3) return;
-    const hash = `#/ara?q=${encodeURIComponent(value)}`;
-    if (location.hash === hash) viewSearch(value); else location.hash = hash;
+    const hash = `#/ara?q=${encodeURIComponent(value)}&sources=${selected.join(",")}`;
+    if (location.hash === hash) viewSearch(value, selected.join(",")); else location.hash = hash;
+  };
+  bindSourcePicker($("#topicSourcePicker"), (sources) => {
+    selected = sources;
+    try { localStorage.setItem("topic-sources", JSON.stringify(sources)); } catch { /* tercih */ }
+    search();
   });
+  $("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); search(); });
   const box = $("#sResults"), routeHash = location.hash;
   if (!q) {
     box.innerHTML = emptyState("search", "Bir konu yazın", "Türkçe yazdığınız konu İngilizceye de çevrilerek aranır.");
@@ -2382,11 +2949,12 @@ async function viewSearch(q) {
     $("#topicSources").innerHTML = Object.entries(r.sources || {}).map(([source, value]) => `<span class="chip ${typeof value === "number" ? "teal" : "gold"}">${esc(SRC_TR[sourceKey(source)] || source)}: ${typeof value === "number" ? fmtNum(value) + " sonuç" : esc(value)}</span>`).join("")
       + (r.english ? `<span class="chip blue">EN: ${esc(r.english)}</span>` : "") + (r.elapsed != null ? `<span class="chip">${esc(r.elapsed)} sn</span>` : "");
     $("#topicProgress").innerHTML = topicProgress(r.wos);
+    if (["pending", "running"].includes(r.wos?.status)) document.dispatchEvent(new Event("wos-work-requested"));
     const next = r.revision ?? JSON.stringify(r.papers || []);
     if (next !== revision) { revision = next; table.update(r.papers || []); }
   };
   try {
-    await pollSnapshots(() => api(`/api/search?q=${encodeURIComponent(q)}`), active, apply,
+    await pollSnapshots(() => api(`/api/search?q=${encodeURIComponent(q)}&sources=${selected.join(",")}`), active, apply,
       (r) => !!r.search_id && ["pending", "running"].includes(r.wos?.status),
       (r) => api(`/api/search/${encodeURIComponent(r.search_id)}`));
   } catch (e) {
@@ -2401,20 +2969,21 @@ async function viewLibrary(tab = "papers") {
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Kütüphanem" }]);
   await loadFav();
   const papers = [...S.fav.papers].reverse(), people = [...S.fav.people].reverse();
+  const tabs = [["papers", "Makaleler", "book"], ["people", "Akademisyenler", "users"], ["universities", "Üniversiteler", "building"], ["firms", "Firmalar", "briefcase"]];
+  if (!tabs.some(([id]) => id === tab)) tab = "papers";
   S.lists.fav = papers;
   S.listMeta.fav = { file: "favori makaleler" };
-  setView(`<div class="section-head"><div><h1>Kütüphanem</h1><p>Kaydettiğiniz makaleler ve akademisyenler.</p></div>
-      <div class="actions">${papers.length ? exportButtons("fav") : ""}</div></div>
-    <div class="tabs" role="tablist"><button class="tab ${tab === "papers" ? "active" : ""}" data-tab="papers" type="button">Makaleler<span class="n">${papers.length}</span></button>
-      <button class="tab ${tab === "people" ? "active" : ""}" data-tab="people" type="button">Akademisyenler<span class="n">${people.length}</span></button></div>
-    <div class="panel ${tab === "papers" ? "active" : ""}" data-panel="papers"><div class="card">${papers.length ? `<div class="stagger">${papers.map((p, i) => paperCard(p, p.job_id && p.pid ? { jid: p.job_id, pid: p.pid, person: p.person } : {}, i)).join("")}</div>`
-      : emptyState("bookmark", "Henüz favori makale yok", "Yayın listelerinde ☆ simgesine tıklayarak makaleleri buraya ekleyin.")}</div></div>
-    <div class="panel ${tab === "people" ? "active" : ""}" data-panel="people">${people.length ? `<div class="collabs stagger">${people.map((p, i) => `<div class="collab" style="--i:${i};cursor:pointer" data-chat="${esc(p.chat_id || "")}">
-      ${avatar(p.name, p.photo)}<div class="c-main"><div class="c-title">${esc(p.title || "")}</div><b>${esc(p.name)}</b>
-      <span>${esc(p.institution || "")}</span><span class="faint">${esc(p.department || "")}</span>
-      <div class="chips" style="margin-top:8px"><span class="chip">${fmtNum(p.papers)} yayın</span>
-        <button class="chip" data-unfav="${esc(p.key)}" type="button">${icon("x")}Çıkar</button></div></div></div>`).join("")}</div>`
-      : `<div class="card">${emptyState("users", "Henüz favori akademisyen yok", "Bir profil sayfasında “Favorilere ekle” düğmesini kullanın.")}</div>`}</div>`);
+  const institutions = (kind) => {
+    const items = [...(S.fav[kind] || [])].reverse(), university = kind === "universities";
+    return items.length ? `<div class="library-org-grid">${items.map((item) => `<article class="card library-org-card">${organizationLogo(kind, item.id, item.name)}<div><h3><a href="#/${university ? "universite" : "firma"}/${esc(item.id)}">${esc(item.name)}</a></h3><p>${esc(university ? "Fakülteler, akademisyenler ve öğrenci rehberi" : (item.sectors || []).join(" · "))}</p>${!university && item.cities?.length ? `<span class="faint">${esc(item.cities.join(", "))}</span>` : ""}</div>${organizationSaveButton(kind, item.id)}</article>`).join("")}</div>`
+      : `<div class="card">${emptyState(university ? "building" : "briefcase", university ? "Üniversitelerini burada biriktir" : "İlgilendiğin firmaları kaydet", "Kurum sayfasındaki “Kaydet” düğmesiyle kütüphanene ekleyebilirsin.", `<a class="btn sm" href="#/${university ? "universiteler" : "firmalar"}">Keşfet ${icon("arrow")}</a>`)}</div>`;
+  };
+  setView(`<div class="section-head"><div><span class="eyebrow">KİŞİSEL ARAŞTIRMA ALANIN</span><h1>Kütüphanem</h1><p>Yayınların, akademisyenlerin, üniversitelerin ve firmaların bir arada.</p></div><div class="actions">${papers.length ? exportButtons("fav") : ""}</div></div>
+    <div class="tabs library-tabs" role="tablist">${tabs.map(([id, label, ic]) => `<button class="tab ${tab === id ? "active" : ""}" data-tab="${id}" type="button">${icon(ic)}${label}<span class="n">${(S.fav[id] || []).length}</span></button>`).join("")}</div>
+    <div class="panel ${tab === "papers" ? "active" : ""}" data-panel="papers"><div class="card">${papers.length ? `<div class="stagger">${papers.map((p, i) => paperCard(p, p.job_id && p.pid ? { jid: p.job_id, pid: p.pid, person: p.person } : {}, i)).join("")}</div>` : emptyState("bookmark", "İlk yayınını kaydet", "Yayınların yanındaki yıldızla araştırma kütüphaneni oluştur.", '<a class="btn sm" href="#/ara">Yayın keşfet →</a>')}</div></div>
+    <div class="panel ${tab === "people" ? "active" : ""}" data-panel="people">${people.length ? `<div class="collabs stagger">${people.map((p, i) => `<div class="collab" style="--i:${i}">${avatar(p.name, p.photo)}<div class="c-main"><div class="c-title">${esc(p.title || "")}</div><b><a href="#/profil/${esc(p.chat_id || "")}">${esc(p.name)}</a></b><span>${esc(p.institution || "")}</span><span class="faint">${esc(p.department || "")}</span><div class="chips" style="margin-top:8px"><span class="chip">${fmtNum(p.papers)} yayın</span><button class="chip" data-unfav="${esc(p.key)}" type="button">${icon("x")}Çıkar</button></div></div></div>`).join("")}</div>` : `<div class="card">${emptyState("users", "Takip ettiğin akademisyenler", "Profil sayfasındaki “Favorilere ekle” düğmesiyle buraya kaydet.")}</div>`}</div>
+    <div class="panel ${tab === "universities" ? "active" : ""}" data-panel="universities">${institutions("universities")}</div>
+    <div class="panel ${tab === "firms" ? "active" : ""}" data-panel="firms">${institutions("firms")}</div>`);
 }
 
 // =================================================================== SİSTEM
@@ -2535,7 +3104,7 @@ async function viewFirms(q = "", sector = "", city = "", area = "") {
     }
     $("#fBody").innerHTML = `<p class="faint" style="margin:0 0 12px">${fmtNum(d.count)} firma${d.count > d.items.length ? `, ilk ${d.items.length} gösteriliyor` : ""} · toplam ${fmtNum(d.total)} firma, ${fmtNum(d.info.count)} merkez · liste ${esc(d.info.imported || "")}</p>
       ${d.items.length ? `<div class="grid-3 stagger">${d.items.map((x, i) => `<a class="card org-head" style="--i:${i};margin:0;color:inherit;text-decoration:none" href="#/firma/${esc(x.id)}">
-        <div class="org-logo">${icon("briefcase")}</div><div style="min-width:0"><h3 style="font-size:15px">${esc(x.name)}</h3>
+        ${organizationLogo("firms", x.id, x.name)}<div style="min-width:0"><h3 style="font-size:15px">${esc(x.name)}</h3>
         <div class="meta"><span>${esc(x.sectors.join(", "))}</span></div>
         ${x.areas?.tags?.length ? `<div class="faint" style="margin-top:6px;font-size:12.5px">${esc(x.areas.tags.slice(0, 3).map((t) => t.name).join(" · "))}</div>` : ""}
         <div class="chips" style="margin-top:8px"><span class="chip teal">${x.centers.length} merkez</span><span class="chip">${esc(x.cities.slice(0, 2).join(", "))}${x.cities.length > 2 ? "…" : ""}</span>
@@ -2561,15 +3130,19 @@ async function viewFirm(fid, refresh = false) {
   const paperRow = (x) => `<div class="variants">${safeUrl(x.url) ? `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">${esc(x.title)}</a>` : esc(x.title)}
     · ${esc(x.year || "?")} · ${esc(x.source)}${x.role ? ` · ${esc(x.role)}` : ""}${x.firm_people?.length ? ` · <span class="faint">firmadan: ${esc(x.firm_people.join(", "))}</span>` : ""}
     ${x.quote ? `<div class="faint" style="font-style:italic;margin-top:2px">“${esc(x.quote)}”</div>` : ""}</div>`;
-  setView(`<section class="card org-head"><div class="org-logo">${icon("briefcase")}</div><div style="min-width:0;flex:1">
-      <h1>${esc(f.name)}</h1><div class="meta"><span>${esc(f.sectors.join(", "))}</span><span>${esc(f.cities.join(", "))}</span></div>
-      <div class="chips" style="margin-top:8px">${f.kinds.map((k) => `<span class="chip teal">✓ ${esc(k)}</span>`).join("")}</div>
+  setView(`<section class="card identity-hero identity-org" data-org-brand>
+      <div class="identity-cover" aria-hidden="true"></div>
+      <div class="identity-main">
+        <div class="identity-avatar">${organizationLogo("firms", f.id, f.name, "hero-logo")}</div>
+        <div class="identity-info"><h1>${esc(f.name)}</h1><div class="meta"><span>${esc(f.sectors.join(", "))}</span><span>${esc(f.cities.join(", "))}</span></div>
+          <div class="chips" style="margin-top:10px">${f.kinds.map((k) => `<span class="chip teal">✓ ${esc(k)}</span>`).join("")}</div></div>
+        <div class="identity-actions">${organizationSaveButton("firms", fid)}<button class="btn" id="firmRefresh" type="button">${icon("refresh")}Yeniden tara</button></div>
+      </div><div class="identity-details">
       ${f.areas?.tags?.length ? `<div class="m-h" style="margin:14px 0 6px">Çalışma alanları</div><div class="chips">${f.areas.tags.map((t) => `<a class="chip blue" href="#/firmalar?area=${encodeURIComponent(t.name)}">${esc(t.name)}<sup>${t.count}</sup></a>`).join("")}</div>
         ${f.areas.topics?.length ? `<div class="chips" style="margin-top:6px">${f.areas.topics.map((t) => `<span class="chip">${esc(t.name)}<sup>${t.count}</sup></span>`).join("")}</div>` : ""}
         <p class="faint" style="margin:6px 0 0;font-size:12.5px">Firmanın ${fmtNum(f.areas.papers)} yayınının OpenAlex konularından; yayın dışı çalışmaları kapsamaz.</p>` : ""}
       <details style="margin-top:10px"><summary class="faint" style="cursor:pointer">${f.centers.length} kayıtlı merkez</summary>
-        <ul style="margin:8px 0 0;padding-left:18px">${f.centers.map((c) => `<li class="faint">${esc(c)}</li>`).join("")}</ul></details></div>
-      <button class="btn" id="firmRefresh" type="button">${icon("refresh")}Yeniden tara</button></section>
+        <ul style="margin:8px 0 0;padding-left:18px">${f.centers.map((c) => `<li class="faint">${esc(c)}</li>`).join("")}</ul></details></div></section>
     ${d.errors.map((e) => `<div class="notice warn" style="margin-bottom:14px">${icon("info")}<div>${esc(e)}. Sonuç eksik olabilir; bu sonuç saklanmadı, sonra tekrar açın.</div></div>`).join("")}
     <div class="stat-row"><div class="stat"><b>${fmtNum(people.length)}</b><span>akademisyen</span></div>
       <div class="stat"><b>${fmtNum(d.papers)}</b><span>ortak yayın ve proje</span></div>
@@ -2660,7 +3233,7 @@ function route() {
   setNav({ akademisyenler: "akademisyenler", profil: "akademisyenler", is: "akademisyenler", universiteler: "universiteler", universite: "universiteler", kurum: "universiteler",
     firmalar: "firmalar", firma: "firmalar", ara: "ara", kutuphane: "kutuphane", sistem: "sistem" }[parts[0]] || (parts.length ? "" : "home"));
   switch (parts[0]) {
-    case "ara": return viewSearch(params.get("q") || "");
+    case "ara": return viewSearch(params.get("q") || "", params.get("sources") || "");
     case "kurum": return viewDirectory(params.get("u") || "");
     case "profil": return viewProfile(parts[1]);
     case "is": return viewJob(parts[1]);
@@ -2677,6 +3250,9 @@ function route() {
 
 document.addEventListener("click", async (e) => {
   const t = e.target;
+  $$(".source-picker[open]").forEach((el) => { if (!el.contains(t)) el.open = false; });
+  const saveOrg = t.closest("[data-save-org]");
+  if (saveOrg) { e.preventDefault(); toggleOrganization(saveOrg); return; }
   const open = t.closest("[data-open]");
   if (open) { e.preventDefault(); openPaper(open.dataset.open); return; }
   const pat = t.closest("[data-patent]");
@@ -2771,6 +3347,12 @@ document.addEventListener("input", (e) => {
   $$(`#${f} [data-q]`).forEach((el) => { el.style.display = !q || el.dataset.q.includes(q) ? "" : "none"; });
 });
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Tab" && !$("#modal").hidden && !wosVerification?.isOpen()) {
+    const focusable = $$("button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href], summary, textarea:not([disabled])", $(".modal-box")).filter((el) => el.getClientRects().length);
+    const first = focusable[0], last = focusable.at(-1);
+    if (first && e.shiftKey && (document.activeElement === first || !$(".modal-box").contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+    else if (first && !e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
   if (e.key !== "Escape") return;
   if (wosVerification?.isOpen()) { e.preventDefault(); wosVerification.hide(); return; }
   const filter = $(".dt-filter-popover:popover-open");
@@ -2779,10 +3361,13 @@ document.addEventListener("keydown", (e) => {
     $(`[popovertarget="${filter.id}"].dt-filter-toggle`)?.focus({ preventScroll: true });
     return;
   }
+  const picker = $(".source-picker[open]");
+  if (picker) { picker.open = false; $("summary", picker).focus(); return; }
   closeModal(); closeDrawer();
+  if ($("#app").classList.contains("menu-open")) { $("#app").classList.remove("menu-open"); syncSidebar(); $("#menuBtn").focus(); }
 });
-$("#menuBtn").addEventListener("click", () => $("#app").classList.toggle("menu-open"));
-$("#scrim").addEventListener("click", () => $("#app").classList.remove("menu-open"));
+$("#menuBtn").addEventListener("click", toggleSidebar);
+$("#scrim").addEventListener("click", () => { $("#app").classList.remove("menu-open"); syncSidebar(); });
 $("#themeBtn").addEventListener("click", toggleTheme);
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => { if (!storedTheme()) applyTheme(e.matches ? "dark" : "light"); });
 window.addEventListener("hashchange", route);
@@ -2790,6 +3375,8 @@ window.addEventListener("hashchange", route);
 (async () => {
   hydrateIcons();
   wosVerification = createWosVerification();
+  setupSidebar();
+  showWelcome();
   const legacy = new URLSearchParams(location.search).get("chat");
   if (legacy) { history.replaceState(null, "", `/#/profil/${legacy}`); }
   loadEnv();
