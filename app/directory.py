@@ -3,8 +3,8 @@
 Kaynak üniversitenin kendi sitesidir (Scrapling). Bağlantı seçimini önce Gemini yapar
 (menüdeki "Fakülte Haberleri" gibi gürültüyü ayıklar); model yoksa kurallar devrededir.
 Her seçim sayfadaki gerçek bağlantılarla doğrulanır, uydurma adres kabul edilmez.
-Birim yayınları hızlı liste olarak OpenAlex'ten tek seferde alınır; kişi başına tam
-YÖK listesi, akademisyenin profili açıldığında gelir.
+Birim yayınları, uygulamanın normal akademisyen profili akışıyla kişi kişi toplanır;
+var olan profiller ve kaynakları yeniden kullanılır.
 
 Sonuçlar alan adı başına önbelleklenir (data/directory/<alan-adı>.json, 7 gün).
 """
@@ -545,7 +545,7 @@ async def unit_papers(people: list[dict], domain: str, institution: str = "", pe
             "institution": inst.get("display_name") if inst else ""}
 
 
-async def faculty_people(unit_url: str, llm=None, limit: int = 30) -> list[dict]:
+async def faculty_people(unit_url: str, llm=None) -> list[dict]:
     """Fakülte yayınları için: YÖK fakülte kadrosu; yoksa bölümlerin site kadrolarını toplar (önbellekli)."""
     domain = registrable(urlparse(unit_url).hostname or "")
     store = load(domain)
@@ -553,22 +553,25 @@ async def faculty_people(unit_url: str, llm=None, limit: int = 30) -> list[dict]
     yok = await _yok_unit(store, domain, faculty_name or unit_name, faculty_name or unit_name, [])
     if yok:
         return yok
-    deps = (await departments(unit_url, llm))["items"][:limit]
+    deps = (await departments(unit_url, llm))["items"]
     sem = asyncio.Semaphore(3)
 
     async def one(d):
         async with sem:
             return d, await staff(d["url"], llm)
 
+    from .unit_publications import person_key
     people, seen = [], set()
     for res in await asyncio.gather(*(one(d) for d in deps), return_exceptions=True):
         if isinstance(res, Exception):
             continue
         dept, st = res
         for p in st["items"]:
-            if fold(p["name"]) not in seen:
-                seen.add(fold(p["name"]))
-                people.append({**p, "department": dept["name"]})
+            person = {**p, "department": p.get("department") or dept["name"]}
+            key = person_key(person, store.get("name", ""), domain)
+            if key not in seen:
+                seen.add(key)
+                people.append(person)
     if not people:  # bazı fakülteler tüm kadroyu tek sayfada verir
         people = (await staff(unit_url, llm))["items"]
     return people

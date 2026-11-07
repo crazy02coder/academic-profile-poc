@@ -22,7 +22,7 @@ import httpx
 from . import rea, recipes
 from .config import USER_AGENT, chromium_executable
 from .sources import record
-from .text import clean, name_in_text, name_tokens, title_key
+from .text import clean, fold, name_in_text, name_tokens, title_key
 
 TRDIZIN = "https://search.trdizin.gov.tr/api/defaultSearch/publication/"
 TRDIZIN_PAGE = "https://search.trdizin.gov.tr/tr/yayin/detay/"
@@ -52,6 +52,33 @@ def _same_person(name: str, orcid: str, cand_name: str, cand_orcid: str = "") ->
         return cand_orcid.rsplit("/", 1)[-1] == orcid
     a, b = name_tokens(name), name_tokens(cand_name)
     return bool(a) and sorted(a) == sorted(b)
+
+
+async def _pages(fetch_page, size: int = 100, last: int = 3) -> list[list]:
+    """İlk sayfa doluysa kalan sayfalar aynı anda istenir; hata veren ya da yarım gelen sayfada durulur."""
+    first = await fetch_page(1)
+    out = [first]
+    if len(first) < size:
+        return out
+    for rows in await asyncio.gather(*(fetch_page(n) for n in range(2, last + 1)), return_exceptions=True):
+        if isinstance(rows, Exception):
+            break
+        out.append(rows)
+        if len(rows) < size:
+            break
+    return out
+
+
+async def _identity(profile, name: str, ready, fetch):
+    """Sayfalar YÖK'ü beklemeden çekilir; eşleştirme için YÖK'ün netleştirdiği ad/ORCID beklenir.
+    YÖK adı değiştirdiyse sorgu yeni adla tekrarlanır."""
+    pages = await fetch(name)
+    if ready is not None:
+        await ready.wait()
+        new = profile.name or profile.query_name
+        if fold(new) != fold(name):
+            name, pages = new, await fetch(new)
+    return name, profile.links.get("orcid", ""), pages
 
 
 # ------------------------------------------------------------------------ TR Dizin
@@ -84,13 +111,13 @@ def _trdizin_record(s: dict) -> dict:
               for t in ((a.get("institution") or {}).get("rootTitle") or [])[:1] if t and "ÜNİVERSİTE" not in t.upper()])
 
 
-async def trdizin_works(profile, log) -> tuple[list[dict], dict | None]:
-    name = profile.name or profile.query_name
-    orcid = profile.links.get("orcid", "")
+async def trdizin_works(profile, log, ready=None) -> tuple[list[dict], dict | None]:
     out, projects, seen = [], [], set()
     async with _client() as client:
-        for page in (1, 2, 3):
-            rows = await trdizin_search(client, name, 100, page)
+        name, orcid, pages = await _identity(
+            profile, profile.name or profile.query_name, ready,
+            lambda q: _pages(lambda page: trdizin_search(client, q, 100, page)))
+        for rows in pages:
             for s in rows:
                 me = next((a for a in s.get("authors") or [] if _same_person(name, orcid, a.get("name", ""), a.get("orcid", ""))), None)
                 if not me or s.get("id") in seen:
@@ -105,8 +132,6 @@ async def trdizin_works(profile, log) -> tuple[list[dict], dict | None]:
                                      "url": f"{TRDIZIN_PAGE}{s.get('id')}"})
                     continue
                 out.append(_trdizin_record(s))
-            if len(rows) < 100:
-                break
     projects.sort(key=lambda p: -(p["year"] or 0))
     if projects:
         profile.yok.setdefault("tr_projects", projects)
@@ -148,17 +173,16 @@ def _openaire_record(x: dict) -> dict:
         labels=sorted({_host_label(u) for u in urls if _host_label(u)}))
 
 
-async def openaire_works(profile, log) -> tuple[list[dict], dict | None]:
-    name = profile.name or profile.query_name
-    orcid = profile.links.get("orcid", "")
+async def openaire_works(profile, log, ready=None) -> tuple[list[dict], dict | None]:
     out, hosts = [], Counter()
     async with _client() as client:
-        for page in (1, 2, 3):
-            r = await client.get(OPENAIRE, params={"authorFullName": name, "pageSize": 100, "page": page,
-                                                   "type": "publication"})
-            if r.status_code != 200:
-                break
-            rows = r.json().get("results") or []
+        async def fetch_page(q: str, page: int) -> list[dict]:
+            r = await client.get(OPENAIRE, params={"authorFullName": q, "pageSize": 100, "page": page, "type": "publication"})
+            return (r.json().get("results") or []) if r.status_code == 200 else []
+
+        name, orcid, pages = await _identity(profile, profile.name or profile.query_name, ready,
+                                             lambda q: _pages(lambda page: fetch_page(q, page)))
+        for rows in pages:
             for x in rows:
                 mine = any(_same_person(name, orcid, a.get("fullName") or "", _author_orcid(a)) for a in x.get("authors") or [])
                 if not mine or not x.get("mainTitle"):
@@ -171,8 +195,6 @@ async def openaire_works(profile, log) -> tuple[list[dict], dict | None]:
                 rec = _openaire_record(x)
                 hosts.update(rec["labels"])
                 out.append(rec)
-            if len(rows) < 100:
-                break
     detail = ", ".join(f"{k} {v}" for k, v in hosts.most_common(6))
     await log("publications", "running", f"OpenAIRE (DergiPark, üniversite arşivleri, AVESİS…): {len(out)} kayıt"
                                          f"{' · ' + detail if detail else ''}.")

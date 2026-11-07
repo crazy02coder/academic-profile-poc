@@ -5,8 +5,6 @@ services:
     plan: pro
     healthCheckPath: /
     envVars:
-      - key: GEMINI_API_KEY
-        sync: false
       - key: OPENALEX_API_KEY
         sync: false
       - key: EPO_KEY

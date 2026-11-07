@@ -1,5 +1,6 @@
 fastapi>=0.116,<1
 uvicorn>=0.35,<1
+websockets>=13,<17  # WoS insan doğrulama panelinin canlı görüntü ve giriş bağlantısı
 httpx>=0.28,<1
 certifi>=2024.0
 scrapling[fetchers,rag]>=0.4.15,<0.5

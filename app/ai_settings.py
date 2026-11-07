@@ -1,7 +1,7 @@
 """Yapay zekâ sağlayıcı ayarları: Gemini, ChatGPT, Claude ya da OpenAI uyumlu kendi sunucusu.
 
 Ayarlar proje kökünde, yalnızca sahibinin okuyabildiği `.ai-settings.json` dosyasında durur (git'e girmez).
-Anahtarlar arayüze hiçbir zaman geri gönderilmez; `.env`'deki anahtarlar yedek olarak geçerlidir.
+Anahtar ve adres yalnızca Ayarlar sayfasından girilir (.env okunmaz); anahtar arayüze hiçbir zaman geri gönderilmez.
 """
 from __future__ import annotations
 
@@ -9,17 +9,17 @@ import json
 import os
 from urllib.parse import urlparse
 
-from .config import GEMINI_API_KEY, GEMINI_FAST_MODEL, GEMINI_MODEL, ROOT
+from .config import GEMINI_FAST_MODEL, GEMINI_MODEL, ROOT
 
 PATH = ROOT / ".ai-settings.json"
 PROVIDERS = {
-    "gemini": {"label": "Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta", "env_key": GEMINI_API_KEY,
+    "gemini": {"label": "Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta",
                "model": GEMINI_MODEL, "fast_model": GEMINI_FAST_MODEL},
-    "openai": {"label": "ChatGPT", "base_url": "https://api.openai.com/v1", "env_key": os.getenv("OPENAI_API_KEY", ""),
+    "openai": {"label": "ChatGPT", "base_url": "https://api.openai.com/v1",
                "model": "", "fast_model": ""},
-    "anthropic": {"label": "Claude", "base_url": "https://api.anthropic.com/v1", "env_key": os.getenv("ANTHROPIC_API_KEY", ""),
+    "anthropic": {"label": "Claude", "base_url": "https://api.anthropic.com/v1",
                   "model": "claude-sonnet-5-5", "fast_model": "claude-haiku-5-5"},
-    "custom": {"label": "Kendi sunucum", "base_url": "", "env_key": "", "model": "", "fast_model": ""},
+    "custom": {"label": "Kendi sunucum", "base_url": "", "model": "", "fast_model": ""},
 }
 
 
@@ -57,7 +57,7 @@ def resolved(provider: str | None = None) -> dict:
         provider = "gemini"
     base, saved = PROVIDERS[provider], (data.get("providers") or {}).get(provider) or {}
     return {"provider": provider, "label": base["label"],
-            "key": saved.get("key") or base["env_key"], "key_source": "saved" if saved.get("key") else "env" if base["env_key"] else "",
+            "key": saved.get("key") or "",
             "base_url": saved.get("base_url") or base["base_url"],
             "model": saved.get("model") or base["model"], "fast_model": saved.get("fast_model") or base["fast_model"],
             "embed_model": saved.get("embed_model") or ""}
@@ -89,11 +89,11 @@ def save(provider: str, key: str = "", clear_key: bool = False, model: str = "",
     providers = data.setdefault("providers", {})
     entry = providers.setdefault(provider, {})
     entry.update(model=model.strip(), fast_model=fast_model.strip(), embed_model=embed_model.strip())
-    if provider == "custom":
-        url = clean_url(base_url)
-        if url != entry.get("base_url"):
-            entry.pop("key", None)  # eski anahtar yeni adrese gitmesin
-        entry["base_url"] = url
+    default = PROVIDERS[provider]["base_url"]
+    url = clean_url(base_url) if base_url.strip() or not default else default
+    if url != (entry.get("base_url") or default):
+        entry.pop("key", None)  # eski anahtar yeni adrese gitmesin
+    entry["base_url"] = url
     if clear_key:
         entry.pop("key", None)
     if key.strip():

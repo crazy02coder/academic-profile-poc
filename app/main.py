@@ -9,7 +9,7 @@ import json
 import time
 import uuid
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,7 +34,7 @@ from .llm import LLM, list_models
 from .sources import crossref_works, openalex_by_doi, openalex_works, orcid_works, scholar_works, yok_works
 import httpx
 
-from . import directory, firms, industry, library, patents, quartiles, trsources, yokdir
+from . import directory, firms, industry, library, patents, publication_status, quartiles, trsources, unit_publications, wos, wos_enrichment, wos_verification, yokdir
 
 app = FastAPI(title="Akademik İz")
 logger = logging.getLogger(__name__)
@@ -131,8 +131,13 @@ async def pipeline(job: dict, data: JobIn):
         if profile.links.get("orcid"):
             profile.observe("orcid", profile.links["orcid"], "university", profile.source_url)
 
-        # Scholar ORCID'e ihtiyaç duymaz ve en yavaş kaynaktır: YÖK'le aynı anda başlar.
+        # YÖK'ü beklemeyenler hemen başlar: Scholar ve Tez Merkezi yalnız adı kullanır; TR Dizin ve OpenAIRE sayfaları
+        # şimdi çeker, kişiyle eşleştirmeyi YÖK'ün netleştirdiği ad/ORCID gelince (identity_ready) yapar.
+        identity_ready = asyncio.Event()
         scholar_task = asyncio.create_task(scholar_works(profile, log))
+        early = [asyncio.create_task(trsources.trdizin_works(profile, log, identity_ready)),
+                 asyncio.create_task(trsources.openaire_works(profile, log, identity_ready)),
+                 asyncio.create_task(trsources.tez_works(profile, log))]
 
         # Faz A: kimlik çözümleme + YÖK yayınları (ORCID burada netleşebilir)
         await log("yok", "running", "YÖK Akademik: Scrapling StealthySession açılıyor, REA CDP ile bağlanacak.")
@@ -142,6 +147,8 @@ async def pipeline(job: dict, data: JobIn):
         except Exception as exc:  # noqa: BLE001
             yok_records = []
             await log("yok", "warning", f"YÖK atlandı ({type(exc).__name__}); akış devam ediyor.")
+        finally:
+            identity_ready.set()
 
         # Faz B: açık API'ler + Scholar paralel
         await log("publications", "running", "Paralel: OpenAlex, Crossref, ORCID, TR Dizin, OpenAIRE (DergiPark, üniversite "
@@ -150,9 +157,7 @@ async def pipeline(job: dict, data: JobIn):
         # API sorgularıyla paralel çalışır.
         labels = ("OpenAlex", "Crossref", "ORCID", "Scholar", "TR Dizin", "OpenAIRE", "Tez Merkezi")
         tasks = await asyncio.gather(openalex_works(profile, log), crossref_works(profile, log),
-                                     orcid_works(profile, log), scholar_task,
-                                     trsources.trdizin_works(profile, log), trsources.openaire_works(profile, log),
-                                     trsources.tez_works(profile, log), llm_enrich(profile, llm, log),
+                                     orcid_works(profile, log), scholar_task, *early, llm_enrich(profile, llm, log),
                                      return_exceptions=True)
         tasks = tasks[:len(labels)]
         records = list(yok_records)
@@ -205,7 +210,6 @@ async def pipeline(job: dict, data: JobIn):
                                            f"kaybolan yayın ({paper_ver['previous_runs']} çalıştırmalık geçmiş).")
         await log("verify", "done", f"{paper_ver['verified']}/{len(papers)} yayın doğrulandı "
                                     f"(≥2 kaynak: {paper_ver['multi_source']}, önceki çalıştırmada da görülen dahil).")
-        save_run(fact_key, history, verification, papers)
 
         prof = profile.to_dict()
         # Yapay zekâ analizi isteğe bağlı: profil hemen açılır, kullanıcı "Analiz et" deyince /analyze çalışır.
@@ -233,6 +237,12 @@ async def pipeline(job: dict, data: JobIn):
             await log("verify", "done", f"Sanayi iş birlikleri: {len(result['industry'])} firma "
                                         f"({sum(e['official'] for e in result['industry'])} resmi Ar-Ge/Tasarım Merkezi).")
         result["input"] = data.model_dump()
+        # Yenileme, daha önce doğrulanan WoS yayınlarını ve kaynaklarını kaybetmez.
+        if cached_wos := wos_enrichment.cached(prof, allow_stale=True):
+            if cached_wos.get("records"):
+                wos_enrichment.apply(result, cached_wos["records"], cached_wos)
+        result["paper_verification"] = verify_papers(result["publications"], history)
+        save_run(fact_key, history, verification, result["publications"])
         prev = job.get("refresh")
         if not prev and (same := history_store.find_same(prof)):
             prev = {"job_id": same["job_id"], "chat_id": same["id"]}
@@ -251,6 +261,9 @@ async def pipeline(job: dict, data: JobIn):
         else:
             result["job_id"] = job["id"]
             result["chat_id"] = history_store.create(job["id"], result)["id"]
+        quartiles.annotate(result.get("publications") or [])
+        wos.annotate(result.get("publications") or [])
+        publication_status.annotate(result.get("publications") or [])
         job["result"] = result
         history_store.save_result(result["job_id"], result)
         _emit(job, {"type": "result", "data": result})
@@ -307,7 +320,8 @@ async def ai_settings_models(body: AiSettingsIn):
     if body.provider not in ai_settings.PROVIDERS:
         raise HTTPException(422, "Bilinmeyen sağlayıcı.")
     try:
-        url = ai_settings.clean_url(body.base_url) if body.provider == "custom" else ai_settings.PROVIDERS[body.provider]["base_url"]
+        default = ai_settings.PROVIDERS[body.provider]["base_url"]
+        url = ai_settings.clean_url(body.base_url) if body.base_url.strip() or not default else default
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     key = ai_settings.key_for_test(body.provider, body.key.strip(), url)
@@ -359,7 +373,8 @@ def _start(data: JobIn, refresh: dict | None = None) -> dict:
     for jid in [k for k, v in JOBS.items() if v["done"] and time.time() - v["started"] > 3600]:
         JOBS.pop(jid, None)
     jid = uuid.uuid4().hex[:12]
-    job = {"id": jid, "events": [], "done": False, "started": time.time(), "result": None, "refresh": refresh}
+    job = {"id": jid, "events": [], "done": False, "started": time.time(), "result": None, "refresh": refresh,
+           "input": data.model_dump()}
     JOBS[jid] = job
     job["task"] = asyncio.create_task(pipeline(job, data))
     return {"id": jid, "steps": STEPS}
@@ -496,11 +511,33 @@ async def recipes_check():
     return await check_changes()
 
 
+@app.get("/api/wos/verification")
+async def wos_verification_status(request: Request):
+    if not wos_verification.same_origin(request, required=False):
+        raise HTTPException(403, "Doğrulama paneli yalnız aynı uygulama üzerinden açılabilir.")
+    return wos_verification.get_active()
+
+
+@app.websocket("/api/wos/verification/{challenge_id}/stream")
+async def wos_verification_stream(websocket: WebSocket, challenge_id: str):
+    await wos_verification.stream(websocket, challenge_id)
+
+
 @app.on_event("shutdown")
 async def _close_browsers():
     from .net import close_stealth
     from .google_search import close as close_google
 
+    await wos_verification.close()
+    await unit_publications.close()
+    tasks = list(_UNIT_PERSON_TASKS.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    _UNIT_PERSON_TASKS.clear()
+    _UNIT_PERSON_UPDATES.clear()
+    await library.close()
+    await wos.close()
     await close_stealth()
     await close_google()
 
@@ -536,6 +573,8 @@ def _result_for(jid: str) -> dict | None:
             return None
     if res:
         quartiles.annotate(res.get("publications") or [])  # okuma anında: eski profiller yenilemeden çeyrek alır
+        wos.annotate(res.get("publications") or [])
+        publication_status.annotate(res.get("publications") or [])
     return res
 
 
@@ -545,6 +584,48 @@ async def job_result(jid: str):
     if not res:
         raise HTTPException(404)
     return res
+
+
+@app.post("/api/jobs/{jid}/wos")
+async def start_wos(jid: str, retry: bool = False):
+    result = _result_for(jid)
+    if not result:
+        raise HTTPException(404)
+    identity = wos_enrichment.profile_key(result["profile"])
+
+    def persist(records, report):
+        # Tarama sırasında yenileme/analiz yapılmış olabilir: güncel kayda ekle.
+        if history_store.load_result(jid) is None:
+            return None  # tarama sürerken silinen profili yeniden oluşturma
+        current = _result_for(jid)
+        if not current or wos_enrichment.profile_key(current["profile"]) != identity:
+            return None
+        wos_enrichment.apply(current, records, report)
+        quartiles.annotate(current["publications"])
+        wos.annotate(current["publications"])
+        publication_status.annotate(current["publications"])
+        history_store.save_result(jid, current)
+        for job in JOBS.values():
+            if (job.get("result") or {}).get("job_id") == jid:
+                job["result"] = current
+        if cid := current.get("chat_id"):
+            if conv := history_store.load(cid):
+                conv["papers"] = current["unique_count"]
+                history_store.save(conv)
+        library.update_person(jid, {"papers": current["unique_count"]})
+        KB_CACHE.pop(jid, None)
+        PAPER_CACHE.pop(jid, None)
+        return current
+
+    return wos.start(result, retry=retry, on_publications=persist)
+
+
+@app.get("/api/jobs/{jid}/wos")
+async def wos_status(jid: str):
+    result = _result_for(jid)
+    if not result:
+        raise HTTPException(404)
+    return wos.snapshot(result)
 
 
 @app.post("/api/jobs/{jid}/chat")
@@ -725,6 +806,172 @@ async def _llm() -> LLM:
 
 
 # --------------------------------------------------------------- kurum dizini
+_UNIT_PERSON_TASKS: dict[str, asyncio.Task] = {}
+_UNIT_PERSON_UPDATES: dict[str, list] = {}
+
+
+def _directory_identity(person: dict, institution: str = "") -> dict:
+    links = dict(person.get("links") or {})
+    url = person.get("yok_url") or person.get("url") or ""
+    if url.startswith(yokdir.BASE + "/"):
+        links["yok"] = url
+    if person.get("orcid"):
+        links["orcid"] = person["orcid"]
+    return {"name": person.get("name") or "", "institution": person.get("university") or institution,
+            "links": links}
+
+
+def _directory_matches(person: dict, institution: str, profile: dict) -> bool:
+    identity = _directory_identity(person, institution)
+    if not history_store.same_person(identity, profile):
+        return False
+    # A common strong identifier is sufficient. Otherwise protect homonyms in
+    # different departments or on different individual pages in the same school.
+    for name, pattern in (("yok", history_store.YOK_ID_RE), ("orcid", history_store.ORCID_RE)):
+        left = pattern.search(identity["links"].get(name) or "")
+        right = pattern.search((profile.get("links") or {}).get(name) or (profile.get("orcid") if name == "orcid" else "") or "")
+        if left and right:
+            return left[0].upper() == right[0].upper()
+    dept, other = fold(person.get("department") or ""), fold(profile.get("department") or "")
+    if dept and other and dept not in other and other not in dept:
+        return False
+    url = person.get("site_url") or person.get("url") or ""
+    old_url = profile.get("source_url") or ""
+    if url and not url.startswith(yokdir.BASE + "/") and old_url:
+        a, b = urlparse(url), urlparse(old_url)
+        if a.path.strip("/") and b.path.strip("/") and (a.netloc, a.path.rstrip("/")) != (b.netloc, b.path.rstrip("/")):
+            return False
+    return True
+
+
+def _staff_metrics(people: list[dict], institution: str = "") -> list[dict]:
+    """Use saved profile counts; an uncollected profile has null counts, not zero."""
+    known = []
+    for chat in history_store.list_all():
+        result = _result_for(chat["job_id"])
+        if result:
+            known.append((chat, result))
+    rows = []
+    for person in people:
+        row = {**person, "publication_count": None, "article_count": None, "citations": None,
+               "sources": [], "state": "pending"}
+        matches = [(c, r) for c, r in known if _directory_matches(person, institution, r["profile"])]
+        match = matches[0] if len(matches) == 1 else None
+        if match:
+            chat, result = match
+            papers = result.get("publications") or []
+            citations = [p["citations"] for p in papers if isinstance(p.get("citations"), int)]
+            row.update(publication_count=len(papers),
+                       article_count=sum(publication_status.kind(p) in {"Makale", "Derleme"} for p in papers),
+                       citations=sum(citations) if citations or not papers else None,
+                       sources=sorted({s for p in papers for s in p.get("sources") or [p.get("source")] if s}),
+                       chat_id=chat["id"], job_id=result["job_id"], state="done")
+        rows.append(row)
+    return rows
+
+
+def _start_unit_collection(people: list[dict], institution: str, domain: str, unit: str, *, refresh: bool = False) -> dict:
+    known = [(chat, _result_for(chat["job_id"])) for chat in history_store.list_all()]
+    for person in people:
+        matches = [r for _, r in known if r and _directory_matches(person, institution, r["profile"])]
+        if len(matches) == 1:
+            unit_publications.seed(person, matches[0], institution, domain)
+    async def collect(person, institution, domain, *, on_update=None):
+        return await _collect_unit_person(person, institution, domain, on_update=on_update, refresh=refresh)
+
+    return unit_publications.start(people, institution, domain, unit, collect, refresh=refresh)
+
+
+async def _collect_unit_person(person: dict, institution: str, domain: str, *, on_update=None, refresh: bool = False) -> dict:
+    """Reuse the individual-profile pipeline and its persisted WoS enrichment.
+
+    A person shared by two units is collected once. Existing profiles keep their
+    chat, favorites and sources. First results arrive before WoS finishes.
+    """
+    identity = _directory_identity(person, institution)
+    key = unit_publications.person_key(person, institution, domain)
+    subscribers = _UNIT_PERSON_UPDATES.setdefault(key, [])
+    if on_update:
+        subscribers.append(on_update)
+
+    def publish(result):
+        for callback in list(_UNIT_PERSON_UPDATES.get(key, [])):
+            callback(result)
+
+    async def collect():
+        source_warnings = []
+        known = [_result_for(c["job_id"]) for c in history_store.list_all()]
+        matches = [r for r in known if r and _directory_matches(person, institution, r["profile"])]
+        result = matches[0] if len(matches) == 1 else None
+        if result is not None:
+            publish(result)
+        if result is None or refresh:
+            running = next((job for job in JOBS.values() if not job["done"] and job.get("input")
+                            and unit_publications.person_key(
+                                {**job["input"], "url": job["input"].get("yok_url") or job["input"].get("url")},
+                                job["input"].get("university") or institution, domain) == key), None)
+            if running is None:
+                if result is not None:
+                    started = await refresh_job(result["job_id"])
+                else:
+                    yok_url = identity["links"].get("yok") or ""
+                    url = person.get("site_url") or (person.get("url") if not yok_url else "") or ""
+                    if not url and not yok_url and domain:
+                        url = f"https://{domain}/"
+                    if not url and not yok_url:
+                        raise RuntimeError("Kişinin profil veya kurum bağlantısı bulunamadı.")
+                    data = JobIn(name=person["name"], url=url, yok_url=yok_url,
+                                 university=identity["institution"], department=person.get("department") or "",
+                                 email=person.get("email") or "")
+                    started = _start(data)
+                running = JOBS[started["id"]]
+            await asyncio.shield(running["task"])
+            result = running.get("result")
+            if not result:
+                message = next((e.get("message") for e in reversed(running["events"]) if e["type"] == "error"), None)
+                raise RuntimeError(message or "Akademisyen profili toplanamadı.")
+            source_warnings = [e["message"] for e in running["events"] if e.get("step") in {"yok", "publications"}
+                               and e.get("status") == "warning"]
+        publish(result)
+        jid = result["job_id"]
+        state = await start_wos(jid, retry=refresh)
+        # Publication collection is sufficient. Per-journal JCR checks continue
+        # in the shared profile task without holding up the entire unit.
+        publication_revision = result.get("wos_revision")
+        while state.get("status") == "running" and ("publications" not in state or
+                state["publications"].get("complete") is False):
+            await asyncio.sleep(1)
+            if history_store.load_result(jid) is None:
+                raise RuntimeError("Tarama sırasında akademisyen profili silindi.")
+            current = _result_for(jid) or result
+            state = wos.snapshot(current)
+            if current.get("wos_revision") != publication_revision:
+                publication_revision = current.get("wos_revision")
+                publish(current)
+        latest = _result_for(jid)
+        if latest is None or history_store.load_result(jid) is None:
+            raise RuntimeError("Tarama sırasında akademisyen profili silindi.")
+        report = state.get("publications") or {}
+        warnings = list(source_warnings)
+        if state.get("status") in {"blocked", "error", "cancelled"} or report.get("status") in {"partial", "blocked", "error"}:
+            warnings.append("WoS taraması tamamlanamadı; erişilen kaynakların yayınları gösteriliyor.")
+        return {**latest, "collection_warnings": warnings}
+
+    task = _UNIT_PERSON_TASKS.get(key)
+    if task is None:
+        task = asyncio.create_task(collect())
+        _UNIT_PERSON_TASKS[key] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if on_update in subscribers:
+            subscribers.remove(on_update)
+        if task.done() and _UNIT_PERSON_TASKS.get(key) is task:
+            _UNIT_PERSON_TASKS.pop(key, None)
+            if _UNIT_PERSON_UPDATES.get(key) is subscribers:
+                _UNIT_PERSON_UPDATES.pop(key, None)
+
+
 class UnitIn(BaseModel):
     url: str = Field(min_length=8, max_length=2000)
     refresh: bool = False
@@ -734,6 +981,7 @@ class UnitPapersIn(BaseModel):
     url: str = Field(min_length=8, max_length=2000)
     level: str = Field(default="department", pattern="^(department|faculty)$")
     name: str = Field(default="", max_length=300)
+    refresh: bool = False
 
 
 def _check_url(url: str):
@@ -765,13 +1013,19 @@ async def directory_departments(body: UnitIn):
 @app.post("/api/directory/staff")
 async def directory_staff(body: UnitIn):
     _check_url(body.url)
-    return await _directory_call(directory.staff(body.url, await _llm(), body.refresh))
+    data = await _directory_call(directory.staff(body.url, await _llm(), body.refresh))
+    institution = directory.load(registrable(urlparse(body.url).hostname or "")).get("name", "")
+    return {**data, "items": _staff_metrics(data["items"], institution)}
 
 
 @app.post("/api/directory/papers")
 async def directory_papers(body: UnitPapersIn):
-    """Bölüm ya da fakültedeki akademisyenlerin yayınları (OpenAlex hızlı liste)."""
+    """Kayıtlı birimi göster; yalnız ilk açılışta veya açık yenilemede tara."""
     _check_url(body.url)
+    unit = f"site:{body.level}:{body.url}"
+    saved = unit_publications.cached_unit(unit)
+    if saved is not None and (not body.refresh or saved.get("status") == "running"):
+        return _unit_publication_result(saved)
     llm = await _llm()
     domain = registrable(urlparse(body.url).hostname or "")
 
@@ -780,8 +1034,8 @@ async def directory_papers(body: UnitPapersIn):
                   else (await directory.staff(body.url, llm))["items"])
         if not people:
             raise RuntimeError("Bu birimde akademisyen listesi bulunamadı.")
-        out = await directory.unit_papers(people, domain, directory.load(domain).get("name", ""))
-        return {**out, "people": len(people), "unit": body.name}
+        institution = directory.load(domain).get("name", "")
+        return _unit_publication_result(_start_unit_collection(people, institution, domain, unit, refresh=body.refresh))
 
     return await _directory_call(run())
 
@@ -924,21 +1178,24 @@ async def university_faculty(uid: str, name: str = ""):
     d = await _directory_call(yokdir.faculty_detail(uid, name[:200]))
     if not d:
         raise HTTPException(502, "Bu birimin kadrosu YÖK'ten alınamadı. Biraz sonra tekrar deneyin.")
-    return d
+    return {**d, "people": _staff_metrics(d["people"], d["university"])}
 
 
 class YokPapersIn(BaseModel):
     uid: str = Field(max_length=120)
     faculty: str = Field(max_length=200)
     department: str | None = Field(default=None, max_length=200)  # None: tüm fakülte
-
-
-UNIT_PAPERS_LIMIT = 150  # OpenAlex'e kişi başına 1-3 istek: büyük fakültelerde unvan sırasına göre ilk kişiler
+    refresh: bool = False
 
 
 @app.post("/api/universities/papers")
 async def university_papers(body: YokPapersIn):
-    """Bölüm ya da fakültedeki akademisyenlerin yayınları (OpenAlex hızlı liste; ORCID varsa ORCID ile eşleşir)."""
+    """Kayıt varsa ağ taraması yapmadan döner; yenileme kullanıcı isteğiyle başlar."""
+    unit = f"{body.uid}|{body.faculty}|{body.department if body.department is not None else '*'}"
+    saved = unit_publications.cached_unit(unit)
+    if saved is not None and (not body.refresh or saved.get("status") == "running"):
+        return _unit_publication_result(saved)
+
     async def run():
         fac = await yokdir.faculty_detail(body.uid, body.faculty)
         if not fac:
@@ -946,10 +1203,24 @@ async def university_papers(body: YokPapersIn):
         people = [p for p in fac["people"] if body.department is None or p["department"] == body.department]
         if not people:
             raise RuntimeError("Bu birimde akademisyen listesi bulunamadı.")
-        out = await directory.unit_papers(people[:UNIT_PAPERS_LIMIT], fac["domain"], fac["university"])
-        return {**out, "people": min(len(people), UNIT_PAPERS_LIMIT), "total_people": len(people)}
+        return _unit_publication_result(_start_unit_collection(people, fac["university"], fac["domain"], unit, refresh=body.refresh))
 
     return await _directory_call(run())
+
+
+def _unit_publication_result(data: dict) -> dict:
+    quartiles.annotate(data["papers"])
+    wos.annotate(data["papers"])
+    publication_status.annotate(data["papers"])
+    return data
+
+
+@app.get("/api/units/papers/{job_id}")
+async def unit_papers_status(job_id: str):
+    data = unit_publications.snapshot(job_id)
+    if data is None:
+        raise HTTPException(404, "Birim taraması bulunamadı; birimi yeniden açın.")
+    return _unit_publication_result(data)
 
 
 @app.get("/api/people/search")
@@ -1033,6 +1304,14 @@ async def topic_search(q: str = ""):
     if len(q.strip()) < 3:
         raise HTTPException(422, "En az 3 karakterlik bir konu yazın.")
     return await library.topic_search(q[:200], await _llm())
+
+
+@app.get("/api/search/{search_id}")
+async def topic_search_status(search_id: str):
+    data = library.topic_snapshot(search_id)
+    if data is None:
+        raise HTTPException(404, "Arama sonucu bulunamadı; aramayı yeniden başlatın.")
+    return data
 
 
 class PaperIn(BaseModel):

@@ -2,7 +2,7 @@
 
 **Türkiye'deki akademisyenlerin kanıta dayalı araştırma profilini çıkaran asistan.**
 
-Akademisyenin adını yazarsın, YÖK'te bulunanlardan doğru kişiyi seçersin; ya da üniversite → fakülte → bölüm ağacından gidersin. Sistem yayınlarını açık kaynaklardan toplar, birleştirir ve doğrular; tezlerini, projelerini, patentlerini ve sanayi iş birliklerini ekler. Sonra o kişi hakkında soru sorabilirsin.
+Akademisyenin adını yazarsın, YÖK'te bulunanlardan doğru kişiyi seçersin; ya da üniversite → fakülte → bölüm ağacından gidersin. Sistem yayınlarını akademik kaynaklardan toplar, birleştirir ve doğrular; tezlerini, projelerini, patentlerini ve sanayi iş birliklerini ekler. Sonra o kişi hakkında soru sorabilirsin.
 
 Ters yön de var: bir firma seçip onunla çalışan akademisyenleri, TÜBİTAK projelerini ve patentlerini görebilirsin.
 
@@ -27,10 +27,9 @@ Ardından **http://127.0.0.1:8000** adresini aç.
 
 `run.sh` ilk çalıştırmada her şeyi kurar: Python ortamı, Scrapling tarayıcıları, REA (npm).
 
-**Anahtarlar:** Gemini için https://aistudio.google.com/apikey adresinden ücretsiz anahtar al, proje kökünde `.env` dosyasına yaz:
+**Anahtarlar:** Yapay zekâ anahtarı (ör. Gemini: https://aistudio.google.com/apikey) uygulamada **Ayarlar** sayfasına yapıştırılır. İsteğe bağlı diğer anahtarlar proje kökündeki `.env` dosyasına yazılır:
 
 ```
-GEMINI_API_KEY=...
 OPENALEX_API_KEY=...   # isteğe bağlı, ücretsiz: https://openalex.org (hesap → API key)
 EPO_KEY=...            # isteğe bağlı, ücretsiz: https://developers.epo.org (My Apps → Consumer Key)
 EPO_SECRET=...         # patent sekmeleri yalnızca bu ikisi tanımlıysa görünür
@@ -64,7 +63,7 @@ OpenAlex anahtarsız da çalışır ama IP başına günlük ortak bütçe (~100
 | Kısa işler (link seçimi) | `gemini-3.5-flash-lite` |
 | RAG gömme | `gemini-embedding-001` (768 boyut) |
 
-Sağlayıcı **Ayarlar** sayfasından değiştirilir: Gemini, ChatGPT, Claude ya da OpenAI uyumlu kendi sunucunuz (adres + anahtar). Ayarlar git'e girmeyen `.ai-settings.json` dosyasında durur; anahtarlar arayüze geri gönderilmez. `.env`'deki `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` yedek olarak geçerlidir. Claude'da gömme modeli olmadığından sohbet yayınları kelime aramasıyla bulur.
+Sağlayıcı, API adresi ve anahtar yalnızca **Ayarlar** sayfasından girilir (Gemini, ChatGPT, Claude ya da OpenAI uyumlu kendi sunucunuz); yapay zekâ için `.env` okunmaz. Ayarlar git'e girmeyen `.ai-settings.json` dosyasında durur; anahtarlar arayüze geri gönderilmez. Claude'da gömme modeli olmadığından sohbet yayınları kelime aramasıyla bulur.
 
 Ücretsiz katmanda kota (429) ve yoğunluk (503) hataları olağandır. Hata alan istek sıradaki modelle (`GEMINI_FALLBACKS`) yeniden denenir; kotası dolan model 60 sn atlanır.
 
@@ -223,6 +222,7 @@ Tarifler `data/recipes/<alan-adı>.json` altında, REA kanıt kimliğiyle (`evid
 | OpenAIRE | DergiPark, üniversite açık arşivleri, AVESİS, Aperta ve YÖK Açık Bilim kayıtları. DergiPark'a bu yoldan ulaşılır. |
 | YÖK Tez Merkezi | REA tarifiyle, tarayıcısız. |
 | Google Scholar | Best-effort; engellenirse akış bozulmaz, CAPTCHA çözülmez. |
+| Web of Science | Profil açılınca Scrapling ile arka planda toplanır. Yazar kimliği doğrulanan makale ve bildiriler eklenir; mevcut yayınlarda WoS kaynak bağlantısı görünür. |
 
 **Tekilleştirme** (`app/dedup.py`):
 
@@ -233,7 +233,66 @@ Tarifler `data/recipes/<alan-adı>.json` altında, REA kanıt kimliğiyle (`evid
 
 **Doğrulama** (`app/consensus.py`): her alan kaynak ağırlıklarıyla karşılaştırılır ve **doğrulandı / tek kaynak / çelişki / değişti** olarak etiketlenir.
 
-**Birim yayınları:** Fakülte ya da bölüm listesi hızlı bir özet olarak OpenAlex'ten gelir (büyük birimlerde unvan sırasıyla ilk 150 kişi). Kişinin tam listesi profili çıkarılınca oluşur.
+**Yayın durumu:** Profilin yayın tablosundaki **Durum** sütunu kayıt türünü (makale, bildiri, yazılım, veri seti vb.) ve açıklamada açıkça belirtilen süreç bilgisini gösterir. Yazılım/veri arşivindeki “submitted” veya “under review” beyanı **ilgili makaleye** aittir; arşivin kendi durumu olarak sunulmaz. Gönderildi, değerlendirmede ve gönderime hazırlanıyor ayrı tutulur. Kanıt cümlesi ve kaynak durum metninin açıklamasındadır; kaynak bağlantısı varsa tıklanabilir. Açık beyan yoksa **Süreç bilgisi yok** görünür. DOI, WoS eşleşmesi veya birden fazla kaynak bulunması hakem değerlendirmesi/kabul kanıtı sayılmaz. Durum kayıtlı açıklamadan okunur; derginin güncel başvuru sistemini sorgulamaz. Eski profiller de açıldığında bu gösterimi alır.
+
+**Birim yayınları:** YÖK dizininde veya kurum sitesinde seçilen fakülte/bölümün kayıtlı sonuçları açılışta gösterilir; kayıt varsa yeniden tarama başlamaz. Birim sonuçları sunucu yeniden başlatıldığında da korunur. Önceden birim kaydı oluşmamışsa mevcut akademisyen profilleri birleştirilerek gösterilir; eksik kişiler kendiliğinden taranmaz. **Tekrar tara**, aynı normal akademisyen profili akışıyla kaynakları yeniden toplar; önceki yayınlar bu sırada görünür kalır. Hiç kayıt olmayan birimde ilk tarama otomatik başlar. Aynı anda en fazla iki kişi hazırlanır ve WoS yayınları da eklenir. İlk 150 kişi / ilk 30 bölüm sınırı uygulanmaz. Ortak yayınlar DOI ve güvenli başlık eşleşmesiyle bir satırda birleşir; birimdeki yazarlar ve kaynak bağlantıları korunur. İlerleme, erişilemeyen kişiler ve eksik kalan kaynaklar görünür; taranan kaynakların her yayını kapsadığı garanti edilmez.
+
+**Filtreler ve sıralama:** Profil, konu ve birim yayın tabloları kaynak, yıl aralığı ve aşama ile süzülebilir; başlık/yazar araması ve yıl/atıf sıralaması birlikte çalışır. Dışa aktarma süzülmüş listeyi kullanır. Akademik kadro varsayılan olarak makale sayısına göre sıralanır; atıf sayısı ve isim sırası seçilebilir. Kadroda isim ve yayın kaynağı filtresi vardır. Henüz profili toplanmamış kişinin yayın/atıf sayısı bilinmiyor olarak gösterilir.
+
+**Konu aramasında WoS:** Açık kaynaklardan gelen sonuçlar bekletilmeden gösterilir; WoS, Scrapling ile kendi konu arama ekranında arka planda sorgulanır. Aynı yayın mevcut satıra WoS kaynağı ekler, yeni yayın ayrı satır olur. İlk 20 kayıt ve süre bütçesiyle sınırlı taramanın kapsamı arayüzde belirtilir. WoS erişilemezse diğer kaynakların sonuçları korunur.
+
+---
+
+## WoS yayınları ve JCR dergi çeyrekleri
+
+Profil açılınca WoS'un kendi arama ekranında yazar kimliğiyle yayın aranır. ORCID/ResearcherID,
+mevcut yayın eşleşmeleri ve destekleyici yazar/kurum bilgileri kullanılır; yalnız benzer ad yeni bir yayını
+profile eklemek için yeterli değildir. DOI aynıysa kaynaklar aynı satırda birleşir. DOI yoksa başlık,
+yıl ve yazar birlikte kontrol edilir; çelişkili DOI'ler birleştirilmez. Eksik yayınlar yeni satır olarak
+eklenirken eski yayın kimlikleri, diğer kaynaklar, sohbet atıfları ve SJR bilgileri korunur.
+Başlıkta küçük yazım hatası veya bir yıllık fark varsa eşleşme için ayrıca aynı tür, en az iki ortak yazar
+ve neredeyse birebir uzun özet gerekir. Kaynaklar arasındaki yıl farkı WoS etiketinin açıklamasında korunur.
+
+WoS kaynak etiketi kayıt sayfasına bağlanır, indeks bilgisi açıklamasında gösterilir. Konferans bildirileri
+de kaynak olarak alınır; WoS'ta bulunması JCR çeyreği bulunduğu anlamına gelmez. Yeni buton gerekmez.
+Yayın taraması sınırlı ve önbelleklidir; erişim hatası önceki doğrulanmış yayınları silmez. Tamamlanan
+taramalar 1 gün, kısmi/hatalı taramalar 15 dakika sonra tekrar denenebilir. Giriş gerektiğinde tarama durur.
+Profil ve birim taramalarında kişiye ait olduğu doğrulanan her WoS yayını toplama sürerken kaydedilir
+ve tabloya aktarılır; bütün taramanın bitmesi beklenmez. İş yarıda kesilirse kaydedilmiş yayınlar
+korunur ve yarım kayıt, sonraki taramayı önbellekten engellemez. Birim taraması ilk yayın geldiğinde
+tamamlandı sayılmaz; diğer kayıtları toplamaya devam eder.
+
+**Etkileşimli WoS doğrulaması:** WoS insan doğrulaması istediğinde uygulamada **WoS doğrulaması**
+paneli açılır. Panel, taramanın kullandığı aynı tarayıcı oturumunun canlı görüntüsüdür; fare ve klavye
+işlemleri o sayfaya iletilir. Doğrulamayı kullanıcı tamamlar. WoS içeriğinin geri geldiği doğrulanınca
+panel kapanır ve profil, konu veya birim taraması kaldığı yerden devam eder. Doğrulama için en fazla
+5 dakika beklenir; bu süre WoS tarama bütçesinden düşülmez. **Şimdilik gizle** beklemeyi sürdürür ve
+panel yeniden açılabilir; **Taramayı atla** o doğrulama bekleyişini sonlandırır. Diğer kaynaklardan
+toplanan sonuçlar korunur. Ayrı bir WoS oturumu açılmaz; ücretli çözücü, API anahtarı veya tarayıcı
+eklentisi gerekmez. Bu işlem kurum aboneliği veya WoS giriş gereksiniminin yerini almaz.
+Panel eklenmeden önce kaydedilmiş insan doğrulaması hataları ilk yeniden açılışta bir kez daha
+denenir; eski hata önbelleği panelin açılmasını engellemez. Kullanıcının atladığı veya süresi dolan
+yeni doğrulamalar bu geçiş kuralıyla tekrar tekrar başlatılmaz.
+Profil açıkken bağlantı kesilirse WoS sonuç takibi yeniden bağlanır; sunucu yeniden başladığı için
+iş kaybolmuşsa sınırlı sayıda yeniden başlatır. Doğrulama tamamlandığında sonuç takibi de uyanır.
+Sunucu yeniden başlatılırsa açık WoS tarayıcı oturumu korunmaz ve doğrulama tekrar istenebilir.
+
+Profil açıldığında DOI'si olan makaleler için WoS/JCR kontrolü arka planda başlar; profilin açılmasını bekletmez.
+Mevcut SJR etiketi korunur, WoS/JCR sonucu ayrı ve kaynak sayfasına bağlı bir etiketle gösterilir.
+WoS kaydındaki DOI yayınla birebir eşleşmelidir. JCR yılı sayfada açıklanmıyorsa yıl etikete eklenmez;
+yayın yılı veya JCI yılı yerine geçirilmez. Yılın açıklanmadığı bilgisi ve kategoriler etiketin açıklamasında görünür.
+
+Bilinen DOI–WoS bağlantıları `app/wos_records.json` dosyasında tutulur (başlangıç kaydı kullanıcı tarafından
+verilen WoS bağlantısıdır; Q değeri kodda sabit değildir). Toplanan WoS yayınlarının kendi bağlantıları kullanılır;
+bağlantısı bilinmeyen kayıtlar aynı doğrulanmış Scrapling oturumunda doğrudan WoS'un DOI alanında,
+gerekirse başlık alanında aranır. Bu adımda Brave veya başka bir arama motoru kullanılmaz.
+Her adayın tam kayıt sayfasındaki DOI yeniden kontrol edilir; arama listesinden çeyrek bilgisi alınmaz.
+Doğru kayıt bulunmuş ancak JCR bilgisi yoksa başka aramalarla çeyrek tahmin edilmez.
+Her yayının kaydının bulunması garanti edilmez.
+Scrapling kayıt sayfasını okur; giriş/erişim engelinde tarama durur. Arayüzde yalnızca bulunan çeyrekler gösterilir.
+Başarılı sonuçlar `data/wos/` altında 7 gün, sonuçsuz/hatalı kontroller 15 dakika saklanır.
+Profil yeniden açıldığında süresi dolmuş kontroller otomatik yenilenir.
+SJR filtreleri ve sayımları yalnızca SJR verisini kullanmaya devam eder.
 
 ---
 
@@ -294,7 +353,6 @@ Hepsi isteğe bağlı ortam değişkenleri:
 | Değişken | Varsayılan | Açıklama |
 |---|---|---|
 | `PORT` | `8000` | Sunucu portu |
-| `GEMINI_API_KEY` | — | Gemini anahtarı (`.env`) |
 | `GEMINI_MODEL` | `gemini-3.5-flash` | Ana model |
 | `GEMINI_FAST_MODEL` | `gemini-3.5-flash-lite` | Kısa işler |
 | `GEMINI_FALLBACKS` | `gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash` | Hata/kota durumunda sırayla denenir |

@@ -5,6 +5,7 @@ import json
 import re
 import time
 import uuid
+from urllib.parse import parse_qsl, urlparse
 
 from .config import ROOT, RUNS_DIR
 from .text import fold
@@ -34,7 +35,7 @@ def create(job_id: str, result: dict) -> dict:
 
 
 def same_person(a: dict, b: dict) -> bool:
-    """İki profil aynı kişi mi? Önce YÖK kimliği, sonra ORCID; ikisi de yoksa ad + kurum. Aynı adlı farklı kişiler ayrı kalır."""
+    """Önce YÖK/ORCID; ad+kurum yedeğinde bölüm ve kişi sayfası çelişkisini reddet."""
     def ids(prof: dict) -> tuple[str, str]:
         links = prof.get("links") or {}
         yok = YOK_ID_RE.search(links.get("yok") or "")
@@ -45,7 +46,28 @@ def same_person(a: dict, b: dict) -> bool:
             return x == y
     name_a, name_b = fold(a.get("name") or ""), fold(b.get("name") or "")
     inst_a, inst_b = fold(a.get("institution") or ""), fold(b.get("institution") or "")
-    return bool(name_a and name_a == name_b and inst_a and inst_b and (inst_a in inst_b or inst_b in inst_a))
+    if not (name_a and name_a == name_b and inst_a and inst_b and (inst_a in inst_b or inst_b in inst_a)):
+        return False
+    dept_a, dept_b = fold(a.get("department") or ""), fold(b.get("department") or "")
+    if dept_a and dept_b and dept_a not in dept_b and dept_b not in dept_a:
+        return False
+
+    def individual_page(profile):
+        try:
+            url = urlparse(profile.get("source_url") or "")
+            path = url.path.rstrip("/")
+            if url.scheme in ("http", "https") and url.hostname and path:
+                # Parameter order, protocol and fragment do not define a person;
+                # actual query values may (e.g. /person?id=123).
+                return url.hostname.lower(), path, tuple(sorted(parse_qsl(url.query)))
+        except ValueError:
+            pass
+        return None
+
+    page_a, page_b = individual_page(a), individual_page(b)
+    if page_a and page_b and page_a != page_b:
+        return False
+    return True
 
 
 def find_same(prof: dict) -> dict | None:

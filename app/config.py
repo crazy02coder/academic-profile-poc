@@ -24,7 +24,6 @@ def _load_env(path: Path) -> None:
 
 _load_env(ROOT / ".env")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", "gemini-3.5-flash-lite")
 # Kota/yoğunluk hatasında sırayla denenecek modeller
@@ -47,7 +46,7 @@ EPO_SECRET = os.getenv("EPO_SECRET", "")
 def redact(text: str) -> str:
     """Kullanıcıya gösterilen hata metinlerinden (istek URL'leri) anahtarları siler."""
     from . import ai_settings  # döngüsel içe aktarmayı önler: ai_settings bu modülü kullanır
-    for secret in (OPENALEX_API_KEY, GEMINI_API_KEY, EPO_KEY, EPO_SECRET, *ai_settings.secrets()):
+    for secret in (OPENALEX_API_KEY, EPO_KEY, EPO_SECRET, *ai_settings.secrets()):
         if secret:
             text = text.replace(secret, "***")
     return text

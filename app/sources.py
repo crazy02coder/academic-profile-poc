@@ -36,6 +36,9 @@ def record(source: str, **kw) -> dict:
     except (TypeError, ValueError):
         base["year"] = None
     base["date"] = pub_date(base.get("date"), base["year"])
+    if base.get("abstract"):
+        base["abstract_source"] = source
+        base["abstract_url"] = base["url"]
     return base
 
 
@@ -169,11 +172,21 @@ async def openalex_by_doi(records: list[dict], name: str, log) -> list[dict]:
         return []
     is_self = lambda a: name_score(name, (a.get("author") or {}).get("display_name") or "") >= 0.75  # noqa: E731
     out, other, failed = [], 0, 0
-    async with _client() as client:
-        for i in range(0, len(dois), 50):
-            batch = dois[i:i + 50]
-            r = await client.get(f"{OPENALEX}/works", params={
+    sem = asyncio.Semaphore(4)  # 50'lik gruplar aynı anda, en çok 4 istek
+
+    async def batch_get(client, batch):
+        async with sem:
+            return batch, await client.get(f"{OPENALEX}/works", params={
                 "filter": "doi:" + "|".join(batch), "per-page": 50, "select": OPENALEX_SELECT, **OPENALEX_PARAMS})
+
+    async with _client() as client:
+        replies = await asyncio.gather(*(batch_get(client, dois[i:i + 50]) for i in range(0, len(dois), 50)),
+                                       return_exceptions=True)
+        for reply in replies:
+            if isinstance(reply, Exception):
+                failed += 50
+                continue
+            batch, r = reply
             if r.status_code != 200:
                 failed += len(batch)
                 continue

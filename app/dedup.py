@@ -123,10 +123,16 @@ async def resolve(records: list[dict], subject: str, llm=None, log=None) -> tupl
     for members in clusters.values():
         members.sort(key=lambda r: (SOURCE_PRIORITY.get(r["source"], 9), -len(r.get("abstract") or "")))
         best = dict(members[0])
+        if best.get("abstract"):
+            best.setdefault("abstract_source", best.get("source", ""))
+            best.setdefault("abstract_url", best.get("url", ""))
         for m in members[1:]:
             for key in ("doi", "venue", "issn", "abstract", "year", "url"):
                 if not best.get(key) and m.get(key):
                     best[key] = m[key]
+                    if key == "abstract":
+                        best["abstract_source"] = m.get("abstract_source") or m.get("source", "")
+                        best["abstract_url"] = m.get("abstract_url") or m.get("url", "")
             if len(m.get("authors") or []) > len(best.get("authors") or []):
                 best["authors"] = m["authors"]
         # En ayrıntılı tarih (gün > ay); yılı birleşik kaydın yılıyla uyuşmalı

@@ -28,6 +28,7 @@ const ICONS = {
   arrow: '<line x1="5" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/>',
   compass: '<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
   search: '<circle cx="11" cy="11" r="7.5"/><line x1="21" y1="21" x2="16.6" y2="16.6"/>',
+  filter: '<path d="M4 5h16l-6 7v6l-4 2v-8z"/>',
   building: '<path d="M3 21h18"/><path d="M5 21V10l7-5 7 5v11"/><path d="M9 21v-6h6v6"/><path d="M9 11h.01M15 11h.01"/>',
   bookmark: '<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>',
   users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
@@ -72,6 +73,7 @@ const S = {
   uni: null,           // YÖK üniversite dizini durumu
   candidates: [],      // YÖK ad aramasında bulunan kişiler
   registry: new Map(), // ekrandaki yayınlar: id → { paper, source }
+  staffRegistry: new Map(), // sıralamadan bağımsız kadro eylemleri
   lists: {},           // dışa aktarılabilir listeler
   listMeta: {},        // liste → { file: dosya adı kökü, person, title } (dışa aktarmada akademisyen adı)
 };
@@ -81,6 +83,7 @@ function reg(paper, source) { const id = `r${++regSeq}`; S.registry.set(id, { pa
 const view = () => $("#view");
 function setView(html, cls = "") {
   S.registry.clear();
+  S.staffRegistry.clear();
   const v = view();
   v.innerHTML = `<div class="enter ${cls}">${html}</div>`;
   hydrateIcons(v);
@@ -197,12 +200,311 @@ async function api(url, opts = {}) {
     const res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(typeof err.detail === "string" ? err.detail : `İstek başarısız (HTTP ${res.status}).`);
+      const error = new Error(typeof err.detail === "string" ? err.detail : `İstek başarısız (HTTP ${res.status}).`);
+      error.status = res.status;
+      throw error;
     }
     return await res.json();
   } finally { busy(-1); }
 }
 const post = (url, body) => api(url, { method: "POST", body: JSON.stringify(body) });
+
+// Canlı WoS doğrulaması kendi katmanında kalır; profil, drawer ve yayın filtrelerini değiştirmez.
+let wosVerification = null;
+function createWosVerification() {
+  const dialog = document.createElement("dialog"), launcher = document.createElement("button");
+  dialog.className = "wos-verification";
+  dialog.setAttribute("aria-labelledby", "wosVerificationTitle");
+  dialog.setAttribute("aria-describedby", "wosVerificationDescription");
+  dialog.innerHTML = `<header class="wos-verification-head"><div><h2 id="wosVerificationTitle">WoS doğrulaması</h2>
+    <p id="wosVerificationDescription">Doğrulamayı tamamlayın; tarama otomatik devam edecek.</p></div>
+    <button class="btn sm ghost" type="button" data-wos-hide autofocus>${icon("x")}Şimdilik gizle</button></header>
+    <div class="wos-verification-meta"><span data-wos-host></span><span data-wos-title></span>
+      <select class="select" data-wos-session aria-label="Bekleyen doğrulama" hidden></select></div>
+    <div class="wos-verification-stage" data-wos-stage data-ready="false">
+      <canvas tabindex="0" aria-label="Canlı WoS doğrulama ekranı" aria-describedby="wosVerificationHelp" hidden>Canlı WoS doğrulama ekranı</canvas>
+      <textarea class="wos-verification-input" tabindex="-1" aria-label="Doğrulama ekranına yazın" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+      <div class="wos-verification-cover"><span data-wos-cover>Bağlanıyor…</span></div>
+    </div>
+    <footer class="wos-verification-footer"><div><span data-wos-status role="status" aria-live="polite">Bağlanıyor…</span>
+      <small id="wosVerificationHelp">Ekrana tıklayın veya sürükleyin. Esc paneli gizler.</small></div>
+      <div class="wos-verification-actions"><button class="btn sm ghost" type="button" data-wos-keyboard disabled>Klavye</button>
+        <button class="btn sm" type="button" data-wos-reconnect hidden>${icon("refresh")}Yeniden bağlan</button>
+        <button class="btn sm" type="button" data-wos-cancel disabled>Taramayı atla</button></div></footer>`;
+  launcher.type = "button"; launcher.className = "btn wos-verification-launcher"; launcher.hidden = true;
+  document.body.append(dialog, launcher);
+  const canvas = $("canvas", dialog), keyboard = $("textarea", dialog), stage = $("[data-wos-stage]", dialog);
+  const status = $("[data-wos-status]", dialog), cover = $("[data-wos-cover]", dialog);
+  const sessions = $("[data-wos-session]", dialog), cancel = $("[data-wos-cancel]", dialog);
+  const reconnect = $("[data-wos-reconnect]", dialog), keyboardButton = $("[data-wos-keyboard]", dialog);
+  const seen = new Set(), finished = new Set();
+  let items = new Map(), selectedId = null, previousFocus = null, socket = null, socketEpoch = 0;
+  let ready = false, hasFrame = false, cancelPending = false, composing = false, touchFocus = false;
+  let pointerId = null, pendingMove = null, moveTimer = null, lastMove = 0, pendingWheel = null, wheelTimer = null;
+  let pollTimer = null, pollRequest = null, reconnectTimer = null, reconnectAttempt = 0, stopped = false;
+  let missingTimer = null, missingId = null, listedIds = new Set(), sessionOptions = "";
+  const setStatus = (message) => { if (status.textContent !== message) status.textContent = message; cover.textContent = message; };
+  const inputReady = () => dialog.open && ready && hasFrame && !cancelPending && socket?.readyState === WebSocket.OPEN;
+  const updateControls = () => {
+    stage.dataset.ready = String(inputReady());
+    canvas.setAttribute("aria-disabled", String(!inputReady()));
+    keyboardButton.disabled = !inputReady(); cancel.disabled = !ready || cancelPending;
+  };
+  const send = (message) => {
+    if (socket?.readyState !== WebSocket.OPEN) return false;
+    try { socket.send(JSON.stringify(message)); return true; } catch { return false; }
+  };
+  const release = () => {
+    clearTimeout(moveTimer); moveTimer = null; pendingMove = null;
+    clearTimeout(wheelTimer); wheelTimer = null; pendingWheel = null;
+    const captured = pointerId; pointerId = null;
+    if (captured != null && canvas.hasPointerCapture(captured)) canvas.releasePointerCapture(captured);
+    if (ready) send({ type: "release" });
+  };
+  const disconnect = () => {
+    clearTimeout(reconnectTimer); reconnectTimer = null;
+    release(); socketEpoch += 1; ready = false; hasFrame = false;
+    const old = socket; socket = null;
+    if (old) { old.onclose = null; old.close(); }
+    keyboard.value = ""; composing = false; updateControls();
+  };
+  const syncList = () => {
+    const list = [...items.values()];
+    launcher.hidden = !list.length || dialog.open;
+    launcher.innerHTML = `${icon("globe")}WoS doğrulaması${list.length > 1 ? ` <span class="count">${list.length}</span>` : ""}`;
+    sessions.hidden = list.length < 2;
+    const value = selectedId;
+    const options = list.map((item, index) => `<option value="${esc(item.id)}">${esc(item.title || item.host || `Doğrulama ${index + 1}`)}</option>`).join("");
+    if (sessionOptions !== options) { sessions.innerHTML = options; sessionOptions = options; }
+    if (value) sessions.value = value;
+  };
+  const hide = () => {
+    if (!dialog.open) return;
+    disconnect(); dialog.close(); syncList();
+    if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    previousFocus = null;
+  };
+  const showNext = () => {
+    if (dialog.open || document.hidden || stopped) return;
+    const next = [...items.values()].find((item) => !seen.has(item.id));
+    if (next) show(next.id);
+  };
+  const finish = (id, result, message) => {
+    if (finished.has(id)) return;
+    if (missingId === id) { clearTimeout(missingTimer); missingTimer = null; missingId = null; }
+    finished.add(id); items.delete(id);
+    if (selectedId === id) { hide(); selectedId = null; }
+    syncList();
+    const text = result === "solved" ? "WoS doğrulaması tamamlandı; tarama devam ediyor."
+      : result === "cancelled" ? "WoS doğrulaması atlandı."
+      : result === "expired" ? "WoS doğrulamasının süresi doldu." : message || "WoS doğrulama oturumu sona erdi.";
+    toast(esc(text));
+    if (result === "solved") document.dispatchEvent(new CustomEvent("wos-verification-solved", { detail: { id } }));
+    showNext();
+  };
+  const connect = () => {
+    if (!dialog.open || !items.has(selectedId) || document.hidden || stopped) return;
+    disconnect();
+    const id = selectedId, epoch = socketEpoch, current = () => epoch === socketEpoch && selectedId === id && dialog.open;
+    setStatus("Canlı ekrana bağlanıyor…"); reconnect.hidden = true;
+    const url = new URL(`/api/wos/verification/${encodeURIComponent(id)}/stream`, location.href);
+    url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    let ws;
+    try { ws = new WebSocket(url); } catch {
+      setStatus("Canlı bağlantı kurulamadı. Yeniden bağlanabilirsiniz."); reconnect.hidden = false; return;
+    }
+    socket = ws; ws.binaryType = "blob";
+    let pendingFrame = null, decoding = false;
+    const drawFrame = async () => {
+      decoding = true;
+      while (pendingFrame && current()) {
+        const frame = pendingFrame; pendingFrame = null;
+        let bitmap = null, objectUrl = null;
+        try {
+          if (typeof createImageBitmap === "function") bitmap = await createImageBitmap(frame);
+          else {
+            objectUrl = URL.createObjectURL(frame);
+            bitmap = await new Promise((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = reject; image.src = objectUrl; });
+          }
+          if (!current()) break;
+          const width = bitmap.width, height = bitmap.height;
+          if (!(width > 0 && height > 0 && width <= 8192 && height <= 8192)) continue;
+          if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+          canvas.getContext("2d").drawImage(bitmap, 0, 0);
+          canvas.hidden = false;
+          if (!hasFrame) { hasFrame = true; if (ready && !cancelPending) setStatus("Canlı bağlantı hazır."); }
+          updateControls();
+        } catch { if (current()) { hasFrame = false; setStatus("Görüntü yenileniyor…"); updateControls(); } }
+        finally { bitmap?.close?.(); if (objectUrl) URL.revokeObjectURL(objectUrl); }
+      }
+      decoding = false;
+    };
+    ws.onmessage = (event) => {
+      if (!current()) return;
+      if (event.data instanceof Blob) { pendingFrame = event.data; if (!decoding) void drawFrame(); return; }
+      let message;
+      try { message = JSON.parse(event.data); } catch { return; }
+      if (message.type === "ready") {
+        ready = true; reconnectAttempt = 0;
+        if (cancelPending) send({ type: "cancel" });
+        setStatus(cancelPending ? "Tarama atlanıyor…" : hasFrame ? "Canlı bağlantı hazır." : "Canlı görüntü yükleniyor…");
+        updateControls();
+      } else if (message.type === "finished") finish(id, message.status, message.message);
+      else if (message.type === "busy") { ready = false; setStatus("Bu doğrulama başka bir pencerede açık. Bağlantı yeniden denenecek."); updateControls(); }
+      else if (message.type === "error") setStatus(message.message || "Canlı bağlantıda bir sorun oluştu.");
+    };
+    ws.onclose = (event) => {
+      if (!current()) return;
+      release(); socket = null; ready = false; updateControls();
+      if (event.code === 4404) { finish(id, "ended"); return; }
+      reconnect.hidden = false;
+      if (event.code === 4403) { setStatus("Bu pencereden canlı bağlantıya izin verilmiyor."); return; }
+      if (event.code === 4400) { setStatus("Girdi bağlantısı kapandı. Yeniden bağlanabilirsiniz."); return; }
+      setStatus(event.code === 4409 ? "Bu doğrulama başka bir pencerede açık. Bağlantı yeniden denenecek." : "Bağlantı kesildi; yeniden bağlanıyor…");
+      const delay = Math.min(10000, 2000 * 2 ** Math.min(reconnectAttempt++, 3));
+      reconnectTimer = setTimeout(() => { if (current()) connect(); }, delay);
+    };
+    ws.onerror = () => { if (current()) setStatus("Canlı bağlantı bekleniyor…"); };
+  };
+  const show = (id) => {
+    const item = items.get(id); if (!item) return;
+    if (missingTimer && missingId !== id) { clearTimeout(missingTimer); missingTimer = null; missingId = null; }
+    disconnect(); selectedId = id; seen.add(id); hasFrame = false; cancelPending = false; reconnectAttempt = 0;
+    canvas.hidden = true;
+    $("[data-wos-host]", dialog).textContent = item.host || "Web of Science";
+    const title = $("[data-wos-title]", dialog); title.textContent = item.title || ""; title.title = item.title || "";
+    if (!dialog.open) { previousFocus = document.activeElement; dialog.showModal(); }
+    syncList(); connect();
+  };
+  const schedulePoll = (delay = 2500) => {
+    clearTimeout(pollTimer);
+    if (!stopped) pollTimer = setTimeout(poll, delay);
+  };
+  const poll = async () => {
+    if (stopped || pollRequest) return;
+    const controller = new AbortController(); pollRequest = controller;
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch("/api/wos/verification", { cache: "no-store", credentials: "same-origin", signal: controller.signal });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (stopped || controller.signal.aborted || !Array.isArray(data.items)) return;
+      const previous = items.get(selectedId);
+      items = new Map(data.items.filter((item) => typeof item.id === "string" && item.status === "waiting" && !finished.has(item.id)).map((item) => [item.id, item]));
+      listedIds = new Set(items.keys());
+      if (dialog.open && !items.has(selectedId)) {
+        // Son liste yanıtı, socket'in "finished" mesajından önce gelebilir.
+        const live = socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState);
+        if (live || (missingTimer && missingId === selectedId)) {
+          if (previous) items.set(selectedId, previous);
+          if (!missingTimer) {
+            const id = selectedId; missingId = id;
+            missingTimer = setTimeout(() => {
+              missingTimer = null; missingId = null;
+              if (!listedIds.has(id)) finish(id, "ended");
+            }, 3500);
+          }
+        } else finish(selectedId, "ended");
+      } else if (missingTimer && listedIds.has(missingId)) {
+        clearTimeout(missingTimer); missingTimer = null; missingId = null;
+      }
+      syncList(); showNext();
+    } catch { /* Bir geçici listeleme hatası mevcut canlı oturumu kapatmaz. */ }
+    finally {
+      clearTimeout(timeout); if (pollRequest === controller) pollRequest = null;
+      schedulePoll();
+    }
+  };
+  const coords = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    return { x: Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width))), y: Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(1, rect.height))) };
+  };
+  const flushMove = () => {
+    clearTimeout(moveTimer); moveTimer = null;
+    if (pendingMove && inputReady()) { send(pendingMove); lastMove = performance.now(); }
+    pendingMove = null;
+  };
+  canvas.addEventListener("pointerdown", (event) => {
+    if (!inputReady() || event.button !== 0 || pointerId != null) return;
+    event.preventDefault(); touchFocus = event.pointerType === "touch";
+    canvas.focus({ preventScroll: true }); touchFocus = false;
+    pointerId = event.pointerId; canvas.setPointerCapture(pointerId);
+    send({ type: "pointer", action: "down", ...coords(event), button: 0 });
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!inputReady() || (pointerId != null && event.pointerId !== pointerId)) return;
+    pendingMove = { type: "pointer", action: "move", ...coords(event), button: 0 };
+    if (!moveTimer) moveTimer = setTimeout(flushMove, Math.max(0, 50 - (performance.now() - lastMove)));
+  });
+  canvas.addEventListener("pointerup", (event) => {
+    if (pointerId !== event.pointerId) return;
+    event.preventDefault(); flushMove();
+    if (inputReady()) send({ type: "pointer", action: "up", ...coords(event), button: 0 });
+    release();
+  });
+  canvas.addEventListener("pointercancel", release);
+  canvas.addEventListener("lostpointercapture", () => { if (pointerId != null) release(); });
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault(); if (!inputReady()) return;
+    const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.clientHeight : 1;
+    const delta = (value) => Math.max(-2000, Math.min(2000, value * factor));
+    pendingWheel = { type: "wheel", ...coords(event),
+      deltaX: Math.max(-2000, Math.min(2000, (pendingWheel?.deltaX || 0) + delta(event.deltaX))),
+      deltaY: Math.max(-2000, Math.min(2000, (pendingWheel?.deltaY || 0) + delta(event.deltaY))) };
+    if (!wheelTimer) wheelTimer = setTimeout(() => {
+      wheelTimer = null; if (pendingWheel && inputReady()) send(pendingWheel); pendingWheel = null;
+    }, 50);
+  }, { passive: false });
+  canvas.addEventListener("focus", () => { if (!touchFocus && inputReady()) keyboard.focus({ preventScroll: true }); });
+  const sendText = (text) => {
+    if (!inputReady()) return;
+    const clean = Array.from(String(text || "").replace(/[\u0000-\u001f\u007f-\u009f]/g, ""));
+    const chars = clean.slice(0, 2048);
+    for (let i = 0; i < chars.length; i += 256) send({ type: "text", text: chars.slice(i, i + 256).join("") });
+    if (clean.length > chars.length) setStatus("Metnin ilk 2.048 karakteri gönderildi.");
+  };
+  const flushText = () => { if (!composing && keyboard.value) { sendText(keyboard.value); keyboard.value = ""; } };
+  keyboard.addEventListener("compositionstart", () => { composing = true; });
+  keyboard.addEventListener("compositionend", () => { composing = false; queueMicrotask(flushText); });
+  keyboard.addEventListener("input", flushText);
+  keyboard.addEventListener("beforeinput", (event) => {
+    if (composing || !inputReady()) return;
+    const key = { deleteContentBackward: "Backspace", deleteContentForward: "Delete", insertLineBreak: "Enter", insertParagraph: "Enter" }[event.inputType];
+    if (key) { event.preventDefault(); send({ type: "key", key }); }
+  });
+  const remoteKeys = new Set(["Tab", "Enter", "Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown", " "]);
+  for (const input of [canvas, keyboard]) {
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" || event.isComposing || composing || !inputReady()) return;
+      if (event.key === "Tab" && event.shiftKey) { event.preventDefault(); $("[data-wos-hide]", dialog).focus(); return; }
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (remoteKeys.has(event.key)) { event.preventDefault(); event.stopPropagation(); send({ type: "key", key: event.key === " " ? "Space" : event.key }); }
+      else if (input === canvas && Array.from(event.key).length === 1) { event.preventDefault(); sendText(event.key); }
+    });
+    input.addEventListener("paste", (event) => { if (!inputReady()) return; event.preventDefault(); sendText(event.clipboardData?.getData("text/plain")); keyboard.value = ""; });
+    input.addEventListener("blur", (event) => { if (event.relatedTarget !== canvas && event.relatedTarget !== keyboard) release(); });
+  }
+  $("[data-wos-hide]", dialog).onclick = hide;
+  dialog.addEventListener("cancel", (event) => { event.preventDefault(); hide(); });
+  sessions.onchange = () => show(sessions.value);
+  launcher.onclick = () => show(items.has(selectedId) ? selectedId : items.keys().next().value);
+  reconnect.onclick = () => { reconnectAttempt = 0; connect(); };
+  keyboardButton.onclick = () => keyboard.focus({ preventScroll: true });
+  cancel.onclick = () => { if (!ready || cancelPending) return; release(); cancelPending = send({ type: "cancel" }); setStatus("Tarama atlanıyor…"); updateControls(); };
+  window.addEventListener("blur", release);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) disconnect();
+    else { if (dialog.open) connect(); schedulePoll(0); }
+  });
+  window.addEventListener("pagehide", () => {
+    stopped = true; clearTimeout(pollTimer); clearTimeout(missingTimer); missingTimer = null; missingId = null;
+    pollRequest?.abort(); disconnect();
+  });
+  window.addEventListener("pageshow", () => { if (stopped) { stopped = false; if (dialog.open) connect(); schedulePoll(0); } });
+  schedulePoll(0);
+  return { hide, isOpen: () => dialog.open };
+}
 
 const skeleton = (n = 5) => Array.from({ length: n }, () => `<div class="skel-row"><div class="skel"></div><div class="skel-lines"><div class="skel"></div><div class="skel"></div></div></div>`).join("");
 const emptyState = (ic, title, text, extra = "") => `<div class="empty"><div class="em-icon">${icon(ic)}</div><h3>${esc(title)}</h3><p>${text}</p>${extra}</div>`;
@@ -251,17 +553,318 @@ async function toggleStar(btn) {
     }
   } catch (e) { toast(esc(e.message)); }
   await loadFav();
+  $$("[data-star]").forEach((star) => {
+    const current = S.registry.get(star.dataset.star);
+    if (current) star.classList.toggle("on", !!favPaper(current.paper));
+  });
 }
 
 // ------------------------------------------------------------------- yayın kartı, dışa aktarma
 const TYPE_TR = { article: "Makale", "journal-article": "Makale", proceedings: "Bildiri", "proceedings-article": "Bildiri", book: "Kitap",
-  "book-chapter": "Kitap bölümü", dissertation: "Tez", preprint: "Ön baskı", review: "Derleme", dataset: "Veri seti" };
+  "book-chapter": "Kitap bölümü", dissertation: "Tez", preprint: "Ön baskı", review: "Derleme", dataset: "Veri seti", software: "Yazılım",
+  "conference-paper": "Bildiri", "conference-abstract": "Bildiri özeti", "meeting-abstract": "Bildiri özeti", "meeting abstract": "Bildiri özeti",
+  "posted-content": "Ön baskı", report: "Rapor", editorial: "Editöryal", letter: "Mektup", correction: "Düzeltme", erratum: "Düzeltme",
+  retraction: "Geri çekme bildirimi", "peer-review": "Hakem değerlendirmesi", "reference-entry": "Başvuru maddesi", standard: "Standart", other: "Diğer" };
 const SRC_TR = { openalex: "OpenAlex", crossref: "Crossref", orcid: "ORCID", yok: "YÖK", scholar: "Scholar", semantic_scholar: "Semantic Scholar",
-  trdizin: "TR Dizin", openaire: "OpenAIRE", tez: "Tez Merkezi" };
+  trdizin: "TR Dizin", openaire: "OpenAIRE", tez: "Tez Merkezi", wos: "WoS" };
+function sourceBadges(p) {
+  const sources = p.sources || (p.source ? [p.source] : []);
+  return sources.map((s) => {
+    if (s === "wos") {
+      const url = safeUrl(p.wos?.url);
+      const indexes = (p.wos?.indexes || []).filter(Boolean).join(" · ");
+      const year = p.wos?.year && p.year && p.wos.year !== p.year ? ` · WoS yayın yılı: ${p.wos.year}; listedeki yıl: ${p.year}` : "";
+      const title = `Web of Science${indexes ? ` · ${indexes}` : ""}${year}`;
+      if (url) return `<a class="badge wos" href="${esc(url)}" target="_blank" rel="noopener" title="${esc(title)}">WoS</a>`;
+      return `<span class="badge wos" title="${esc(title)}">WoS</span>`;
+    }
+    return `<span class="badge ${esc(s)}">${esc(SRC_TR[s] || s)}</span>`;
+  }).join("");
+}
+function publicationKind(p) {
+  return p.publication_kind || TYPE_TR[String(p.type || "").toLowerCase().replace(/_/g, "-")] || p.type || "Tür belirtilmemiş";
+}
+function publicationStatusLabel(p) {
+  return p.publication_status?.label || "Süreç bilgisi yok";
+}
+function publicationStatusHtml(p) {
+  const status = p.publication_status || {};
+  const tip = [status.source && `Kaynak: ${SRC_TR[status.source] || status.source}`,
+    status.evidence && `Kayıt açıklamasındaki beyan: ${status.evidence}`].filter(Boolean).join(" · ");
+  const url = safeUrl(status.url), label = esc(publicationStatusLabel(p));
+  const attrs = `class="publication-stage"${tip ? ` title="${esc(tip)}"` : ""}`;
+  return `<div class="publication-status"><span class="publication-kind">${esc(publicationKind(p))}</span>${url
+    ? `<a ${attrs} href="${esc(url)}" target="_blank" rel="noopener">${label}</a>`
+    : `<span ${attrs}>${label}</span>`}</div>`;
+}
+const STAGE_TR = { unknown: "Süreç bilgisi yok", in_preparation: "Gönderime hazırlanıyor", submitted: "Gönderildi",
+  under_review: "Değerlendirmede", accepted: "Kabul edildi", in_press: "Baskıda", published: "Yayımlandı" };
+const sourceKey = (s) => {
+  const key = fold(s).replace(/ /g, "_");
+  return { tr_dizin: "trdizin", web_of_science: "wos", google_scholar: "scholar", open_alex: "openalex", open_aire: "openaire" }[key] || key;
+};
+const publicationSources = (p) => [...new Set((p.sources || (p.source ? [p.source] : [])).map(sourceKey).filter(Boolean))];
+function filterPublications(papers, filters = {}) {
+  const q = fold(filters.query), from = Number(filters.fromYear) || null, to = Number(filters.toYear) || null;
+  const list = papers.filter((p) => {
+    const year = Number(p.year) || null;
+    return (!q || fold([p.title, p.venue, ...(p.authors || []), ...(p.unit_authors || []), ...(p.variants || []).map((v) => v.title)].join(" ")).includes(q))
+      && (!filters.source || publicationSources(p).includes(sourceKey(filters.source)))
+      && (!from || (year != null && year >= from)) && (!to || (year != null && year <= to))
+      && (!filters.stage || (p.publication_status?.code || "unknown") === filters.stage)
+      && (!filters.verification || (filters.verification === "multiple" ? publicationSources(p).length > 1 : publicationSources(p).length <= 1))
+      && (!filters.quartile || (filters.quartile === "none" ? !p.quartile : p.quartile?.q === filters.quartile));
+  });
+  const key = filters.sort || "year", direction = filters.direction || (key === "title" ? "asc" : "desc");
+  const value = (p) => ({
+    title: p.title || "", stage: `${publicationKind(p)} ${publicationStatusLabel(p)}`,
+    source: publicationSources(p).map((s) => SRC_TR[s] || s).sort().join(" "),
+    verification: publicationSources(p).length, year: p.year == null ? null : Number(p.year),
+    cites: p.citations == null ? null : Number(p.citations), id: Number(String(p.id || "").replace(/^P/, "")) || null,
+  })[key];
+  if (key !== "rel") list.sort((a, b) => {
+    const x = value(a), y = value(b);
+    if (x == null && y != null) return 1;
+    if (y == null && x != null) return -1;
+    const result = typeof x === "string" ? x.localeCompare(y || "", "tr") : (x || 0) - (y || 0);
+    return direction === "asc" ? result : -result;
+  });
+  return list;
+}
+function publicationHeader(prefix, key, label, filter = "", cls = "") {
+  return `<th scope="col" data-dt-column="${key}" class="${cls}" aria-sort="none"><div class="dt-heading">
+    <button class="dt-sort" type="button" data-dt-sort="${key}" data-label="${esc(label)}" title="${esc(label)} sütununu sırala">${esc(label)}<span class="dt-sort-indicator" aria-hidden="true">↕</span></button>
+    ${filter ? `<button class="dt-filter-toggle" type="button" data-dt-filter="${filter}" popovertarget="${prefix}${filter}Popover" aria-label="${esc(label)} filtresi" title="${esc(label)} filtresi" aria-expanded="false">${icon("filter")}</button>` : ""}
+    </div></th>`;
+}
+function publicationFilterPopovers(prefix) {
+  const select = (suffix, label) => `<label class="dt-field">${label}<select class="dt-input" id="${prefix}${suffix}"><option value="">Tümü</option></select></label>`;
+  const panels = [
+    ["Title", "Başlık ve dergi", `<label class="dt-field">Başlık, yazar veya yayın yeri<input class="dt-input" type="search" id="${prefix}Filter" placeholder="Ara…" autocomplete="off"></label>${select("Quart", "Dergi çeyreği")}`],
+    ["Stage", "Yayın durumu", select("Stage", "Aşama")],
+    ["Year", "Yıl aralığı", `<div class="dt-year-range"><label class="dt-field">İlk yıl<input class="dt-input" id="${prefix}FromYear" type="number" min="1" max="9999" placeholder="Örn. 2020"></label><label class="dt-field">Son yıl<input class="dt-input" id="${prefix}ToYear" type="number" min="1" max="9999" placeholder="Örn. 2026"></label></div>`],
+    ["Source", "Yayın kaynağı", select("Source", "Kaynak")],
+    ["Verification", "Kaynak doğrulaması", `<label class="dt-field">Kaynak sayısı<select class="dt-input" id="${prefix}Verification"><option value="">Tümü</option><option value="multiple">Birden fazla kaynak</option><option value="single">Tek kaynak</option></select></label>`],
+  ];
+  return panels.map(([key, label, fields]) => `<div id="${prefix}${key}Popover" class="dt-filter-popover" popover="auto" role="dialog" aria-labelledby="${prefix}${key}Label">
+    <strong id="${prefix}${key}Label">${label}</strong>${fields}<div class="dt-popover-actions"><button class="dt-reset" type="button" data-dt-reset="${key}">Temizle</button><button class="dt-done" type="button" popovertarget="${prefix}${key}Popover" popovertargetaction="hide">Tamam</button></div></div>`).join("");
+}
+function fillFilterOptions(select, options, allLabel) {
+  if (!select) return;
+  const selected = select.value;
+  if (selected && !options.some(([value]) => value === selected)) options.push([selected, select.selectedOptions?.[0]?.textContent || STAGE_TR[selected] || SRC_TR[selected] || selected]);
+  select.innerHTML = `<option value="">${esc(allLabel)}</option>${options.map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join("")}`;
+  select.value = selected;
+}
+function syncPublicationFilters(prefix, papers) {
+  const sources = [...new Set(papers.flatMap(publicationSources))].sort();
+  fillFilterOptions($(`#${prefix}Source`), sources.map((s) => [s, SRC_TR[s] || s]), "Tüm kaynaklar");
+  const stages = [...new Set(papers.map((p) => p.publication_status?.code || "unknown"))];
+  fillFilterOptions($(`#${prefix}Stage`), stages.map((s) => [s, STAGE_TR[s] || s]), "Tüm aşamalar");
+  const counts = publicationQuartiles(papers), quartile = $(`#${prefix}Quart`);
+  if (quartile) {
+    fillFilterOptions(quartile, ["Q1", "Q2", "Q3", "Q4"].filter((q) => counts[q]).map((q) => [q, `${counts.src} ${q} (${counts[q]})`]).concat([["none", `Çeyreği yok (${papers.length - counts.total})`]]), "Tüm çeyrekler");
+    quartile.closest(".dt-field").hidden = !counts.total && !quartile.value;
+  }
+}
+function readPublicationFilters(prefix) {
+  const value = (suffix) => $(`#${prefix}${suffix}`)?.value || "";
+  return { query: value("Filter"), source: value("Source"), fromYear: value("FromYear"), toYear: value("ToYear"), stage: value("Stage"), quartile: value("Quart"), verification: value("Verification") };
+}
+function publicationTableHtml(prefix, listKey, rowId = `${prefix}Rows`) {
+  return `<div class="card publication-datatable"><div class="tbl-wrap"><table class="tbl publication-table" aria-label="Yayınlar"><thead><tr>
+    <th scope="col">#</th>${publicationHeader(prefix, "title", "Başlık", "Title")}${publicationHeader(prefix, "stage", "Durum", "Stage", "pub-status-cell")}
+    ${publicationHeader(prefix, "year", "Yıl", "Year")}${publicationHeader(prefix, "source", "Kaynak", "Source")}${publicationHeader(prefix, "verification", "Doğrulama", "Verification")}
+    ${publicationHeader(prefix, "cites", "Atıf")}<th scope="col" aria-label="Favori"></th></tr></thead><tbody id="${rowId}"></tbody></table></div>
+    <div class="dt-footer"><span id="${prefix}Count" class="dt-count" role="status" aria-live="polite"></span><button class="dt-reset" id="${prefix}Clear" type="button" hidden>Filtreleri temizle</button>
+      <div class="dt-pagination"><label>Sayfada <select class="dt-page-size" id="${prefix}PageSize" aria-label="Sayfa başına yayın"><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="all">Tümü</option></select></label>
+      <button class="dt-page-btn" type="button" id="${prefix}Prev" aria-label="Önceki sayfa">‹</button><span id="${prefix}Page" class="dt-page-number"></span><button class="dt-page-btn" type="button" id="${prefix}Next" aria-label="Sonraki sayfa">›</button></div>
+      <button class="dt-export" data-export="${listKey}" type="button" title="Filtreye uyan tüm yayınları dışa aktar">${icon("download")}Dışa aktar</button></div>
+    ${publicationFilterPopovers(prefix)}</div>`;
+}
+function publicationRows(list, sourceFor = () => ({}), prefix = "pub", offset = 0) {
+  return list.map((p, i) => {
+    const id = reg(p, sourceFor(p)), sources = publicationSources(p);
+    return `<tr id="${esc(prefix)}-${esc(p.id || i + offset + 1)}"><td class="faint">${esc(/^P\d+$/.test(p.id || "") ? p.id : i + offset + 1)}</td>
+      <td><div class="t-title" data-open="${id}">${esc(p.title)}</div>
+        ${p.venue || p.quartile || p.jcr ? `<div class="variants">${esc(p.venue)}${p.quartile ? ` <span class="q-badge ${esc(String(p.quartile.q || "").toLowerCase())}" title="${esc(quartileAreas(p))}. ${esc(p.quartile.source)} Scopus tabanlıdır; WoS/JCR çeyreği değildir.">${esc(quartileLabel(p))}</span>` : ""} ${jcrBadge(p)}</div>` : ""}
+        ${p.unit_authors?.length ? `<div class="variants">Birimdeki yazar: ${esc(p.unit_authors.join(", "))}</div>` : ""}
+        ${p.variants?.length > 1 ? `<div class="variants">↳ ${p.variants.slice(1).map((v) => `${esc(v.title)} (${esc(v.lang)})`).join(" · ")}</div>` : ""}</td>
+      <td class="pub-status-cell">${publicationStatusHtml(p)}</td><td>${esc(p.year || "—")}</td>
+      <td><div class="chips">${sourceBadges(p)}</div></td>
+      <td>${p.verified ? `<span class="vb ok">✓ ${sources.length > 1 ? sources.length + " kaynak" : (p.runs_seen || 1) + ". kez"}</span>` : `<span class="vb">${sources.length > 1 ? sources.length + " kaynak" : "tek kaynak"}</span>`}${p.is_new ? `<span class="newb">YENİ</span>` : ""}</td>
+      <td>${fmtNum(p.citations)}</td><td><button class="star ${favPaper(p) ? "on" : ""}" data-star="${id}" type="button" title="Favorilere ekle">${icon("star")}</button></td></tr>`;
+  }).join("") || `<tr><td colspan="8">${emptyState("file", "Yayın yok", "Filtreyi değiştirin.")}</td></tr>`;
+}
+function mountPublicationTable(host, prefix, listKey, papers, defaultSort = "year", options = {}) {
+  let all = papers, page = 0, sort = defaultSort, direction = defaultSort === "title" ? "asc" : "desc";
+  host.innerHTML = publicationTableHtml(prefix, listKey, options.rowId);
+  const tbody = $(`#${options.rowId || `${prefix}Rows`}`, host), wrap = $(".tbl-wrap", host);
+  const sourceFor = options.sourceFor || ((p) => {
+    const ref = p.profile_refs?.find((x) => x.job_id && x.pid);
+    return ref ? { jid: ref.job_id, pid: ref.pid, person: ref.name } : (p.job_id && p.pid ? { jid: p.job_id, pid: p.pid, person: p.person } : {});
+  });
+  const groups = { Title: ["Filter", "Quart"], Stage: ["Stage"], Year: ["FromYear", "ToYear"], Source: ["Source"], Verification: ["Verification"] };
+  const fields = Object.values(groups).flat();
+  const draw = () => {
+    const filters = readPublicationFilters(prefix), list = filterPublications(all, { ...filters, sort, direction });
+    S.lists[listKey] = list;
+    const size = Number($(`#${prefix}PageSize`, host).value) || Math.max(list.length, 1), pages = Math.max(1, Math.ceil(list.length / size));
+    page = Math.min(page, pages - 1);
+    const offset = page * size;
+    $$('[data-open]', tbody).forEach((row) => S.registry.delete(row.dataset.open));
+    tbody.innerHTML = publicationRows(list.slice(offset, offset + size), sourceFor, prefix, offset);
+    $(`#${prefix}Count`, host).textContent = list.length ? `${fmtNum(offset + 1)}–${fmtNum(Math.min(offset + size, list.length))} / ${fmtNum(list.length)} yayın${list.length !== all.length ? ` · toplam ${fmtNum(all.length)}` : ""}` : `0 / ${fmtNum(all.length)} yayın`;
+    $(`#${prefix}Page`, host).textContent = `${page + 1} / ${pages}`;
+    $(`#${prefix}Prev`, host).disabled = page === 0;
+    $(`#${prefix}Next`, host).disabled = page >= pages - 1;
+    $(`#${prefix}Clear`, host).hidden = !Object.values(filters).some(Boolean);
+    $$("[data-dt-sort]", host).forEach((button) => {
+      const selected = button.dataset.dtSort === sort;
+      button.closest("th").setAttribute("aria-sort", selected ? (direction === "asc" ? "ascending" : "descending") : "none");
+      $(".dt-sort-indicator", button).textContent = selected ? (direction === "asc" ? "↑" : "↓") : "↕";
+      const nextDirection = selected ? (direction === "asc" ? "desc" : "asc") : (["year", "cites", "verification"].includes(button.dataset.dtSort) ? "desc" : "asc");
+      button.title = `${button.dataset.label}: ${nextDirection === "asc" ? "artan" : "azalan"} sırala`;
+      button.setAttribute("aria-label", button.title);
+    });
+    $$("[data-dt-filter]", host).forEach((button) => {
+      const active = groups[button.dataset.dtFilter].some((suffix) => $(`#${prefix}${suffix}`, host).value);
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-label", `${button.closest("th").querySelector(".dt-sort").dataset.label} filtresi${active ? " · etkin" : ""}`);
+    });
+    hydrateIcons(tbody);
+  };
+  const update = (next) => {
+    const scroll = host.closest(".drawer-body") || view(), top = scroll.scrollTop, left = wrap.scrollLeft;
+    all = next; syncPublicationFilters(prefix, all); draw(); scroll.scrollTop = top; wrap.scrollLeft = left;
+  };
+  const reset = (suffixes) => { suffixes.forEach((suffix) => { $(`#${prefix}${suffix}`, host).value = ""; }); page = 0; draw(); };
+  for (const suffix of fields) {
+    const input = $(`#${prefix}${suffix}`, host);
+    input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => { page = 0; draw(); });
+  }
+  $$("[data-dt-sort]", host).forEach((button) => {
+    button.onclick = () => {
+      const key = button.dataset.dtSort;
+      direction = sort === key ? (direction === "asc" ? "desc" : "asc") : (["year", "cites", "verification"].includes(key) ? "desc" : "asc");
+      sort = key; page = 0; draw();
+    };
+  });
+  $$("[data-dt-reset]", host).forEach((button) => { button.onclick = () => reset(groups[button.dataset.dtReset]); });
+  $(`#${prefix}Clear`, host).onclick = () => reset(fields);
+  $(`#${prefix}PageSize`, host).onchange = () => { page = 0; draw(); };
+  const move = (step) => { page += step; draw(); host.scrollIntoView({ block: "start", behavior: "instant" }); };
+  $(`#${prefix}Prev`, host).onclick = () => move(-1);
+  $(`#${prefix}Next`, host).onclick = () => move(1);
+  $$("[data-dt-filter]", host).forEach((button) => {
+    const popover = $(`#${button.getAttribute("popovertarget")}`, host);
+    const position = () => {
+      const rect = button.getBoundingClientRect(), width = popover.offsetWidth, height = popover.offsetHeight;
+      popover.style.left = `${Math.max(8, Math.min(rect.right - width, innerWidth - width - 8))}px`;
+      popover.style.top = `${Math.max(8, rect.bottom + height + 8 < innerHeight ? rect.bottom + 6 : rect.top - height - 6)}px`;
+    };
+    popover.addEventListener("toggle", (event) => {
+      button.setAttribute("aria-expanded", event.newState === "open" ? "true" : "false");
+      if (event.newState === "open") { position(); $("input, select", popover)?.focus({ preventScroll: true }); }
+    });
+    popover.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") { event.stopPropagation(); event.preventDefault(); popover.hidePopover(); button.focus({ preventScroll: true }); }
+      if (event.key === "Enter" && event.target.tagName === "INPUT") { event.preventDefault(); popover.hidePopover(); button.focus({ preventScroll: true }); }
+    });
+  });
+  wrap.addEventListener("scroll", () => { $$(".dt-filter-popover:popover-open", host).forEach((p) => p.hidePopover()); }, { passive: true });
+  syncPublicationFilters(prefix, all); draw(); hydrateIcons(host);
+  const reveal = (id) => {
+    let list = filterPublications(all, { ...readPublicationFilters(prefix), sort, direction });
+    if (!list.some((p) => p.id === id) && all.some((p) => p.id === id)) {
+      reset(fields); list = filterPublications(all, { sort, direction });
+    }
+    const index = list.findIndex((p) => p.id === id);
+    if (index < 0) return;
+    const size = Number($(`#${prefix}PageSize`, host).value) || Math.max(list.length, 1);
+    page = Math.floor(index / size); draw();
+  };
+  host.publicationTable = { update, draw, reveal };
+  return host.publicationTable;
+}
+async function pollSnapshots(load, active, apply, running, next) {
+  let snapshot = await load();
+  while (active()) {
+    apply(snapshot);
+    if (!running(snapshot)) return;
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    if (!active()) return;
+    snapshot = await next(snapshot);
+  }
+}
+const staffSources = (p) => [...new Set((p.sources || []).map(sourceKey).filter(Boolean))];
+const staffMetric = (p, key) => p[key] == null || p[key] === "" || !Number.isFinite(Number(p[key])) ? null : Number(p[key]);
+function filterStaff(people, filters = {}) {
+  const q = fold(filters.query), key = filters.sort === "citations" ? "citations" : "article_count";
+  return people.map((person, index) => ({ person, index })).filter(({ person: p }) =>
+    (!q || fold(p.name).includes(q)) && (!filters.source || (filters.source === "unknown" ? !staffSources(p).length : staffSources(p).includes(sourceKey(filters.source)))))
+    .sort((a, b) => {
+      if (filters.sort !== "name") {
+        const x = staffMetric(a.person, key), y = staffMetric(b.person, key);
+        if (x == null && y != null) return 1;
+        if (y == null && x != null) return -1;
+        if (x != null && y != null && x !== y) return y - x;
+      }
+      return (a.person.name || "").localeCompare(b.person.name || "", "tr") || a.index - b.index;
+    });
+}
+function mountStaffList(host, prefix, people, options = {}) {
+  let all = people, ids = [];
+  const filters = options.filters || {};
+  host.innerHTML = `<div class="staff-filters"><div class="input slim">${icon("search")}<input id="${prefix}StaffQuery" placeholder="Akademisyen adı" aria-label="Kadroda isim ara" value="${esc(filters.query || "")}"></div>
+    <select class="select" id="${prefix}StaffSource" aria-label="Kadro yayın kaynağı"><option value="">Tüm kaynaklar</option></select>
+    <select class="select" id="${prefix}StaffSort" aria-label="Kadro sıralaması"><option value="article_count">Makale sayısı</option><option value="citations">Atıf sayısı</option><option value="name">İsim</option></select></div>
+    <p class="faint staff-count" id="${prefix}StaffCount"></p><div id="${prefix}StaffRows"></div>`;
+  const input = $(`#${prefix}StaffQuery`), source = $(`#${prefix}StaffSource`), sort = $(`#${prefix}StaffSort`), body = $(`#${prefix}StaffRows`);
+  sort.value = filters.sort || "article_count";
+  const syncSources = () => {
+    const values = [...new Set(all.flatMap(staffSources))].sort().map((s) => [s, SRC_TR[s] || s]);
+    if (all.some((p) => !staffSources(p).length)) values.push(["unknown", "Kaynak bilgisi yok"]);
+    fillFilterOptions(source, values, "Tüm kaynaklar");
+  };
+  syncSources(); source.value = filters.source || "";
+  const draw = () => {
+    Object.assign(filters, { query: input.value, source: source.value, sort: sort.value });
+    const list = filterStaff(all, filters);
+    ids.forEach((id) => S.staffRegistry.delete(id)); ids = [];
+    body.innerHTML = list.map(({ person: p }, i) => {
+      const id = `staff-${++regSeq}`; ids.push(id);
+      S.staffRegistry.set(id, { person: p, mode: options.mode, page: options.page, institution: options.institution });
+      const metrics = [["article_count", "makale"], ["citations", "atıf"]].map(([key, label]) => {
+        const value = staffMetric(p, key); return value == null ? `${label === "makale" ? "Makale" : "Atıf"} sayısı bilinmiyor` : `${fmtNum(value)} ${label}`;
+      }).join(" · ");
+      const state = { pending: p.status ? "Sırada" : "Profil henüz toplanmadı", running: "Toplanıyor", done: "Tamamlandı", partial: "Kısmi sonuç", error: "Alınamadı" }[p.status || p.state];
+      return `<div class="person staff-person" style="--i:${Math.min(i, 24)}">${avatar(p.name, p.photo)}
+        <div class="p-main"><b>${esc(p.name)}</b><span>${esc([p.title, p.department].filter(Boolean).join(" · "))}</span>
+          <span class="staff-metrics">${esc(metrics)}</span>${staffSources(p).length ? `<div class="chips">${sourceBadges({ sources: staffSources(p) })}</div>` : ""}${state ? `<span class="faint">${esc(state)}</span>` : ""}</div>
+        <div class="p-act">${p.email ? `<a class="icon-btn" href="mailto:${esc(p.email)}" title="${esc(p.email)}">${icon("mail")}</a>` : ""}
+          ${safeUrl(p.site_url || p.url) ? `<a class="icon-btn" href="${esc(safeUrl(p.site_url || p.url))}" target="_blank" rel="noopener" title="Kişinin kaynak sayfası">${icon("external")}</a>` : ""}
+          <button class="btn sm ${p.chat_id ? "" : "primary"}" data-staff-open="${id}" type="button">${p.chat_id ? "Aç" : "Profil"}</button></div></div>`;
+    }).join("") || `<div class="col-empty">Filtreye uygun akademisyen yok.</div>`;
+    $(`#${prefix}StaffCount`).textContent = `${fmtNum(list.length)} / ${fmtNum(all.length)} akademisyen`;
+    if (options.countElement) options.countElement.textContent = all.length;
+    hydrateIcons(body);
+  };
+  input.oninput = draw; source.onchange = draw; sort.onchange = draw; draw(); hydrateIcons(host);
+  return { update(next) { const top = host.scrollTop; all = next; syncSources(); draw(); host.scrollTop = top; }, draw };
+}
+function openStaffProfile(id) {
+  const entry = S.staffRegistry.get(id); if (!entry) return;
+  const p = entry.person;
+  if (p.chat_id) { closeDrawer(); location.hash = `#/profil/${p.chat_id}`; return; }
+  closeDrawer();
+  if (entry.mode === "yok" || /akademik\.yok\.gov\.tr/.test(safeUrl(p.url))) {
+    startFromYok({ ...p, university: p.university || entry.institution || "" });
+  } else startJob(p.site_url || p.url || entry.page, p.name);
+}
 function paperCard(p, source, i = 0) {
   const id = reg(p, source);
   const authors = (p.authors || []).slice(0, 6).join(", ") + ((p.authors || []).length > 6 ? " vd." : "");
-  const srcs = p.sources || (p.source ? [p.source] : []);
   return `<article class="paper" style="--i:${Math.min(i, 20)}">
     <div class="p-body">
       <div class="p-title" data-open="${id}">${esc(p.title)}</div>
@@ -269,8 +872,8 @@ function paperCard(p, source, i = 0) {
       ${p.unit_authors?.length ? `<div class="p-meta">Birimdeki yazar: <b>${esc(p.unit_authors.join(", "))}</b></div>` : ""}
       ${p.person ? `<div class="p-meta">Akademisyen: <b>${esc(p.person)}</b></div>` : ""}
       ${p.abstract ? `<div class="p-abs">${esc(p.abstract)}</div>` : ""}
-      <div class="p-tags">${p.type ? `<span class="chip">${esc(TYPE_TR[p.type] || p.type)}</span>` : ""}
-        ${srcs.map((s) => `<span class="badge ${esc(s)}">${esc(SRC_TR[s] || s)}</span>`).join("")}
+      <div class="p-tags">${p.publication_kind || p.type ? `<span class="chip">${esc(publicationKind(p))}</span>` : ""}
+        ${sourceBadges(p)}
         ${p.doi ? `<a class="chip" href="https://doi.org/${esc(normDoi(p.doi))}" target="_blank" rel="noopener">DOI ${icon("external")}</a>` : ""}</div>
     </div>
     <div class="p-side">
@@ -292,6 +895,164 @@ function quartileLabel(p) {
   const range = qs.length > 1 ? `${qs[0]}–${qs.at(-1)}` : (qs[0] || k.q);
   return `${k.source} ${k.year} ${range}`;
 }
+function jcrBadge(p) {
+  const j = p.jcr;
+  if (!j?.categories?.length || !safeUrl(j.url)) return "";
+  const qs = [...new Set(j.categories.map((c) => c.q))].sort();
+  const range = qs.length > 1 ? `${qs[0]}–${qs.at(-1)}` : qs[0];
+  const year = j.year ? String(j.year) : "yıl belirtilmemiş";
+  const checked = j.checked_at ? new Date(j.checked_at).toLocaleDateString("tr-TR") : "";
+  const tip = `${j.categories.map((c) => `${c.name}: ${c.q} ${c.edition || ""}`).join("; ")}. JCR yılı: ${year}. WoS'tan kontrol: ${checked}. Yayın yılının çeyreği olduğu varsayılmaz.`;
+  return `<a class="q-badge jcr" href="${esc(safeUrl(j.url))}" target="_blank" rel="noopener" title="${esc(tip)}">JCR${j.year ? ` ${esc(j.year)}` : ""} ${esc(range)}</a>`;
+}
+
+let wosProfileWatch = null;
+const wosFinishNotices = new Set();
+async function loadWos(r, drawPubs) {
+  const tbody = $("#pubs");
+  if (!tbody) return;
+  if (wosProfileWatch?.tbody === tbody && wosProfileWatch.active()) { wosProfileWatch.wake(); return; }
+  wosProfileWatch?.stop();
+  let disposed = false, removed = false, request = null, wakeDelay = null, wakeRequested = false, publicationRevision;
+  const active = () => !disposed && tbody.isConnected && S.result === r;
+  const delay = (ms) => new Promise((resolve) => {
+    const finish = () => { clearTimeout(timer); if (wakeDelay === finish) wakeDelay = null; resolve(); };
+    const timer = setTimeout(finish, ms); wakeDelay = finish;
+    if (!active() || wakeRequested) finish();
+  });
+  const endpoint = `/api/jobs/${encodeURIComponent(r.job_id)}/wos`;
+  const read = async (method) => {
+    const controller = new AbortController(); request = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try { return await api(endpoint, { method, ...(method === "POST" ? { body: "{}" } : {}), signal: controller.signal }); }
+    finally { clearTimeout(timeout); if (request === controller) request = null; }
+  };
+  const notifyFailure = (data) => {
+    const report = data.publications || {}, reason = data.reason || report.reason || "";
+    const status = ["blocked", "error"].includes(data.status) ? data.status : report.status;
+    if (!["blocked", "error"].includes(status)) return;
+    const key = `${r.job_id}:${status}:${data.finished_at ?? data.revision ?? report.at ?? ""}:${reason}`;
+    if (wosFinishNotices.has(key)) return;
+    wosFinishNotices.add(key);
+    const reasons = {
+      access_unavailable: "WoS erişimi sağlanamadı.", search_unavailable: "WoS araması tamamlanamadı.",
+      human_verification: "WoS insan doğrulaması istiyor.", manual_expired: "WoS doğrulamasının süresi doldu.",
+      manual_cancelled: "WoS doğrulaması atlandı.", time_budget: "WoS taraması ayrılan sürede tamamlanamadı.",
+      queue_timeout: "WoS tarama sırası zaman aşımına uğradı.",
+    };
+    toast(esc(data.message || report.message || reasons[reason] || "WoS kontrolü tamamlanamadı; alınan yayınlar korunuyor."), 7000);
+  };
+  const apply = (data) => {
+    let changed = false;
+    const update = data.publication_update;
+    if (Array.isArray(update?.publications) && (data.revision == null || data.revision !== publicationRevision)) {
+      for (const key of ["publications", "unique_count", "raw_count", "by_source", "paper_verification", "languages", "summary"]) {
+        if (Object.hasOwn(update, key)) r[key] = update[key];
+      }
+      publicationRevision = data.revision;
+      changed = true;
+    }
+    if (data.items && typeof data.items === "object") {
+      for (const p of r.publications) {
+        const next = data.items[p.id];
+        if (JSON.stringify(p.jcr) !== JSON.stringify(next)) changed = true;
+        delete p.jcr; if (next) p.jcr = next;
+      }
+    }
+    if (changed) {
+      const scroller = view(), top = scroller.scrollTop, left = tbody.closest(".tbl-wrap").scrollLeft;
+      updatePublicationStats(r); drawPubs();
+      scroller.scrollTop = top; tbody.closest(".tbl-wrap").scrollLeft = left;
+    }
+  };
+  const watch = {
+    tbody, active, running: false,
+    stop() { disposed = true; request?.abort(); wakeDelay?.(); tbody.dataset.wosLoading = "0"; },
+    wake() {
+      if (!active() || removed) return;
+      wakeRequested = true;
+      if (watch.running) wakeDelay?.();
+      else void run(true);
+    },
+  };
+  const run = async (getFirst = false) => {
+    if (!active() || removed || watch.running) return;
+    watch.running = true; tbody.dataset.wosLoading = "1";
+    let method = getFirst ? "GET" : "POST", failures = 0, idleRestarts = 0;
+    try {
+      while (active()) {
+        wakeRequested = false;
+        let data;
+        try { data = await read(method); }
+        catch (error) {
+          if (!active()) break;
+          if ([404, 410].includes(error.status)) {
+            removed = true;
+            notifyFailure({ status: "error", reason: "profile_missing", message: "WoS kontrolü durdu: profil kaydına artık ulaşılamıyor." });
+            break;
+          }
+          // POST yanıtı kaybolduysa önce mevcut işi sor; ikinci bir iş başlatma.
+          method = "GET";
+          await delay(Math.min(15000, 2500 * 2 ** Math.min(failures++, 3)));
+          continue;
+        }
+        if (!active()) break;
+        failures = 0; apply(data);
+        if (["running", "pending"].includes(data.status)) {
+          method = "GET"; await delay(2500); continue;
+        }
+        if (wakeRequested) { method = "GET"; continue; }
+        if (data.status === "idle") {
+          // Sunucu yeniden başlamış olabilir. Normal POST en fazla iki kez;
+          // sonra GET ile bekle, sürekli yeni tarama başlatma.
+          if (idleRestarts < 2) {
+            idleRestarts += 1; await delay(2500 * idleRestarts); method = "POST";
+          } else {
+            notifyFailure({ status: "error", reason: "job_interrupted", message: "WoS taraması yeniden başlayamadı; bağlantı izlenmeye devam ediyor." });
+            method = "GET"; await delay(15000);
+          }
+          continue;
+        }
+        notifyFailure(data);
+        break;
+      }
+    } finally {
+      watch.running = false; tbody.dataset.wosLoading = "0";
+      if (wakeRequested && active() && !removed) void run(true);
+    }
+  };
+  wosProfileWatch = watch;
+  await run();
+}
+document.addEventListener("wos-verification-solved", () => wosProfileWatch?.wake());
+
+function publicationQuartiles(publications) {
+  const counts = { total: 0, src: "" };
+  publications.forEach((p) => {
+    if (!p.quartile) return;
+    counts[p.quartile.q] = (counts[p.quartile.q] || 0) + 1;
+    counts.total++; counts.src = p.quartile.source;
+  });
+  return counts;
+}
+const sourceDistribution = (r) => Object.entries(r.by_source || {}).map(([k, v]) => `${SRC_TR[k] || k} ${v}`).join(" · ") || "—";
+const quartileDistribution = (r, counts) => `${["Q1", "Q2", "Q3", "Q4"].map((k) => `${k} ${counts[k] || 0}`).join(" · ")} · çeyreği yok ${r.publications.length - counts.total}`;
+function updatePublicationStats(r) {
+  const values = {
+    "#profilePubCount": fmtNum(r.unique_count),
+    '[data-tab="pubs"] .n': fmtNum(r.unique_count),
+    "#profileCitesCount": fmtNum(r.publications.reduce((sum, p) => sum + (p.citations || 0), 0)),
+    "#profileSources": sourceDistribution(r),
+    "#profileSummary": r.summary || "",
+  };
+  const counts = publicationQuartiles(r.publications);
+  values["#profileQuartiles"] = quartileDistribution(r, counts);
+  for (const [selector, value] of Object.entries(values)) {
+    const el = $(selector); if (el) el.textContent = value;
+  }
+  syncPublicationFilters("pub", r.publications);
+}
+
 const quartileAreas = (p) => (p.quartile?.categories || []).map((c) => `${c.name} (${c.q})`).join("; ");
 // Excel (.xlsx) dosyası: bağımlılıksız, sıkıştırmasız ZIP içinde en küçük OOXML çalışma kitabı
 const CRC_T = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
@@ -313,7 +1074,7 @@ function zipStore(files) {
 }
 function exportXlsx(list, name, meta = {}) {
   const cols = [["Başlık", (p) => p.title, 60], ["Yazarlar", (p) => (p.authors || []).join("; "), 40], ["Yıl", (p) => +p.year || "", 8], ["Yayın tarihi", (p) => p.date ? isoToTr(p.date) : "", 13],
-    ["Kategori", catLabel, 16], ["Yayın yeri", (p) => p.venue, 32], ["Dergi çeyreği", (p) => quartileLabel(p), 18], ["Çeyrek alanları", quartileAreas, 36], ["Tür", (p) => TYPE_TR[p.type] || p.type, 14], ["DOI", (p) => normDoi(p.doi), 26],
+    ["Kategori", catLabel, 16], ["Yayın yeri", (p) => p.venue, 32], ["Dergi çeyreği", (p) => quartileLabel(p), 18], ["Çeyrek alanları", quartileAreas, 36], ["Tür", publicationKind, 18], ["Durum", publicationStatusLabel, 38], ["DOI", (p) => normDoi(p.doi), 26],
     ["Atıf", (p) => p.citations ?? "", 8], ["Kaynak", (p) => (p.sources || [p.source]).filter(Boolean).map((s) => SRC_TR[s] || s).join(" + "), 22],
     ["Akademisyen", (p) => (p.unit_authors || []).join("; ") || p.person || meta.person || "", 24]];
   const x = (v) => String(v ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 32000);
@@ -507,11 +1268,11 @@ async function openPaper(regId) {
   const p = entry.paper, src = entry.source || {};
   S.paperRequest?.abort();
   const controller = new AbortController(); S.paperRequest = controller;
-  const srcs = p.sources || (p.source ? [p.source] : []);
-  openModal(`<div class="m-kicker">${srcs.map((s) => `<span class="badge ${esc(s)}">${esc(SRC_TR[s] || s)}</span>`).join("")}
+  openModal(`<div class="m-kicker">${sourceBadges(p)}
       <span>${esc(p.year || "")}</span>${p.citations != null ? `<span>· ${fmtNum(p.citations)} atıf</span>` : ""}</div>
     <h2 class="m-title">${esc(p.title)}</h2>
     <div id="mMeta" class="muted">${esc(p.venue || "")}</div>
+    <div class="m-publication-status">${publicationStatusHtml(p)}</div>
     <div class="m-h">Türkçe özet</div><div id="mSum" class="m-sum typing"></div>
     <div class="m-h">Özet (abstract)</div><div id="mAbs" class="m-abs muted"><div class="loading-line"><span class="spinner"></span>Kaynak okunuyor…</div></div>
     <div id="mLinks" class="chips" style="margin-top:16px"></div>
@@ -865,10 +1626,11 @@ async function viewUni(uid) {
     <div class="miller">${col("colFac", "layers", "Fakülteler", "Fakültelerde ara", skeleton(7))}
       ${col("colDep", "grid", "Bölümler", "Bölümlerde ara", `<div class="col-empty">Soldan bir fakülte seçin.</div>`)}
       ${col("colStaff", "users", "Akademisyenler", "Akademisyenlerde ara", `<div class="col-empty">Bir bölüm seçin.</div>`)}</div>`);
+  const facultyColumn = $("#colFac");
   if (!d.data) {
     try { d.data = await api(`/api/universities/${encodeURIComponent(uid)}`); }
-    catch (e) { const b = $("#colFac .col-body"); if (b) b.innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; return; }
-    if (S.uni !== d || !$("#colFac")) return;
+    catch (e) { if (facultyColumn.isConnected) $(".col-body", facultyColumn).innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; return; }
+    if (S.uni !== d || !facultyColumn.isConnected) return;
   }
   renderUni();
   if (d.facData) { renderYokDeps(); if (d.dep != null) renderYokStaff(); }
@@ -880,7 +1642,8 @@ function renderUni() {
   $("#uName").textContent = d.data.name;
   $("#uMeta").innerHTML = `<span>Kaynak: YÖK Akademik</span>${d.data.home ? `<span>${esc(new URL(d.data.home).hostname.replace(/^www\./, ""))}</span>` : ""}`;
   $("#uAct").innerHTML = d.data.home ? `<a class="btn sm" href="${esc(safeUrl(d.data.home))}" target="_blank" rel="noopener">${icon("globe")}Kurum sitesi</a>
-    <a class="btn sm" href="#/kurum?u=${encodeURIComponent(d.data.home)}" title="Fakülte ve bölümleri kurumun kendi sitesinden okur">${icon("layers")}Site dizini</a>` : "";
+    <button class="btn sm primary" id="uNewPerson" type="button">${icon("plus")}Akademisyen ara</button>` : "";
+  if ($("#uNewPerson")) $("#uNewPerson").onclick = () => newPersonModal(d.data.home);
   hydrateIcons($("#uAct"));
   $("#colFacN").textContent = items.length;
   $("#colFac .col-body").innerHTML = items.length ? `<div class="stagger">${items.map((u, i) => `<div class="unit ${d.fac === i ? "active" : ""}" data-unit="yfac" data-i="${i}" style="--i:${Math.min(i, 24)}" data-q="${esc(fold(u.name))}">
@@ -889,18 +1652,19 @@ function renderUni() {
 }
 
 async function selectYokFaculty(i) {
-  const d = S.uni, fac = d.data.items[i];
-  d.fac = i; d.dep = null; d.facData = null;
+  const d = S.uni, fac = d.data.items[i], request = Symbol("faculty"), hash = location.hash;
+  d.facRequest = request; d.fac = i; d.dep = null; d.facData = null;
+  const body = $("#colDep .col-body");
+  const active = () => S.uni === d && d.facRequest === request && body.isConnected && location.hash === hash;
   $$("#colFac .unit").forEach((x) => x.classList.toggle("active", +x.dataset.i === i));
-  $("#colDep .col-body").innerHTML = `<div class="loading-line"><span class="spinner"></span>Kadro YÖK'ten alınıyor…</div>${skeleton(6)}`;
+  body.innerHTML = `<div class="loading-line"><span class="spinner"></span>Kadro YÖK'ten alınıyor…</div>${skeleton(6)}`;
   $("#colStaff .col-body").innerHTML = `<div class="col-empty">Bir bölüm seçin.</div>`;
   $("#colStaffN").textContent = ""; $("#colDepN").textContent = "";
   try {
     const data = await api(`/api/universities/${encodeURIComponent(d.id)}/faculty?name=${encodeURIComponent(fac.raw)}`);
-    if (S.uni !== d || d.fac !== i) return;
-    d.facData = data;
-    renderYokDeps();
-  } catch (e) { const b = $("#colDep .col-body"); if (b) b.innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; }
+    if (!active()) return;
+    d.facData = data; renderYokDeps();
+  } catch (e) { if (active()) body.innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; }
 }
 
 function renderYokDeps() {
@@ -920,26 +1684,18 @@ function selectYokDept(i) {
   renderYokStaff();
 }
 function renderYokStaff() {
-  const d = S.uni, people = yokStaff();
-  S.candidates = people;
-  $("#colStaffN").textContent = people.length;
-  $("#colStaff .col-body").innerHTML = `<div class="stagger">${people.map((p, i) => {
-    const chat = existingChat(p);
-    return `<div class="person" style="--i:${Math.min(i, 24)}" data-q="${esc(fold(p.name))}">${avatar(p.name, p.photo)}
-      <div class="p-main"><b>${esc(p.name)}</b><span>${esc(p.title || "")}${d.dep < 0 && p.department ? ` · ${esc(p.department)}` : ""}</span></div>
-      <div class="p-act">${p.email ? `<a class="icon-btn" href="mailto:${esc(p.email)}" title="${esc(p.email)}">${icon("mail")}</a>` : ""}
-        ${safeUrl(p.url) ? `<a class="icon-btn" href="${esc(safeUrl(p.url))}" target="_blank" rel="noopener" title="YÖK Akademik">${icon("external")}</a>` : ""}
-        ${chat ? `<button class="btn sm" data-chat="${esc(chat.id)}" type="button">Aç</button>` : `<button class="btn sm primary" data-candidate="${i}" type="button">Profil</button>`}</div></div>`;
-  }).join("")}</div>`;
-  hydrateIcons($("#colStaff"));
+  const d = S.uni, people = yokStaff(), host = $("#colStaff .col-body");
+  $("#colStaff .col-filter").hidden = true;
+  d.staffFilters ||= {};
+  d.staffController = mountStaffList(host, "yok", people, { filters: d.staffFilters, mode: "yok", institution: d.data.name, countElement: $("#colStaffN") });
 }
 
 function openYokPapers(i) {
   const d = S.uni, f = d.facData, fac = d.data.items[d.fac], dep = i < 0 ? null : f.departments[i];
   const name = dep ? dep.name : fac.name;
   unitPapersDrawer(name, `${dep ? "Bölüm" : "Fakülte"} yayınları · ${d.data.name}`, `${d.data.name} ${name}`,
-    "Akademisyenler OpenAlex'te ORCID ve adla eşleştiriliyor…",
-    () => post("/api/universities/papers", { uid: d.id, faculty: fac.raw, department: dep ? dep.key : null }));
+    "Kadro yayınları akademisyen profilleri üzerinden kaynaklardan toplanıyor…",
+    (refresh = false) => post("/api/universities/papers", { uid: d.id, faculty: fac.raw, department: dep ? dep.key : null, refresh }));
 }
 
 // =================================================================== KURUM SİTESİ DİZİNİ
@@ -1010,14 +1766,17 @@ function renderFaculties() {
 }
 
 async function selectFaculty(i) {
-  const d = S.dir; d.fac = i; d.dep = null; d.staff = null;
+  const d = S.dir, request = Symbol("faculty"), hash = location.hash;
+  d.facRequest = request; d.staffRequest = null; d.fac = i; d.dep = null; d.staff = null;
+  const body = $("#colDep .col-body"), active = () => S.dir === d && d.facRequest === request && body.isConnected && location.hash === hash;
   $$("#colFac .unit").forEach((x) => x.classList.toggle("active", +x.dataset.i === i));
-  $("#colDep .col-body").innerHTML = `<div class="loading-line"><span class="spinner"></span>Fakülte sayfası okunuyor…</div>${skeleton(6)}`;
+  body.innerHTML = `<div class="loading-line"><span class="spinner"></span>Fakülte sayfası okunuyor…</div>${skeleton(6)}`;
   $("#colStaff .col-body").innerHTML = `<div class="col-empty">Bir bölüm seçin.</div>`; $("#nStaff").textContent = "";
   try {
-    d.deps = await post("/api/directory/departments", { url: d.data.items[i].url });
-    if (d.fac === i) renderDeps();
-  } catch (e) { $("#colDep .col-body").innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; }
+    const data = await post("/api/directory/departments", { url: d.data.items[i].url });
+    if (!active()) return;
+    d.deps = data; renderDeps();
+  } catch (e) { if (active()) body.innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; }
 }
 
 function renderDeps() {
@@ -1029,78 +1788,116 @@ function renderDeps() {
 }
 
 async function selectDept(i, unitUrl) {
-  const d = S.dir; d.dep = i;
+  const d = S.dir, request = Symbol("staff"), hash = location.hash;
+  d.staffRequest = request; d.dep = i;
+  const body = $("#colStaff .col-body"), active = () => S.dir === d && d.staffRequest === request && body.isConnected && location.hash === hash;
   $$("#colDep .unit").forEach((x) => x.classList.toggle("active", +x.dataset.i === i));
-  $("#colStaff .col-body").innerHTML = `<div class="loading-line"><span class="spinner"></span>Akademik kadro sayfası aranıyor…</div>${skeleton(6)}`;
+  body.innerHTML = `<div class="loading-line"><span class="spinner"></span>Akademik kadro sayfası aranıyor…</div>${skeleton(6)}`;
   try {
-    d.staff = await post("/api/directory/staff", { url: unitUrl || d.deps.items[i].url });
-    if (d.dep === i) renderStaff();
-  } catch (e) { $("#colStaff .col-body").innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; }
+    const data = await post("/api/directory/staff", { url: unitUrl || d.deps.items[i].url });
+    if (!active()) return;
+    d.staff = data; renderStaff();
+  } catch (e) { if (active()) body.innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; }
 }
 
 function renderStaff() {
-  const d = S.dir, items = d.staff.items || [];
-  $("#nStaff").textContent = items.length;
-  $("#colStaff .col-body").innerHTML = items.length ? `<div class="stagger">${items.map((p, i) => `
-    <div class="person" style="--i:${Math.min(i, 24)}" data-q="${esc(fold(p.name))}">
-      ${avatar(p.name, p.photo)}
-      <div class="p-main"><b>${esc(p.name)}</b><span>${esc(p.title || "")}</span></div>
-      <div class="p-act">
-        ${p.email ? `<a class="icon-btn" href="mailto:${esc(p.email)}" title="${esc(p.email)}">${icon("mail")}</a>` : ""}
-        ${safeUrl(p.site_url || p.url) ? `<a class="icon-btn" href="${esc(safeUrl(p.site_url || p.url))}" target="_blank" rel="noopener" title="${p.source === "yok" && !p.site_url ? "YÖK Akademik" : "Kurum sayfası"}">${icon("external")}</a>` : ""}
-        <button class="btn sm primary" data-profile="${i}" type="button">Profil</button></div></div>`).join("")}</div>
-    <div class="faint" style="padding:10px 12px">Kaynak: ${d.staff.method === "yök" ? "YÖK Akademik kadrosu (ORCID'li) + " : ""}<a href="${esc(safeUrl(d.staff.page))}" target="_blank" rel="noopener">${esc((d.staff.page || "").replace(/^https?:\/\//, ""))}</a></div>`
-    : `<div class="col-empty">Bu birimde akademisyen listesi bulunamadı.${safeUrl(d.staff.page) ? `<br><a href="${esc(safeUrl(d.staff.page))}" target="_blank" rel="noopener">Sayfayı aç</a>` : ""}</div>`;
-  hydrateIcons($("#colStaff"));
+  const d = S.dir, host = $("#colStaff .col-body");
+  $("#colStaff .col-filter").hidden = true;
+  d.staffFilters ||= {};
+  d.staffController = mountStaffList(host, "directory", d.staff.items || [], { filters: d.staffFilters, mode: "directory", page: d.staff.page, institution: d.data?.name, countElement: $("#nStaff") });
 }
 
 function openUnitPapers(kind, i) {
   const d = S.dir, unit = kind === "fac" ? d.data.items[i] : d.deps.items[i];
   unitPapersDrawer(unit.name, `${kind === "fac" ? "Fakülte" : "Bölüm"} yayınları · ${d.data.name || d.host}`, `${unit.name} ${d.data.name || d.host}`,
-    kind === "fac" ? "Bölüm kadroları okunuyor ve akademisyenler OpenAlex'te eşleştiriliyor. Büyük fakültelerde bir iki dakika sürebilir…" : "Akademisyenler OpenAlex'te eşleştiriliyor…",
-    () => post("/api/directory/papers", { url: unit.url, level: kind === "fac" ? "faculty" : "department", name: unit.name }));
+    "Kadro yayınları akademisyen profilleri üzerinden kaynaklardan toplanıyor…",
+    (refresh = false) => post("/api/directory/papers", { url: unit.url, level: kind === "fac" ? "faculty" : "department", name: unit.name, refresh }));
 }
 
 async function unitPapersDrawer(name, sub, file, waiting, load) {
-  openDrawer(`<h2>${esc(name)}</h2><p>${esc(sub)}</p>`, `<div class="loading-line"><span class="spinner"></span>${esc(waiting)}</div>${skeleton(6)}`);
-  try {
-    const r = await load();
-    const listKey = `unit-${fold(name).replace(/ /g, "-")}`;
-    S.lists[listKey] = r.papers;
-    S.listMeta[listKey] = { file };
-    const years = [...new Set(r.papers.map((p) => p.year).filter(Boolean))].sort((a, b) => b - a);
-    $("#drawerBody").innerHTML = `
-      <div class="stat-row"><div class="stat"><b>${count(r.papers.length)}</b><span>yayın</span></div>
-        <div class="stat"><b>${r.matched}/${r.people}</b><span>akademisyen eşleşti</span></div>
-        <div class="stat"><b>${count(r.papers.reduce((s, p) => s + (p.citations || 0), 0))}</b><span>toplam atıf</span></div></div>
-      <div class="notice" style="margin-bottom:14px">${icon("info")}<div>Hızlı liste OpenAlex'ten. Bir akademisyenin tüm kaynaklardan tam listesi için <b>Profil</b> düğmesini kullanın.
-        ${r.total_people > r.people ? `<br><span class="faint">Büyük birim: ilk ${r.people} akademisyen (${r.total_people} kişiden, unvan sırasıyla).</span>` : ""}
-        ${r.missing.length ? `<br><span class="faint">OpenAlex'te eşleşmeyen: ${esc(r.missing.slice(0, 12).join(", "))}${r.missing.length > 12 ? "…" : ""}</span>` : ""}
-        ${r.loose?.length ? `<br><span class="faint">Bu kurumda OpenAlex yayını yok, yalnızca adla eşleşti (o adla tek yazar): ${esc(r.loose.join(", "))}</span>` : ""}</div></div>
-      <div class="toolbar"><div class="input">${icon("search")}<input id="dwFilter" placeholder="Başlık ya da yazar ara"></div>
-        <select class="select" id="dwYear"><option value="">Tüm yıllar</option>${years.map((y) => `<option>${y}</option>`).join("")}</select>
-        ${exportButtons(listKey)}</div>
-      <div class="card" id="dwList"></div>`;
-    hydrateIcons($("#drawerBody")); animateCounts($("#drawerBody"));
-    const draw = () => {
-      const q = fold($("#dwFilter").value), y = $("#dwYear").value;
-      const list = r.papers.filter((p) => (!y || String(p.year) === y) && (!q || fold(`${p.title} ${(p.authors || []).join(" ")}`).includes(q)));
-      S.lists[listKey] = list;
-      $("#dwList").innerHTML = list.length ? `<div class="stagger">${list.slice(0, 300).map((p, n) => paperCard(p, {}, n)).join("")}</div>`
-        : emptyState("file", "Yayın bulunamadı", "Filtreyi değiştirin.");
-      hydrateIcons($("#dwList"));
-    };
-    $("#dwFilter").oninput = draw; $("#dwYear").onchange = draw; draw();
-  } catch (e) {
-    $("#drawerBody").innerHTML = `<div class="notice err">${icon("info")}<div>${esc(e.message)}</div></div>`; hydrateIcons($("#drawerBody"));
-  }
+  const request = Symbol("unit"), routeHash = location.hash;
+  S.unitRequest = request;
+  openDrawer(`<div class="unit-drawer-heading"><h2>${esc(name)}</h2><button id="unitRescan" class="btn sm" type="button" disabled aria-busy="true"><span class="spinner" aria-hidden="true"></span>Tekrar tara</button></div><p>${esc(sub)}</p>`, `<div id="unitProgress" class="loading-line" role="status" aria-live="polite"><span class="spinner"></span>Kayıtlı yayınlar yükleniyor…</div>
+    <div id="unitStats"></div><div id="unitErrors"></div>
+    <details class="unit-staff"><summary>Akademik kadro <span id="unitStaffTotal"></span></summary><div id="unitStaff"></div></details>
+    <div id="unitTable"></div>`);
+  $("#drawer").classList.add("publication-drawer");
+  const body = $("#drawerBody"), rescan = $("#unitRescan");
+  const active = () => S.unitRequest === request && body.isConnected && rescan.isConnected && location.hash === routeHash && $("#drawer").classList.contains("open");
+  const listKey = `unit-${fold(file).replace(/ /g, "-")}`;
+  S.listMeta[listKey] = { file };
+  const table = mountPublicationTable($("#unitTable"), "dw", listKey, []);
+  const staff = mountStaffList($("#unitStaff"), "unit", [], { institution: sub, mode: "directory" });
+  let paperRevision, staffRevision, loadEpoch = 0, busy = false;
+  const setBusy = (value) => {
+    busy = value; rescan.disabled = value; rescan.setAttribute("aria-busy", String(value));
+    rescan.innerHTML = `${value ? '<span class="spinner" aria-hidden="true"></span>' : icon("refresh")}Tekrar tara`;
+    if (!value) hydrateIcons(rescan);
+  };
+  const apply = (r) => {
+    const papers = r.papers || [], people = r.staff || [], total = r.total_people ?? r.people ?? people.length;
+    const complete = r.completed ?? r.matched ?? 0;
+    const state = r.status === "running" ? "Kaynaklar taranıyor" : r.cached
+      ? `Kayıtlı sonuçlar${r.status === "error" ? " · toplama tamamlanamadı" : r.status === "partial" ? " · kısmi sonuç" : r.status === "cancelled" ? " · tarama durduruldu" : ""}`
+      : r.status === "error" ? "Toplama tamamlanamadı" : r.status === "partial" ? "Kısmi sonuç" : r.status === "cancelled" ? "Tarama durduruldu" : "Toplama tamamlandı";
+    $("#unitProgress").innerHTML = `${r.status === "running" ? '<span class="spinner"></span>' : ""}${state} · ${fmtNum(complete)} / ${fmtNum(total)} akademisyen tamamlandı`;
+    $("#unitStats").innerHTML = `<div class="stat-row"><div class="stat"><b>${fmtNum(papers.length)}</b><span>birleştirilmiş yayın</span></div>
+      <div class="stat"><b>${fmtNum(r.matched ?? 0)} / ${fmtNum(total)}</b><span>profili eşleşen akademisyen</span></div>
+      <div class="stat"><b>${fmtNum(papers.reduce((sum, p) => sum + (Number(p.citations) || 0), 0))}</b><span>toplam atıf</span></div></div>
+      <p class="faint">${esc(sourceDistribution(r))}</p>`;
+    const errors = (r.errors || []).map((e) => typeof e === "string" ? e : [e.name, e.error].filter(Boolean).join(": "));
+    errors.push(...(r.warnings || []).map((e) => typeof e === "string" ? e : [e.name, e.message].filter(Boolean).join(": ")));
+    if (r.cache_error) errors.push(r.cache_error);
+    if (r.missing?.length) errors.push(`Eşleşmeyen veya tamamlanamayan: ${r.missing.join(", ")}`);
+    $("#unitErrors").innerHTML = errors.length ? `<div class="notice warn"><div>${errors.map(esc).join("<br>")}</div></div>` : "";
+    $("#unitStaffTotal").textContent = `(${fmtNum(people.length)})`;
+    const nextPapers = JSON.stringify(papers), nextStaff = JSON.stringify(people);
+    if (paperRevision !== nextPapers) { paperRevision = nextPapers; table.update(papers); }
+    if (staffRevision !== nextStaff) {
+      staffRevision = nextStaff; staff.update(people);
+      const merge = (items) => items.map((person) => {
+        const latest = people.find((p) => (p.person_key && p.person_key === person.person_key)
+          || (p.url && p.url === person.url && fold(p.name) === fold(person.name)));
+        if (!latest) return person;
+        const next = { ...person };
+        for (const key of ["publication_count", "article_count", "citations", "sources", "chat_id", "job_id", "status"]) if (Object.hasOwn(latest, key)) next[key] = latest[key];
+        return next;
+      });
+      if (S.uni?.facData?.people && location.hash.startsWith("#/universite/")) {
+        S.uni.facData.people = merge(S.uni.facData.people);
+        if (S.uni.dep != null) S.uni.staffController?.update(yokStaff());
+      }
+      if (S.dir?.staff?.items && location.hash.startsWith("#/kurum")) {
+        S.dir.staff.items = merge(S.dir.staff.items); S.dir.staffController?.update(S.dir.staff.items);
+      }
+    }
+  };
+  const run = async (refresh = false) => {
+    if (!active() || busy) return;
+    const epoch = ++loadEpoch, current = () => active() && epoch === loadEpoch;
+    setBusy(true);
+    $("#unitProgress").innerHTML = `<span class="spinner"></span>${refresh ? esc(waiting) : "Kayıtlı yayınlar yükleniyor…"}`;
+    try {
+      await pollSnapshots(() => load(refresh), current, apply, (r) => r.status === "running" && !!r.job_id,
+        (r) => api(`/api/units/papers/${encodeURIComponent(r.job_id)}`));
+    } catch (e) {
+      if (!current()) return;
+      $("#unitProgress").textContent = "Sonuç güncellemesi durdu; alınan yayınlar gösteriliyor.";
+      $("#unitErrors").innerHTML = `<div class="notice err"><div>${esc(e.message)}</div></div>`;
+    } finally {
+      if (current()) setBusy(false);
+    }
+  };
+  rescan.onclick = () => run(true);
+  await run(false);
 }
 
 function openDrawer(head, body) {
+  $("#drawer").classList.remove("publication-drawer");
   $("#drawerTitle").innerHTML = head; $("#drawerBody").innerHTML = body; hydrateIcons($("#drawer"));
   $("#drawer").classList.add("open"); $("#drawer").setAttribute("aria-hidden", "false");
 }
-function closeDrawer() { $("#drawer").classList.remove("open"); $("#drawer").setAttribute("aria-hidden", "true"); }
+function closeDrawer() { S.unitRequest = null; $("#drawer").classList.remove("open", "publication-drawer"); $("#drawer").setAttribute("aria-hidden", "true"); }
 
 // =================================================================== PROFİL
 async function viewProfile(cid) {
@@ -1173,8 +1970,7 @@ function renderProfile(r, chat) {
   ].filter(Boolean).join("");
   const totalCites = r.publications.reduce((s, x) => s + (x.citations || 0), 0);
   // h-index kaynağa göre gösterilir: kaynaklar farklı yayınları sayar, tek sayıya indirilmez
-  const qCounts = { total: 0, src: "" };
-  r.publications.forEach((x) => { if (x.quartile) { qCounts[x.quartile.q] = (qCounts[x.quartile.q] || 0) + 1; qCounts.total++; qCounts.src = x.quartile.source; } });
+  const qCounts = publicationQuartiles(r.publications);
   const srcMeta = r.recon?.sources_meta || {};
   const hIndex = [["scholar", "Scholar"], ["openalex", "OpenAlex"]].filter(([k]) => srcMeta[k]?.h_index != null).map(([k, l]) => [srcMeta[k].h_index, l]);
   const tez = y.tez_merkezi || {}, trProjects = y.tr_projects || [];
@@ -1212,14 +2008,14 @@ function renderProfile(r, chat) {
         </div>
       </div>
       <div class="kpis">
-        <div class="kpi"><b>${count(r.unique_count)}</b><span>benzersiz yayın</span></div>
-        <div class="kpi"><b>${count(totalCites)}</b><span>toplam atıf</span></div>
+        <div class="kpi"><b id="profilePubCount">${count(r.unique_count)}</b><span>benzersiz yayın</span></div>
+        <div class="kpi"><b id="profileCitesCount">${count(totalCites)}</b><span>toplam atıf</span></div>
         <div class="kpi"><b>${count((sec.courses || []).length)}</b><span>ders</span></div>
         ${hIndex.length ? `<div class="kpi kpi-h" title="Kaynaklar farklı yayınları saydığı için değerler farklı olabilir. Web of Science ve Scopus değerleri dahil değildir.">${hIndex.map(([v, l]) => `<b>${count(v)}<small>${esc(l)}</small></b>`).join("")}<span>h-index</span></div>` : ""}
         <div class="kpi"><b>${count(nTheses)}</b><span>yönetilen tez</span></div>
         <div class="kpi"><b>${count((y.collaborators || []).length)}</b><span>iş birliği</span></div>
-        ${qCounts.total ? `<div class="kpi src"><b>${["Q1", "Q2", "Q3", "Q4"].map((k) => `${k} ${qCounts[k] || 0}`).join(" · ")} · çeyreği yok ${r.publications.length - qCounts.total}</b><span>dergi çeyreği · ${esc(qCounts.src)}, yayın yılına göre, derginin en iyi alanı (Scopus tabanlı, WoS/JCR değildir)</span></div>` : ""}
-        <div class="kpi src"><b>${Object.entries(r.by_source || {}).map(([k, v]) => `${SRC_TR[k] || k} ${v}`).join(" · ") || "—"}</b><span>kaynak dağılımı</span></div>
+        ${qCounts.total ? `<div class="kpi src"><b id="profileQuartiles">${quartileDistribution(r, qCounts)}</b><span>dergi çeyreği · ${esc(qCounts.src)}, yayın yılına göre, derginin en iyi alanı (Scopus tabanlı, WoS/JCR değildir)</span></div>` : ""}
+        <div class="kpi src"><b id="profileSources">${esc(sourceDistribution(r))}</b><span>kaynak dağılımı</span></div>
       </div>
     </section>
 
@@ -1234,17 +2030,10 @@ function renderProfile(r, chat) {
         <button class="btn sm" data-tabgo="collab" type="button">Kanıtları gör</button></div><div class="chips">${r.industry.map((x) =>
           `<span class="chip ${x.official ? "teal" : ""}">${x.official ? "✓ " : ""}${esc(x.name)}</span>`).join("")}</div></div>` : ""}
       ${techTrace(r)}
-      <p class="faint">${esc(r.summary || "")} · ${r.elapsed ?? "?"} sn · ${esc(r.llm || "")}${y.updated ? ` · YÖK son güncelleme ${esc(y.updated)}` : ""}</p>
+      <p class="faint"><span id="profileSummary">${esc(r.summary || "")}</span> · ${r.elapsed ?? "?"} sn · ${esc(r.llm || "")}${y.updated ? ` · YÖK son güncelleme ${esc(y.updated)}` : ""}</p>
     </div></div>
 
-    <div class="panel" data-panel="pubs">
-      <div class="toolbar"><div class="input">${icon("search")}<input id="pubFilter" placeholder="Başlıkta ara"></div>
-        ${qCounts.total ? `<select class="select" id="pubQuart" aria-label="Dergi çeyreği"><option value="">Tüm çeyrekler</option>${["Q1", "Q2", "Q3", "Q4"].filter((k) => qCounts[k]).map((k) => `<option value="${k}">En iyi ${qCounts.src} ${k} (${qCounts[k]})</option>`).join("")}<option value="none">Çeyreği yok (${r.publications.length - qCounts.total})</option></select>` : ""}
-        <select class="select" id="pubSort"><option value="year">En yeni</option><option value="cites">En çok atıf</option><option value="title">Başlık</option></select>
-        ${exportButtons("pubs")}</div>
-      <div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th style="width:52px">#</th><th>Başlık</th><th>Yıl</th><th>Kaynak</th><th>Doğrulama</th><th>Atıf</th><th></th></tr></thead>
-        <tbody id="pubs"></tbody></table></div></div>
-    </div>
+    <div class="panel" data-panel="pubs"><div id="profilePublications"></div></div>
 
     <div class="panel" data-panel="career"><div class="grid-2">
       <div class="card card-pad"><div class="card-title">${icon("briefcase")}Akademik görevler</div>${timeline(y.career)}</div>
@@ -1279,29 +2068,8 @@ function renderProfile(r, chat) {
         <button class="btn primary" id="send" type="submit">${icon("send")}Gönder</button></form>
     </div></div>`);
 
-  const tbody = $("#pubs");
-  const drawPubs = () => {
-    const q = fold($("#pubFilter").value), sort = $("#pubSort").value;
-    const qf = $("#pubQuart")?.value || "";
-    let list = r.publications.filter((x) => (!qf || (qf === "none" ? !x.quartile : x.quartile?.q === qf))
-      && (!q || fold(`${x.title} ${x.variants.map((v) => v.title).join(" ")} ${x.venue || ""}`).includes(q)));
-    list = [...list].sort(sort === "cites" ? (m, n) => (n.citations || 0) - (m.citations || 0) : sort === "title" ? (m, n) => m.title.localeCompare(n.title, "tr") : () => 0);
-    S.lists.pubs = list;
-    tbody.innerHTML = list.map((x) => {
-      const id = reg(x, pubSrc(x));
-      return `<tr id="pub-${esc(x.id)}"><td class="faint">${esc(x.id)}</td>
-        <td><div class="t-title" data-open="${id}">${esc(x.title)}</div>
-          ${x.venue ? `<div class="variants">${esc(x.venue)}${x.quartile ? ` <span class="q-badge ${esc(x.quartile.q.toLowerCase())}" title="${esc(quartileAreas(x))}. ${esc(x.quartile.source)} Scopus tabanlıdır; WoS/JCR çeyreği değildir.">${esc(quartileLabel(x))}</span>` : ""}</div>` : ""}
-          ${x.variants.length > 1 ? `<div class="variants">↳ ${x.variants.slice(1).map((v) => `${esc(v.title)} (${esc(v.lang)})`).join(" · ")}</div>` : ""}</td>
-        <td>${esc(x.year || "—")}</td>
-        <td><div class="chips">${x.sources.map((s) => `<span class="badge ${esc(s)}">${esc(SRC_TR[s] || s)}</span>`).join("")}</div></td>
-        <td>${x.verified ? `<span class="vb ok">✓ ${x.sources.length > 1 ? x.sources.length + " kaynak" : x.runs_seen + ". kez"}</span>` : `<span class="vb">tek kaynak</span>`}${x.is_new ? `<span class="newb">YENİ</span>` : ""}</td>
-        <td>${fmtNum(x.citations)}</td>
-        <td><button class="star ${favPaper(x) ? "on" : ""}" data-star="${id}" type="button" title="Favorilere ekle">${icon("star")}</button></td></tr>`;
-    }).join("") || `<tr><td colspan="7">${emptyState("file", "Yayın yok", "Filtreyi değiştirin.")}</td></tr>`;
-    hydrateIcons(tbody);
-  };
-  $("#pubFilter").oninput = drawPubs; $("#pubSort").onchange = drawPubs; if ($("#pubQuart")) $("#pubQuart").onchange = drawPubs; drawPubs();
+  const publicationTable = mountPublicationTable($("#profilePublications"), "pub", "pubs", r.publications, "year", { rowId: "pubs", sourceFor: pubSrc });
+  const drawPubs = () => publicationTable.update(r.publications);
 
   $("#refreshProfileBtn").onclick = () => startJob(p.institution || p.source_url || "", p.name, () => post(`/api/jobs/${r.job_id}/refresh`, {}), "yenileniyor");
   $("#favPersonBtn").onclick = async () => {
@@ -1325,6 +2093,7 @@ function renderProfile(r, chat) {
   // eski profiller ya da değişen eşleştirme kuralı: kayıtlı veriden yeniden hesaplanır (dış istek yok)
   if (!r.industry || r.industry_v !== INDUSTRY_V) refreshIndustry(true);
   if (r.patents_v !== PATENTS_V && !S.patentsOff) loadPatents();
+  loadWos(r, drawPubs);
   void root;
 }
 
@@ -1579,47 +2348,52 @@ async function ask(question) {
 }
 
 // =================================================================== KONU ARAMASI
+function topicProgress(wos) {
+  if (!wos) return "";
+  const count = wos.total == null ? `${fmtNum(wos.checked || 0)} kayıt incelendi` : `${fmtNum(wos.total)} kayıttan ${fmtNum(wos.checked || 0)} kayıt incelendi`;
+  const state = { pending: "WoS sırası bekleniyor", running: "WoS taranıyor", done: "WoS taraması tamamlandı", partial: "WoS kısmi sonuç", blocked: "WoS erişimi sağlanamadı", error: "WoS taraması tamamlanamadı" }[wos.status] || "WoS";
+  const reason = { record_limit: `Tarama ilk ${wos.limit || 20} kayıtla sınırlı.`, time_budget: "Tarama süresi doldu.", queue_timeout: "Tarama sırası için bekleme süresi doldu.", results_not_fully_loaded: "WoS sonuçlarının bir bölümü yüklenemedi.", access_unavailable: "Diğer kaynaklardan alınan yayınlar gösteriliyor." }[wos.reason] || "";
+  return `${["pending", "running"].includes(wos.status) ? '<span class="spinner"></span>' : ""}${esc(state)} · ${esc(count)}${reason ? ` · ${esc(reason)}` : ""}`;
+}
 async function viewSearch(q) {
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Konular" }]);
-  setView(`<div class="section-head"><div><h1>Konular</h1><p>OpenAlex, Crossref, Semantic Scholar, TR Dizin ve OpenAIRE (DergiPark, üniversite arşivleri) aynı anda taranır; aynı yayın tek satırda birleşir.</p></div></div>
+  setView(`<div class="section-head"><div><h1>Konular</h1><p>OpenAlex, Crossref, Semantic Scholar, TR Dizin, OpenAIRE ve WoS kayıtları kaynaklarıyla birleştirilir.</p></div></div>
     <form class="card quick-search" id="searchForm" style="margin-top:0">
       <div class="input">${icon("search")}<input id="sInput" value="${esc(q)}" placeholder="ör. göğüs hastalıkları, makine öğrenmesi, deprem mühendisliği"></div>
       <button class="btn primary" type="submit">Ara</button></form>
     <div id="sResults" style="margin-top:18px"></div>`);
   $("#searchForm").addEventListener("submit", (e) => {
-    e.preventDefault(); const v = $("#sInput").value.trim();
-    if (v.length >= 3) location.hash = `#/ara?q=${encodeURIComponent(v)}`;
+    e.preventDefault(); const value = $("#sInput").value.trim();
+    if (value.length < 3) return;
+    const hash = `#/ara?q=${encodeURIComponent(value)}`;
+    if (location.hash === hash) viewSearch(value); else location.hash = hash;
   });
+  const box = $("#sResults"), routeHash = location.hash;
   if (!q) {
-    $("#sResults").innerHTML = emptyState("search", "Bir konu yazın", "Türkçe yazdığınız konu İngilizceye de çevrilerek aranır.");
-    hydrateIcons($("#sResults")); $("#sInput").focus(); return;
+    box.innerHTML = emptyState("search", "Bir konu yazın", "Türkçe yazdığınız konu İngilizceye de çevrilerek aranır.");
+    hydrateIcons(box); $("#sInput").focus(); return;
   }
-  const box = $("#sResults");
-  box.innerHTML = `<div class="card"><div class="loading-line"><span class="spinner"></span>Akademik kaynaklar taranıyor…</div>${skeleton(6)}</div>`;
-  let r;
-  try { r = await api(`/api/search?q=${encodeURIComponent(q)}`); } catch (e) { box.innerHTML = `<div class="notice err">${icon("info")}<div>${esc(e.message)}</div></div>`; hydrateIcons(box); return; }
-  if (location.hash !== `#/ara?q=${encodeURIComponent(q)}`) return;
-  const all = r.papers;
-  box.innerHTML = `
-    <div class="src-status">${Object.entries(r.sources).map(([k, v]) => `<span class="chip ${typeof v === "number" ? "teal" : "gold"}">${esc(k)}: ${typeof v === "number" ? v + " sonuç" : esc(v)}</span>`).join("")}
-      ${r.english ? `<span class="chip blue">EN: ${esc(r.english)}</span>` : ""}<span class="chip">${r.elapsed} sn</span></div>
-    <div class="toolbar"><div class="input">${icon("search")}<input id="sFilter" placeholder="Sonuçlarda süz"></div>
-      <select class="select" id="sSort"><option value="rel">En ilgili</option><option value="year">En yeni</option><option value="cites">En çok atıf</option></select>
-      ${exportButtons("search")}</div>
-    <div class="card" id="sList"></div>`;
-  hydrateIcons(box);
-  const draw = () => {
-    const f = fold($("#sFilter").value), sort = $("#sSort").value;
-    let list = all.filter((p) => !f || fold(`${p.title} ${(p.authors || []).join(" ")} ${p.venue || ""}`).includes(f));
-    if (sort === "year") list = [...list].sort((a, b) => (b.year || 0) - (a.year || 0));
-    if (sort === "cites") list = [...list].sort((a, b) => (b.citations || 0) - (a.citations || 0));
-    S.lists.search = list;
-    S.listMeta.search = { file: `arama ${q}` };
-    $("#sList").innerHTML = list.length ? `<div class="stagger">${list.map((p, i) => paperCard(p, {}, i)).join("")}</div>`
-      : emptyState("search", "Sonuç yok", "Farklı bir ifade deneyin.");
-    hydrateIcons($("#sList"));
+  box.innerHTML = `<div id="topicSources" class="src-status"></div><div id="topicProgress" class="loading-line" role="status" aria-live="polite"><span class="spinner"></span>Akademik kaynaklar taranıyor…</div><div id="topicError"></div><div id="topicTable"></div>`;
+  const active = () => box.isConnected && location.hash === routeHash;
+  S.listMeta.search = { file: `arama ${q}` };
+  const table = mountPublicationTable($("#topicTable"), "s", "search", [], "rel");
+  let revision;
+  const apply = (r) => {
+    $("#topicSources").innerHTML = Object.entries(r.sources || {}).map(([source, value]) => `<span class="chip ${typeof value === "number" ? "teal" : "gold"}">${esc(SRC_TR[sourceKey(source)] || source)}: ${typeof value === "number" ? fmtNum(value) + " sonuç" : esc(value)}</span>`).join("")
+      + (r.english ? `<span class="chip blue">EN: ${esc(r.english)}</span>` : "") + (r.elapsed != null ? `<span class="chip">${esc(r.elapsed)} sn</span>` : "");
+    $("#topicProgress").innerHTML = topicProgress(r.wos);
+    const next = r.revision ?? JSON.stringify(r.papers || []);
+    if (next !== revision) { revision = next; table.update(r.papers || []); }
   };
-  $("#sFilter").oninput = draw; $("#sSort").onchange = draw; draw();
+  try {
+    await pollSnapshots(() => api(`/api/search?q=${encodeURIComponent(q)}`), active, apply,
+      (r) => !!r.search_id && ["pending", "running"].includes(r.wos?.status),
+      (r) => api(`/api/search/${encodeURIComponent(r.search_id)}`));
+  } catch (e) {
+    if (!active()) return;
+    $("#topicProgress").textContent = "Arama güncellenemedi; alınan sonuçlar gösteriliyor.";
+    $("#topicError").innerHTML = `<div class="notice err"><div>${esc(e.message)}</div></div>`;
+  }
 }
 
 // =================================================================== KÜTÜPHANEM
@@ -1678,10 +2452,9 @@ async function aiSettingsCard() {
     <form class="ai-form" id="aiForm" autocomplete="off">
       <div class="field"><label for="aiProvider">Sağlayıcı</label><select class="select" id="aiProvider">
         ${Object.entries(cfg.providers).map(([k, p]) => `<option value="${k}" ${k === cfg.provider ? "selected" : ""}>${esc(p.label)}</option>`).join("")}</select></div>
-      <div class="field" id="aiUrlField"><label for="aiUrl">Sunucu adresi</label><div class="input"><input id="aiUrl" placeholder="http://localhost:11434/v1"></div></div>
+      <div class="field" id="aiUrlField"><label for="aiUrl">API adresi</label><div class="input"><input id="aiUrl" placeholder="http://localhost:11434/v1"></div></div>
       <div class="field"><label for="aiKey">API anahtarı</label><div class="input"><input id="aiKey" type="password" autocomplete="new-password"></div></div>
       <div class="field"><label for="aiModel">Model</label><div class="input"><input id="aiModel" list="aiModels"></div><datalist id="aiModels"></datalist></div>
-      <div class="field"><label for="aiFast">Kısa işler modeli <small>isteğe bağlı</small></label><div class="input"><input id="aiFast" list="aiModels"></div></div>
       <div class="field" id="aiEmbedField"><label for="aiEmbed">Gömme modeli <small>isteğe bağlı</small></label><div class="input"><input id="aiEmbed" list="aiModels"></div></div>
     </form>
     <p class="muted ai-note" id="aiNote"></p>
@@ -1692,21 +2465,20 @@ async function aiSettingsCard() {
     <p class="faint ai-note">Anahtar yalnızca bu bilgisayarda saklanır. Taranan sayfa metinleri, yayın bilgileri ve sohbet soruları seçtiğiniz sağlayıcıya gönderilir.</p>`;
   const fill = () => {
     const name = $("#aiProvider").value, p = cfg.providers[name];
-    $("#aiUrlField").hidden = name !== "custom";
     $("#aiEmbedField").hidden = name !== "custom";
     $("#aiUrl").value = p.base_url || "";
+    $("#aiUrl").placeholder = name === "custom" ? "http://localhost:11434/v1" : "Sağlayıcının API adresi";
     $("#aiModel").value = p.model || "";
-    $("#aiFast").value = p.fast_model || "";
     $("#aiEmbed").value = p.embed_model || "";
     $("#aiKey").value = "";
-    $("#aiKey").placeholder = p.has_key ? (p.key_source === "env" ? "Anahtar .env dosyasından geliyor" : "Kayıtlı; değiştirmek için yazın") : "Anahtarı yapıştırın";
-    $("#aiClear").hidden = p.key_source !== "saved";
+    $("#aiKey").placeholder = p.has_key ? "Kayıtlı; değiştirmek için yazın" : "Anahtarı yapıştırın";
+    $("#aiClear").hidden = !p.has_key;
     $("#aiModels").innerHTML = "";
     $("#aiNote").textContent = NOTES[name];
     $("#aiStatus").textContent = "";
   };
   const values = (extra = {}) => ({ provider: $("#aiProvider").value, key: $("#aiKey").value, base_url: $("#aiUrl").value,
-    model: $("#aiModel").value, fast_model: $("#aiFast").value, embed_model: $("#aiEmbed").value, ...extra });
+    model: $("#aiModel").value, embed_model: $("#aiEmbed").value, ...extra });
   const status = (text) => { $("#aiStatus").textContent = text; };
   const save = async (extra) => {
     status("Kaydediliyor ve bağlanılıyor…");
@@ -1876,6 +2648,7 @@ async function scanChanges() {
 
 // =================================================================== yönlendirme ve olaylar
 function route() {
+  wosProfileWatch?.stop();
   const [path, qs] = (location.hash || "#/").slice(1).split("?");
   const params = new URLSearchParams(qs || "");
   const parts = path.split("/").filter(Boolean);
@@ -1960,6 +2733,7 @@ document.addEventListener("click", async (e) => {
   const cite = t.closest("[data-pub]");
   if (cite) {
     $(`.tab[data-tab="pubs"]`)?.click();
+    $("#profilePublications")?.publicationTable?.reveal(cite.dataset.pub);
     const row = document.getElementById(`pub-${cite.dataset.pub}`);
     if (row) { row.scrollIntoView({ behavior: "smooth", block: "center" }); row.classList.add("flash"); setTimeout(() => row.classList.remove("flash"), 1600); }
     return;
@@ -1974,6 +2748,8 @@ document.addEventListener("click", async (e) => {
   const up = t.closest("[data-unitpapers]");
   if (up) { e.stopPropagation(); openUnitPapers(up.dataset.unitpapers, +up.dataset.i); return; }
   if (t.closest("[data-facstaff]")) { const d = S.dir; selectDept(-1, d.data.items[d.fac].url); return; }
+  const staffOpen = t.closest("[data-staff-open]");
+  if (staffOpen) { openStaffProfile(staffOpen.dataset.staffOpen); return; }
   const prof = t.closest("[data-profile]");
   if (prof) {
     const d = S.dir, person = d.staff.items[+prof.dataset.profile];
@@ -1994,7 +2770,17 @@ document.addEventListener("input", (e) => {
   const q = fold(e.target.value);
   $$(`#${f} [data-q]`).forEach((el) => { el.style.display = !q || el.dataset.q.includes(q) ? "" : "none"; });
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeDrawer(); } });
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (wosVerification?.isOpen()) { e.preventDefault(); wosVerification.hide(); return; }
+  const filter = $(".dt-filter-popover:popover-open");
+  if (filter) {
+    e.preventDefault(); filter.hidePopover();
+    $(`[popovertarget="${filter.id}"].dt-filter-toggle`)?.focus({ preventScroll: true });
+    return;
+  }
+  closeModal(); closeDrawer();
+});
 $("#menuBtn").addEventListener("click", () => $("#app").classList.toggle("menu-open"));
 $("#scrim").addEventListener("click", () => $("#app").classList.remove("menu-open"));
 $("#themeBtn").addEventListener("click", toggleTheme);
@@ -2003,6 +2789,7 @@ window.addEventListener("hashchange", route);
 
 (async () => {
   hydrateIcons();
+  wosVerification = createWosVerification();
   const legacy = new URLSearchParams(location.search).get("chat");
   if (legacy) { history.replaceState(null, "", `/#/profil/${legacy}`); }
   loadEnv();

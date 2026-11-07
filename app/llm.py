@@ -63,7 +63,7 @@ def _loose_json(text: str) -> dict | None:
 async def list_models(provider: str, base_url: str, key: str, timeout: int = 8) -> list[str] | None:
     """Sağlayıcının model adları; uç nokta yoksa (bazı kendi sunucularda) None. Yetki/ağ hatasında istisna."""
     if provider == "gemini":
-        url, params, headers = f"{API}/models", {"pageSize": 200}, {"x-goog-api-key": key}
+        url, params, headers = f"{base_url}/models", {"pageSize": 200}, {"x-goog-api-key": key}
     elif provider == "anthropic":
         url, params, headers = f"{base_url}/models", {"limit": 1000}, {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION}
     else:
@@ -161,7 +161,7 @@ class LLM:
                     await asyncio.sleep(1.5)
                 for model in self._chain(first):
                     for _ in range(2):
-                        resp = await client.post(f"{API}/models/{model}:generateContent",
+                        resp = await client.post(f"{self.base_url}/models/{model}:generateContent",
                                                  headers=self._headers(), json=body_for(model))
                         if resp.status_code == 200:
                             return resp.json()
@@ -284,7 +284,7 @@ class LLM:
                 for i in range(0, len(texts), 100):
                     reqs = [{"model": f"models/{self.embed_model}", "content": {"parts": [{"text": t}]},
                              "taskType": task, "outputDimensionality": EMBED_DIM} for t in texts[i:i + 100]]
-                    resp = await client.post(f"{API}/models/{self.embed_model}:batchEmbedContents",
+                    resp = await client.post(f"{self.base_url}/models/{self.embed_model}:batchEmbedContents",
                                              headers=self._headers(), json={"requests": reqs})
                     resp.raise_for_status()
                     out.extend(e["values"] for e in resp.json()["embeddings"])
@@ -311,7 +311,7 @@ class LLM:
                     body["systemInstruction"] = {"parts": [{"text": system}]}
                 received_text = False
                 usage: dict = {}
-                async with client.stream("POST", f"{API}/models/{model}:streamGenerateContent",
+                async with client.stream("POST", f"{self.base_url}/models/{model}:streamGenerateContent",
                                          params={"alt": "sse"}, headers=self._headers(), json=body) as resp:
                     if resp.status_code != 200:
                         text = (await resp.aread()).decode("utf-8", "replace")

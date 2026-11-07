@@ -10,5 +10,4 @@ if [ ! -f .venv/.installed ] || [ requirements.txt -nt .venv/.installed ]; then
   touch .venv/.installed
 fi
 if command -v npm >/dev/null && [ ! -x node_modules/.bin/rea ]; then npm install --no-audit --no-fund || echo "REA kurulamadı; Scrapling-only modda devam."; fi
-[ -f .env ] || echo "Uyarı: .env yok; GEMINI_API_KEY olmadan analiz ve sohbet mock modda çalışır."
 exec .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT:-8000}"

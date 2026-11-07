@@ -7,16 +7,18 @@ sorgu Gemini ile İngilizceye de çevrilir (model yoksa yalnız Türkçe aranır
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import re
 import time
+import uuid
 
 import httpx
 
 from .config import CONTACT_MAIL, OPENALEX_PARAMS, ROOT, USER_AGENT
-from . import trsources
-from .text import clean, doi_key, fold, title_key
+from . import publication_status, quartiles, trsources, wos, wos_publications, wos_verification
+from .text import clean, doi_key, fold, name_score, name_tokens, title_key
 
 FAV_PATH = ROOT / "data" / "favorites.json"
 OPENALEX = "https://api.openalex.org"
@@ -24,6 +26,11 @@ CROSSREF = "https://api.crossref.org"
 S2 = "https://api.semanticscholar.org/graph/v1"
 _SEARCH_CACHE: dict[str, tuple[float, dict]] = {}
 SEARCH_TTL = 1800
+_TOPIC_JOBS: dict[str, dict] = {}
+_TOPIC_TASKS: dict[str, asyncio.Task] = {}
+WOS_TOPIC_LIMIT = 20
+WOS_TOPIC_BUDGET = 90
+WOS_QUEUE_TIMEOUT = 20
 
 
 def paper_key(p: dict) -> str:
@@ -53,7 +60,8 @@ def favorites() -> dict:
 
 
 PAPER_FIELDS = ("title", "year", "venue", "doi", "url", "authors", "type", "citations", "abstract", "sources",
-                "source", "job_id", "pid", "person")
+                "source", "wos", "jcr", "quartile", "citations_by_source", "abstract_source", "abstract_url",
+                "publication_kind", "publication_status", "job_id", "pid", "person")
 PERSON_FIELDS = ("name", "title", "institution", "department", "photo", "chat_id", "job_id", "papers", "email")
 
 
@@ -170,30 +178,65 @@ async def _translate(q: str, llm) -> str:
     return en if en and fold(en) != fold(q) else ""
 
 
+def _same_topic_paper(a: dict, b: dict) -> bool:
+    """DOI'siz başlık eşleşmesinde yayın türü, yıl ve tam yazar kanıtı gerekir."""
+    kind = publication_status.kind(a)
+    if kind in ('Diğer', 'Türü belirtilmemiş') or kind != publication_status.kind(b):
+        return False
+    if not a.get('year') or str(a['year']) != str(b.get('year') or ''):
+        return False
+    return any(len(name_tokens(x)) >= 2 and len(name_tokens(y)) >= 2 and name_score(x, y) >= .85
+               for x in a.get('authors') or [] for y in b.get('authors') or [])
+
+
 def _merge(rows: list[dict]) -> list[dict]:
-    """DOI ya da başlık aynıysa tek satır; eksik alanlar diğer kaynaklardan tamamlanır."""
-    out: dict[str, dict] = {}
-    alias: dict[str, str] = {}
-    for r in rows:
-        if not r["title"] or len(r["title"]) < 6:
+    """DOI önceliklidir; çelişen DOI/yıl veya belirsiz başlık eşleşmesi birleştirilmez."""
+    out, titles = [], []
+    for raw in rows:
+        r = copy.deepcopy(raw)
+        r['title'] = clean(r.get('title') or '')
+        r['doi'] = doi_key(r.get('doi') or '')
+        if len(r['title']) < 6:
             continue
-        keys = [k for k in ("doi:" + r["doi"] if r["doi"] else "", "t:" + title_key(r["title"])) if k]
-        hit = next((alias[k] for k in keys if k in alias), None)
+        if r.get('abstract'):
+            r.setdefault('abstract_source', r.get('source') or '')
+            r.setdefault('abstract_url', r.get('url') or '')
+        title = title_key(r['title'])
+        candidates = [i for i, p in enumerate(out) if r['doi'] and doi_key(p.get('doi')) == r['doi']]
+        if not candidates and r.get('source_id'):
+            candidates = [i for i, p in enumerate(out)
+                          if p.get('source') == r.get('source') and p.get('source_id') == r['source_id']
+                          and not (r['doi'] and p.get('doi') and r['doi'] != p['doi'])]
+        if not candidates:
+            candidates = [i for i, p in enumerate(out) if title in titles[i]
+                          and not (r['doi'] and p.get('doi') and r['doi'] != p['doi'])
+                          and _same_topic_paper(r, p)]
+        hit = candidates[0] if len(candidates) == 1 else None
         if hit is None:
-            hit = keys[0]
-            out[hit] = {**r, "sources": [r["source"]]}
+            hit = len(out)
+            out.append({**r, 'sources': list(dict.fromkeys(r.get('sources') or [r.get('source')]))})
+            titles.append({title})
         else:
             cur = out[hit]
-            for f in ("doi", "venue", "abstract", "year", "url", "type"):
+            for f in ('doi', 'venue', 'year', 'url', 'type', 'authors', 'issn', 'date'):
                 if not cur.get(f) and r.get(f):
                     cur[f] = r[f]
+            if not cur.get('abstract') and r.get('abstract'):
+                for f in ('abstract', 'abstract_source', 'abstract_url'):
+                    cur[f] = r.get(f, '')
             if (r.get("citations") or 0) > (cur.get("citations") or 0):
                 cur["citations"] = r["citations"]
-            if r["source"] not in cur["sources"]:
-                cur["sources"].append(r["source"])
-        for k in keys:
-            alias.setdefault(k, hit)
-    return list(out.values())
+            cur['sources'] = list(dict.fromkeys(cur['sources'] + (r.get('sources') or [r.get('source')])))
+            for field in ('wos', 'jcr', 'quartile'):
+                if r.get(field):
+                    cur[field] = r[field]
+            titles[hit].add(title)
+        cur = out[hit]
+        cur['sources'] = [s for s in cur['sources'] if s]
+        if isinstance(r.get('citations'), int) and r.get('source'):
+            cur.setdefault('citations_by_source', {})[r['source']] = r['citations']
+    publication_status.annotate(out)
+    return out
 
 
 def _relevance(p: dict, terms: list[str]) -> float:
@@ -204,12 +247,34 @@ def _relevance(p: dict, terms: list[str]) -> float:
 
 async def topic_search(q: str, llm=None, n: int = 25) -> dict:
     q = clean(q)
-    hit = _SEARCH_CACHE.get(fold(q))
-    if hit and time.time() - hit[0] < SEARCH_TTL:
-        return hit[1]
+    n = max(1, min(int(n), 50))
+    cache_key = f'{fold(q)}:{n}'
+    hit = _SEARCH_CACHE.get(cache_key)
+    if hit and time.time() - hit[0] < SEARCH_TTL and hit[1].get('search_id') in _TOPIC_JOBS:
+        job = _TOPIC_JOBS[hit[1]['search_id']]
+        meta = job['wos']
+        retryable = meta.get('status') in ('error', 'blocked') or meta.get('reason') in ('time_budget', 'collection_incomplete')
+        if job['id'] not in _TOPIC_TASKS and (wos.needs_verification_retry(meta) or
+                retryable and time.time() - meta.get('finished_at', 0) >= 300):
+            job['wos'] = _pending_wos(min(n, WOS_TOPIC_LIMIT))
+            _publish_topic(job)
+            _TOPIC_TASKS[job['id']] = asyncio.create_task(_run_topic_wos(job))
+        return copy.deepcopy(job['snapshot'])
     started = time.time()
-    en = await _translate(q, llm)
+    _prune_topics()
+    try:
+        en = await _translate(q, llm)
+    except Exception:
+        en = ''
     queries = [q] + ([en] if en else [])
+    search_id = uuid.uuid4().hex[:16]
+    job = {'id': search_id, 'cache_key': cache_key, 'started': started, 'query': q, 'english': en,
+           'rows': [], 'wos_rows': [], 'sources': {}, 'base_ready': False,
+           'terms': [t for t in fold(' '.join(queries)).split() if len(t) > 2],
+           'revision': 0, 'wos': _pending_wos(min(n, WOS_TOPIC_LIMIT))}
+    _TOPIC_JOBS[search_id] = job
+    _publish_topic(job)
+    _TOPIC_TASKS[search_id] = asyncio.create_task(_run_topic_wos(job))
     async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
         calls = [(name, fn(client, query, n)) for query in queries
                  for name, fn in (("OpenAlex", _openalex), ("Crossref", _crossref), ("Semantic Scholar", _semantic),
@@ -225,11 +290,99 @@ async def topic_search(q: str, llm=None, n: int = 25) -> dict:
         rows.extend(res)
         status[name] = status.get(name) if isinstance(status.get(name), int) else 0
         status[name] += len(res)
-    terms = [t for t in fold(" ".join(queries)).split() if len(t) > 2]
-    papers = sorted(_merge(rows), key=lambda p: -_relevance(p, terms))
-    for p in papers:
-        p["key"] = paper_key(p)
-    out = {"query": q, "english": en, "papers": papers, "sources": status, "elapsed": round(time.time() - started, 1)}
-    if papers:
-        _SEARCH_CACHE[fold(q)] = (time.time(), out)
-    return out
+    job.update(rows=rows, sources=status, base_ready=True)
+    _publish_topic(job)
+    return copy.deepcopy(job['snapshot'])
+
+
+def _pending_wos(limit: int) -> dict:
+    return {'status': 'pending', 'total': None, 'checked': 0, 'limit': limit,
+            'scope': 'first_results', 'truncated': False}
+
+
+def _publish_topic(job: dict):
+    papers = sorted(_merge(job['rows'] + job['wos_rows']), key=lambda p: -_relevance(p, job['terms']))
+    quartiles.annotate([p for p in papers if not p.get('quartile')])
+    for paper in papers:
+        paper['key'] = paper_key(paper)
+    status = dict(job['sources'])
+    meta = job['wos']
+    if meta['status'] in ('pending', 'running'):
+        status['WoS'] = 'aranıyor'
+    elif job['wos_rows'] or meta['status'] in ('done', 'partial'):
+        status['WoS'] = len(job['wos_rows'])
+    else:
+        status['WoS'] = 'sıra bekleme süresi doldu' if meta.get('reason') == 'queue_timeout' else 'erişilemedi'
+    job['revision'] += 1
+    job['snapshot'] = {'query': job['query'], 'english': job['english'], 'papers': papers, 'sources': status,
+                       'elapsed': round(time.time() - job['started'], 1), 'search_id': job['id'],
+                       'revision': job['revision'], 'wos': copy.deepcopy(meta)}
+    if job.get('base_ready'):
+        _SEARCH_CACHE[job['cache_key']] = (job['started'], job['snapshot'])
+
+
+async def _collect_wos_topic(query: str, limit: int) -> dict:
+    from scrapling.fetchers import AsyncStealthySession
+    async with wos_verification.time_budget(WOS_TOPIC_BUDGET + 5):
+        async with AsyncStealthySession(headless=True, network_idle=False, timeout=45000, max_pages=1) as session:
+            return await wos_publications.collect_topic(query, session, limit=limit,
+                                                        budget=WOS_TOPIC_BUDGET)
+
+
+async def _run_topic_wos(job: dict):
+    gate, acquired = wos.access_gate(), False
+    try:
+        async with wos_verification.time_budget(WOS_QUEUE_TIMEOUT):
+            await gate.acquire()
+        acquired = True
+        job['wos']['status'] = 'running'
+        _publish_topic(job)
+        report = await _collect_wos_topic(job['english'] or job['query'], job['wos']['limit'])
+        report['manual_verification_version'] = wos.MANUAL_VERIFICATION_VERSION
+        previous = {p.get('source_id') or p.get('url'): p for p in job['wos_rows']}
+        previous.update({p.get('source_id') or p.get('url'): p for p in report.get('records') or []})
+        job['wos_rows'] = list(previous.values())
+        job['wos'] = {k: v for k, v in report.items() if k != 'records'}
+    except asyncio.TimeoutError:
+        job['wos'].update(status='partial' if acquired else 'error', truncated=acquired,
+                          reason='time_budget' if acquired else 'queue_timeout')
+    except wos.AccessUnavailable as exc:
+        job['wos'].update(status='blocked', reason=getattr(exc, 'reason', 'access_unavailable'),
+                          message=str(exc), access_detail=getattr(exc, 'access_detail', 'unavailable'))
+    except asyncio.CancelledError:
+        job['wos'].update(status='error', reason='cancelled')
+        raise
+    except Exception as exc:
+        job['wos'].update(status='error', reason='collection_failed', errors=[type(exc).__name__])
+    finally:
+        if acquired:
+            gate.release()
+        job['wos']['manual_verification_version'] = wos.MANUAL_VERIFICATION_VERSION
+        job['wos']['finished_at'] = time.time()
+        _publish_topic(job)
+        _TOPIC_TASKS.pop(job['id'], None)
+
+
+def topic_snapshot(search_id: str) -> dict | None:
+    job = _TOPIC_JOBS.get(search_id)
+    if not job or time.time() - job['started'] >= SEARCH_TTL:
+        return None
+    return copy.deepcopy(job['snapshot'])
+
+
+def _prune_topics():
+    for search_id, job in list(_TOPIC_JOBS.items()):
+        if search_id not in _TOPIC_TASKS and time.time() - job['started'] >= SEARCH_TTL:
+            _TOPIC_JOBS.pop(search_id, None)
+            hit = _SEARCH_CACHE.get(job['cache_key'])
+            if hit and hit[1].get('search_id') == search_id:
+                _SEARCH_CACHE.pop(job['cache_key'], None)
+
+
+async def close():
+    tasks = list(_TOPIC_TASKS.values())
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _TOPIC_TASKS.clear()
