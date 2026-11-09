@@ -1,4 +1,4 @@
-  https://eng.ku.edu.tr/hakkimizda/akademik-kadro/#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Tek komut: bash run.sh  → http://127.0.0.1:8000
 set -euo pipefail
 cd "$(dirname "$0")"

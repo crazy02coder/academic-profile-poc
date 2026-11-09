@@ -7,5 +7,6 @@ runs/
 data/*
 !data/arge_merkezleri.json
 !data/journal_quartiles.sqlite
+!data/yok_university_logos.json
 .ai-settings.json
 .ai-settings.tmp

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import hashlib
 import ipaddress
 import json
@@ -29,11 +30,102 @@ _LIMIT = asyncio.Semaphore(3)
 _INFLIGHT: dict[str, asyncio.Task] = {}
 MAX_BYTES = 2_000_000
 MAX_HTML_BYTES = 6_000_000
-LOGO_VERSION = 4
+LOGO_VERSION = 6
 POSITIVE_TTL = 30 * 86400
 NEGATIVE_TTL = 10 * 60
 VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 _TLS_REPAIR = asyncio.Lock()
+_YOK_LOGOS: dict[str, str] | None = None
+
+
+def yok_logo(uid: str) -> str:
+    """YÖK'ün üniversite sayfasındaki resmi logo (kare amblem); kurum sitesindeki yatay/beyaz logolardan önce gelir."""
+    global _YOK_LOGOS
+    if _YOK_LOGOS is None:
+        try:
+            _YOK_LOGOS = json.loads((ROOT / "data" / "yok_university_logos.json").read_text(encoding="utf-8"))["logos"]
+        except (OSError, ValueError, KeyError):
+            _YOK_LOGOS = {}
+    url = _YOK_LOGOS.get(uid, "")
+    return url if url.startswith("https://s3-ankara.yok.gov.tr/") else ""
+
+
+async def _wikidata_logo(client, group: dict) -> list[str]:
+    """Wikidata'da adı tutan Türkiye şirketinin logoları (P8972 küçük logo, P154 logo; Commons PNG önizlemesi)."""
+    name = group.get("name") or ""
+    if not name:
+        return []
+    nexts = [n for n in sorted(group.get("nexts") or []) if len(n) > 2][:3]
+    terms = [name, f"{name} Holding", f"{name} Grubu"] + [f"{name} {n}" for n in nexts]
+    ids: list[str] = []
+    try:
+        async with asyncio.timeout(12):
+            for term in terms:
+                r = await client.get("https://www.wikidata.org/w/api.php", params={
+                    "action": "wbsearchentities", "search": term, "language": "tr", "type": "item", "limit": 5, "format": "json"})
+                for x in (r.json().get("search", []) if r.status_code == 200 else []):
+                    if x["id"] not in ids:
+                        ids.append(x["id"])
+                if len(ids) >= 12:
+                    break
+            ids = ids[:40]
+            if not ids:
+                return []
+            r = await client.get("https://www.wikidata.org/w/api.php", params={
+                "action": "wbgetentities", "ids": "|".join(ids), "props": "claims|labels|aliases", "languages": "tr|en", "format": "json"})
+            entities = r.json().get("entities", {}) if r.status_code == 200 else {}
+    except (TimeoutError, httpx.HTTPError, ValueError):
+        return []
+    out: list[str] = []
+    base = fold(name)
+    for eid in ids:
+        e = entities.get(eid) or {}
+        claims = e.get("claims") or {}
+        value = lambda p: [(c.get("mainsnak") or {}).get("datavalue", {}).get("value") for c in claims.get(p, [])]
+        if not any(isinstance(v, dict) and v.get("id") == "Q43" for v in value("P17")):
+            continue
+        names = [x.get("value", "") for x in (e.get("labels") or {}).values()]
+        names += [a.get("value", "") for v in (e.get("aliases") or {}).values() for a in v]
+        # Ad birebir ya da "Ad Holding/Grubu/Alüminyum…" biçiminde başlamalı
+        if not any(fold(n) == base or fold(n).startswith(base + " ") for n in names):
+            continue
+        for prop in ("P8972", "P154"):
+            for logo in (v for v in value(prop) if isinstance(v, str)):
+                url = "https://commons.wikimedia.org/wiki/Special:FilePath/" + logo.replace(" ", "_") + "?width=256"
+                if url not in out:
+                    out.append(url)
+    return out[:4]
+
+
+def _quality(body: bytes, mime: str) -> float:
+    """Kart içinde okunur logo puanı: kare/dolu ve beyaz olmayan görseller önde; görünmezler 0."""
+    if mime == "image/svg+xml":
+        m = re.search(rb'viewBox\s*=\s*["\']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)', body[:3000])
+        w, h = (float(m.group(1)), float(m.group(2))) if m else (1.0, 1.0)
+        aspect = max(w, h) / max(min(w, h), 1e-6)
+        white = re.findall(rb'fill\s*[:=]\s*["\']?\s*(#fff\b|#ffffff\b|white\b)', body, re.I)
+        colored = re.findall(rb'fill\s*[:=]\s*["\']?\s*(#(?!fff\b|ffffff\b)[0-9a-f]{3,6}|rgb|black)', body, re.I)
+        if white and not colored:
+            return 0.0
+        size_pen = 0
+    else:
+        try:
+            from PIL import Image
+            im = Image.open(io.BytesIO(body))
+            im.seek(0)
+            w, h = im.size
+            im = im.convert("RGBA")
+            im.thumbnail((64, 64))
+            px = list(im.getdata())
+        except Exception:
+            return 0.0
+        ink = sum(1 for r, g, b, a in px if a > 60 and min(r, g, b) < 225)
+        if ink / max(len(px), 1) < 0.012:
+            return 0.0
+        aspect = max(w, h) / max(min(w, h), 1)
+        size_pen = 25 if max(w, h) < 40 else 10 if max(w, h) < 90 else 0
+    aspect_pen = 0 if aspect <= 1.5 else 12 if aspect <= 2.4 else 30 if aspect <= 4 else 50
+    return max(1.0, 100.0 - aspect_pen - size_pen)
 
 
 def public_client(**kwargs) -> httpx.AsyncClient:
@@ -494,7 +586,10 @@ async def _collect(kind: str, oid: str, path, previous: dict | None = None) -> d
     async with _LIMIT:
         try:
             async with asyncio.timeout(45), public_client(timeout=10, headers={"User-Agent": USER_AGENT, "Accept-Language": "tr-TR,tr;q=0.9"}) as client:
-                home, known, parser = await _origin(kind, oid, client, previous)
+                if kind == "universities" and yok_logo(oid):
+                    home, known, parser = "", "", None  # resmi YÖK logosu yeterli; kurum sitesi açılmaz
+                else:
+                    home, known, parser = await _origin(kind, oid, client, previous)
                 candidates = []
                 if home:
                     try:
@@ -511,15 +606,26 @@ async def _collect(kind: str, oid: str, path, previous: dict | None = None) -> d
                         result["reason"] = type(exc).__name__
                 if known:
                     candidates.append((6, "url", known))
+                if kind == "universities" and (official := yok_logo(oid)):
+                    candidates.append((-1, "url", official))
+                if kind == "firms":
+                    for i, wiki in enumerate(await _wikidata_logo(client, firms._groups().get(oid) or {"name": ""})):
+                        candidates.append((1 + i * 0.1, "url", wiki))
+                if home:
+                    host = urlsplit(home).hostname or ""
+                    candidates.append((11, "url", f"https://www.google.com/s2/favicons?domain={host}&sz=128"))
                 if not candidates:
                     result.setdefault("reason", "NoVerifiedHomepageOrLogo")
+                else:
+                    result.pop("reason", None)
                 seen = set()
-                for _, source_kind, value in sorted(candidates, key=lambda entry: entry[0]):
+                best = (0.0, None)
+                for rank, source_kind, value in sorted(candidates, key=lambda entry: entry[0]):
                     identity = (source_kind, value)
                     if identity in seen:
                         continue
                     seen.add(identity)
-                    if len(seen) > 8:
+                    if len(seen) > 10:
                         break
                     try:
                         if source_kind == "inline":
@@ -528,10 +634,17 @@ async def _collect(kind: str, oid: str, path, previous: dict | None = None) -> d
                             body, declared, final = await read_public(client, value)
                         mime = _image_type(body, declared)
                         if mime:
-                            result.update(data=base64.b64encode(body).decode(), type=mime, source=final)
-                            break
+                            logoish = rank in (-1, 1, 8) or 1 <= rank < 2 or "logo" in str(value)[:400].lower()
+                            score = _quality(body, mime) - (0 if logoish else 10 if rank >= 9 else 25)
+                            if score > best[0]:
+                                best = (score, (body, mime, final))
+                            if score >= 88:
+                                break
                     except (httpx.HTTPError, ValueError):
                         continue
+                if best[1]:
+                    body, mime, final = best[1]
+                    result.update(data=base64.b64encode(body).decode(), type=mime, source=final, score=round(best[0], 1))
         except (TimeoutError, httpx.HTTPError, ValueError, OSError) as exc:
             result["reason"] = type(exc).__name__
     if not result["data"] and previous and previous.get("data"):
@@ -556,7 +669,8 @@ async def logo(kind: str, oid: str) -> dict:
             cached = None
             raise ValueError("Invalid logo cache")
         now = time.time()
-        if cached.get("data") and (now - cached["at"] < POSITIVE_TTL or now - cached.get("retry_at", 0) < NEGATIVE_TTL):
+        if cached.get("data") and cached.get("version") == LOGO_VERSION and (
+                now - cached["at"] < POSITIVE_TTL or now - cached.get("retry_at", 0) < NEGATIVE_TTL):
             return cached
         # Old negative cache entries came from the previous parser; retry once now.
         if not cached.get("data") and cached.get("version") == LOGO_VERSION and now - cached["at"] < NEGATIVE_TTL:

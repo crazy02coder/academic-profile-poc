@@ -358,3 +358,25 @@ async def person_site(university_raw: str, email: str = "") -> str:
             return await _home_of(client, uni)
     except httpx.HTTPError:
         return ""
+
+
+async def unit_summary(uid: str) -> dict | None:
+    """Üniversite özeti: fakülte ve birim sayısı; bölüm sayısı yalnız önbellekteki kadro listelerinden (YÖK'e ek istek yok)."""
+    d = await university_detail(uid)
+    uni = await _university(uid)
+    if not d or not uni:
+        return None
+    faculties = [x for x in d["items"] if "FAKÜLTE" in x["raw"].upper()]
+    deps, scanned = set(), 0
+    for f in faculties:
+        want = _unit_tokens(f["raw"])
+        people = None
+        for label in (uni["raw"], uni["name"]):  # kadro önbelleği YÖK listesindeki yazımla anahtarlanır
+            people = _load("people-" + hashlib.sha1(f"{label}|{' '.join(sorted(want))}".encode()).hexdigest()[:12])
+            if people:
+                break
+        if people:
+            scanned += 1
+            deps |= {(f["raw"], p["department"]) for p in people if p.get("department")}
+    return {"id": uid, "name": d["name"], "home": d["home"], "faculties": len(faculties), "units": len(d["items"]),
+            "departments": len(deps), "scanned": scanned}

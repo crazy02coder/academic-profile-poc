@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Literal
 
-from . import rea, recipes, org_assets, student_view, student_assistant
+from . import rea, recipes, org_assets, student_view, student_assistant, uni_facts
 from .consensus import save_run, verify_papers, verify_profile
 from .net import fetch_static
 from .analysis import analyze
@@ -106,6 +106,21 @@ def _emit(job: dict, event: dict):
     job["events"].append(event)
 
 
+def _slim_records(records) -> list[dict]:
+    """Canlı listeye giden hafif yayın kaydı (birleştirme/doğrulama sonra yapılır)."""
+    out = []
+    for r in records or []:
+        if isinstance(r, dict) and r.get("title"):
+            out.append({k: r.get(k) for k in ("title", "year", "venue", "doi", "source", "type")})
+    return out[:600]
+
+
+def _slim_profile(profile) -> dict:
+    p = profile.to_dict()
+    return {"name": p.get("name") or profile.query_name, "title": p.get("title"), "institution": p.get("institution"),
+            "department": p.get("department"), "photo": (p.get("yok") or {}).get("photo") or p.get("photo")}
+
+
 SITE_TIMEOUT = 60  # YÖK adayı seçildiyse kurum sitesi yalnız zenginleştirme: fotoğraf, ilgi alanı, profil bağlantısı
 
 
@@ -152,6 +167,19 @@ async def pipeline(job: dict, data: JobIn):
             await log("crawl", "done", "Gezinmeye gerek kalmadı: kişi başlangıç sayfasında veya hafızada bulundu.")
         if profile.links.get("orcid"):
             profile.observe("orcid", profile.links["orcid"], "university", profile.source_url)
+        # Canlı profil: kimlik bulununca kart açılır, yayınlar kaynak kaynak eklenir (sonuç gelince tam profile geçilir)
+        live_pending = {"YÖK", "OpenAlex", "Crossref", "ORCID", "Scholar", "TR Dizin", "OpenAIRE", "Tez Merkezi"}
+        _emit(job, {"type": "partial", "profile": _slim_profile(profile), "pending": sorted(live_pending)})
+
+        def announce(label):
+            def done(task):
+                live_pending.discard(label)
+                recs = []
+                if not task.cancelled() and task.exception() is None:
+                    res = task.result()
+                    recs = res[0] if isinstance(res, tuple) else res
+                _emit(job, {"type": "partial", "source": label, "records": _slim_records(recs), "pending": sorted(live_pending)})
+            return done
 
         # YÖK'ü beklemeyenler hemen başlar: Scholar ve Tez Merkezi yalnız adı kullanır; TR Dizin ve OpenAIRE sayfaları
         # şimdi çeker, kişiyle eşleştirmeyi YÖK'ün netleştirdiği ad/ORCID gelince (identity_ready) yapar.
@@ -160,9 +188,13 @@ async def pipeline(job: dict, data: JobIn):
         early = [asyncio.create_task(trsources.trdizin_works(profile, log, identity_ready)),
                  asyncio.create_task(trsources.openaire_works(profile, log, identity_ready)),
                  asyncio.create_task(trsources.tez_works(profile, log))]
+        scholar_task.add_done_callback(announce("Scholar"))
+        for label, task in zip(("TR Dizin", "OpenAIRE", "Tez Merkezi"), early):
+            task.add_done_callback(announce(label))
 
         # Faz A: kimlik çözümleme + YÖK yayınları (ORCID burada netleşebilir)
         await log("yok", "running", "YÖK Akademik: Scrapling StealthySession açılıyor, REA CDP ile bağlanacak.")
+        yok_records = []
         try:
             yok_records, yok_rea = await asyncio.wait_for(yok_works(profile, log), timeout=150)
             await log("yok", "done", f"YÖK: {len(yok_records)} kayıt.")
@@ -171,6 +203,9 @@ async def pipeline(job: dict, data: JobIn):
             await log("yok", "warning", f"YÖK atlandı ({type(exc).__name__}); akış devam ediyor.")
         finally:
             identity_ready.set()
+            live_pending.discard("YÖK")
+            _emit(job, {"type": "partial", "source": "YÖK", "records": _slim_records(yok_records),
+                        "profile": _slim_profile(profile), "pending": sorted(live_pending)})
 
         # Faz B: açık API'ler + Scholar paralel
         await log("publications", "running", "Paralel: OpenAlex, Crossref, ORCID, TR Dizin, OpenAIRE (DergiPark, üniversite "
@@ -178,8 +213,11 @@ async def pipeline(job: dict, data: JobIn):
         # YÖK unvan/bölümü çoğu zaman verir; sayfa metninden LLM tamamlaması yalnız hâlâ eksik kalanlar için,
         # API sorgularıyla paralel çalışır.
         labels = ("OpenAlex", "Crossref", "ORCID", "Scholar", "TR Dizin", "OpenAIRE", "Tez Merkezi")
-        tasks = await asyncio.gather(openalex_works(profile, log), crossref_works(profile, log),
-                                     orcid_works(profile, log), scholar_task, *early, llm_enrich(profile, llm, log),
+        api_tasks = [asyncio.create_task(c) for c in (openalex_works(profile, log), crossref_works(profile, log),
+                                                      orcid_works(profile, log))]
+        for label, task in zip(("OpenAlex", "Crossref", "ORCID"), api_tasks):
+            task.add_done_callback(announce(label))
+        tasks = await asyncio.gather(*api_tasks, scholar_task, *early, llm_enrich(profile, llm, log),
                                      return_exceptions=True)
         tasks = tasks[:len(labels)]
         records = list(yok_records)
@@ -290,7 +328,8 @@ async def pipeline(job: dict, data: JobIn):
         history_store.save_result(result["job_id"], result)
         # Yalnız kullanıcının başlattığı tam toplama sırasında WoS işi oluştur.
         # Kayıtlı profilin açılması artık salt durum okumasıdır.
-        await start_wos(result["job_id"], retry=bool(prev))
+        if job.get("wos", True):
+            await start_wos(result["job_id"], retry=bool(prev))
         _emit(job, {"type": "result", "data": result})
     except Exception as exc:  # noqa: BLE001
         _emit(job, {"type": "error", "message": f"İş tamamlanamadı: {type(exc).__name__}: {redact(str(exc))[:200]}"})
@@ -387,7 +426,7 @@ async def create_job(data: JobIn):
 
 
 @app.post("/api/jobs/{jid}/refresh", status_code=202)
-async def refresh_job(jid: str, body: RefreshIn | None = None):
+async def refresh_job(jid: str, body: RefreshIn | None = None, *, wos: bool = True):
     """Seçilen bölümleri yeniler; gövdesiz eski istemciler tam yenileme yapabilir."""
     old = _result_for(jid)
     if not old:
@@ -411,16 +450,17 @@ async def refresh_job(jid: str, body: RefreshIn | None = None):
         raise HTTPException(422, "Bu kayıtta başlangıç bağlantısı yok; akademisyeni yeniden arayın.")
     data = JobIn(url=url, name=inp.get("name") or prof.get("name") or prof.get("query_name") or "", yok_url=yok_url,
                  university=inp.get("university") or "", department=inp.get("department") or "", email=inp.get("email") or "")
-    return _start(data, {"job_id": jid, "chat_id": old.get("chat_id")}, options)
+    return _start(data, {"job_id": jid, "chat_id": old.get("chat_id")}, options, wos=wos)
 
 
-def _start(data: JobIn, refresh: dict | None = None, options: dict | None = None) -> dict:
+def _start(data: JobIn, refresh: dict | None = None, options: dict | None = None, *, wos: bool = True) -> dict:
     for jid in [k for k, v in JOBS.items() if v["done"] and time.time() - v["started"] > 3600]:
         JOBS.pop(jid, None)
     jid = uuid.uuid4().hex[:12]
     job = {"id": jid, "events": [], "done": False, "started": time.time(), "result": None, "refresh": refresh,
            "input": data.model_dump(),
-           "expects_wos": not options or ("publications" in options["sections"] and "wos" in options["sources"])}
+           "wos": wos,  # birim (toplu) taramasında WoS çalışmaz; kişi kendi profilinden başlatır
+           "expects_wos": wos and (not options or ("publications" in options["sections"] and "wos" in options["sources"]))}
     JOBS[jid] = job
     job["task"] = asyncio.create_task(_selective_pipeline(job, options) if options else pipeline(job, data))
     return {"id": jid, "steps": STEPS}
@@ -457,7 +497,7 @@ async def _selective_pipeline(job: dict, options: dict):
         p = result["profile"]
         library.update_person(jid, {"name": p.get("name"), "title": p.get("title"), "institution": p.get("institution"),
             "department": p.get("department"), "photo": (p.get("yok") or {}).get("photo"), "papers": result["unique_count"]})
-        if "publications" in options["sections"] and "wos" in options["sources"]:
+        if job.get("wos", True) and "publications" in options["sections"] and "wos" in options["sources"]:
             await start_wos(jid, retry=True)
         await log("verify", "done", "Seçilen bilgiler güncellendi.")
         _emit(job, {"type": "result", "data": result})
@@ -504,12 +544,30 @@ async def analyze_job(jid: str):
 
 @app.get("/api/jobs/{jid}/photo")
 async def job_photo(jid: str):
-    """Profil fotoğrafı (YÖK): listelerde küçük resim; kayıtta yoksa 404, arayüz baş harfleri gösterir."""
+    """Serve the largest stored original portrait, without upscaling thumbnails."""
+    import io
+    from PIL import Image
     result = _result_for(jid)
-    m = re.fullmatch(r"data:(image/[a-z+]+);base64,(.+)", ((result or {}).get("profile", {}).get("yok") or {}).get("photo") or "", re.S)
-    if not m:
+    profile = (result or {}).get("profile") or {}
+    candidates = [profile.get("photo"), (profile.get("yok") or {}).get("photo")]
+    best = None
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        match = re.fullmatch(r"data:(image/[a-z+]+);base64,(.+)", candidate, re.S)
+        if not match:
+            continue
+        try:
+            raw = base64.b64decode(match[2], validate=True)
+            with Image.open(io.BytesIO(raw)) as portrait:
+                area = portrait.width * portrait.height
+            if best is None or area > best[0]:
+                best = (area, raw, match[1])
+        except (ValueError, OSError):
+            continue
+    if best is None:
         raise HTTPException(404)
-    return Response(base64.b64decode(m.group(2)), media_type=m.group(1), headers={"Cache-Control": "public, max-age=86400"})
+    return Response(best[1], media_type=best[2], headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.post("/api/jobs/{jid}/patents")
@@ -1003,7 +1061,7 @@ async def _collect_unit_person(person: dict, institution: str, domain: str, *, o
                                 job["input"].get("university") or institution, domain) == key), None)
             if running is None:
                 if result is not None:
-                    started = await refresh_job(result["job_id"])
+                    started = await refresh_job(result["job_id"], wos=False)
                 else:
                     yok_url = identity["links"].get("yok") or ""
                     url = person.get("site_url") or (person.get("url") if not yok_url else "") or ""
@@ -1014,7 +1072,7 @@ async def _collect_unit_person(person: dict, institution: str, domain: str, *, o
                     data = JobIn(name=person["name"], url=url, yok_url=yok_url,
                                  university=identity["institution"], department=person.get("department") or "",
                                  email=person.get("email") or "")
-                    started = _start(data)
+                    started = _start(data, wos=False)
                 running = JOBS[started["id"]]
             await asyncio.shield(running["task"])
             result = running.get("result")
@@ -1024,28 +1082,11 @@ async def _collect_unit_person(person: dict, institution: str, domain: str, *, o
             source_warnings = [e["message"] for e in running["events"] if e.get("step") in {"yok", "publications"}
                                and e.get("status") == "warning"]
         publish(result)
-        jid = result["job_id"]
-        state = await start_wos(jid, retry=refresh)
-        # Publication collection is sufficient. Per-journal JCR checks continue
-        # in the shared profile task without holding up the entire unit.
-        publication_revision = result.get("wos_revision")
-        while state.get("status") == "running" and ("publications" not in state or
-                state["publications"].get("complete") is False):
-            await asyncio.sleep(1)
-            if history_store.load_result(jid) is None:
-                raise RuntimeError("Tarama sırasında akademisyen profili silindi.")
-            current = _result_for(jid) or result
-            state = wos.snapshot(current)
-            if current.get("wos_revision") != publication_revision:
-                publication_revision = current.get("wos_revision")
-                publish(current)
-        latest = _result_for(jid)
-        if latest is None or history_store.load_result(jid) is None:
+        # Toplu taramada WoS yok: kişinin açık kaynak profili bitince yeri hemen boşalır.
+        latest = _result_for(result["job_id"])
+        if latest is None or history_store.load_result(result["job_id"]) is None:
             raise RuntimeError("Tarama sırasında akademisyen profili silindi.")
-        report = state.get("publications") or {}
         warnings = list(source_warnings)
-        if state.get("status") in {"blocked", "error", "cancelled"} or report.get("status") in {"partial", "blocked", "error"}:
-            warnings.append("WoS taraması tamamlanamadı; erişilen kaynakların yayınları gösteriliyor.")
         return {**latest, "collection_warnings": warnings}
 
     task = _UNIT_PERSON_TASKS.get(key)
@@ -1115,7 +1156,7 @@ async def directory_papers(body: UnitPapersIn):
     _check_url(body.url)
     unit = f"site:{body.level}:{body.url}"
     saved = unit_publications.cached_unit(unit)
-    if saved is not None and (not body.refresh or saved.get("status") == "running"):
+    if saved is not None and saved.get("status") == "running":
         return _unit_publication_result(saved)
     llm = await _llm()
     domain = registrable(urlparse(body.url).hostname or "")
@@ -1134,15 +1175,15 @@ async def directory_papers(body: UnitPapersIn):
 @app.get("/api/firms")
 async def firm_list(q: str = "", sector: str = "", city: str = "", area: str = ""):
     """Resmi Ar-Ge / Tasarım Merkezi listesindeki firmalar (marka bazında gruplu)."""
-    return firms.firm_list(q[:100], sector[:120], city[:60], area[:120])
+    return await asyncio.to_thread(firms.firm_list, q[:100], sector[:120], city[:60], area[:120])
 
 
 @app.get("/api/firms/{fid}")
-async def firm_detail(fid: str, refresh: bool = False):
+async def firm_detail(fid: str, refresh: bool = False, quick: bool = False):
     """Firma → akademisyenler: OpenAlex/TR Dizin ortak yayınları ve çıkarılmış profillerdeki iş birlikleri."""
     if not re.fullmatch(r"[a-z0-9-]{1,80}", fid):
         raise HTTPException(422, "Geçersiz firma kimliği.")
-    d = await firms.firm_detail(fid, refresh)
+    d = await firms.firm_snapshot(fid, refresh) if quick else await firms.firm_detail(fid, refresh)
     if not d:
         raise HTTPException(404, "Firma resmi listede bulunamadı.")
     return d
@@ -1273,6 +1314,17 @@ async def university_student(uid: str, refresh: bool = False, section: str | Non
     return await student_view.get(uid, _llm, refresh, section=section, faculty=faculty, department=department)
 
 
+@app.get("/api/universities/{uid}/student/preview")
+async def university_student_preview(uid: str, url: str):
+    """Öğrenci bakışındaki resmî bağlantının içerik özeti (yalnız kurum alan adı)."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or len(url) > 2000:
+        raise HTTPException(422, "Geçersiz istek.")
+    try:
+        return await student_view.preview(uid, url)
+    except (ValueError, httpx.HTTPError, OSError, asyncio.TimeoutError) as exc:
+        raise HTTPException(422, str(exc)[:200] or "Bağlantı okunamadı.") from None
+
+
 @app.post("/api/universities/{uid}/student/chat")
 async def university_student_chat(uid: str, body: StudentChatIn):
     if not body.question.strip():
@@ -1291,6 +1343,56 @@ async def university_student_chat(uid: str, body: StudentChatIn):
         uid, university, _llm, question=body.question.strip(),
         messages=[message.model_dump() for message in body.messages], section=body.section,
         faculty=body.faculty, department=body.department)
+
+
+@app.get("/api/universities/{uid}/summary")
+async def university_summary(uid: str):
+    """Önizleme kartı için fakülte/bölüm sayıları (bölümler yalnız taranmış fakültelerden)."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(422, "Geçersiz üniversite.")
+    try:
+        d = await yokdir.unit_summary(uid)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"YÖK'e ulaşılamadı ({type(exc).__name__}).") from None
+    if not d:
+        raise HTTPException(404, "Üniversite YÖK listesinde bulunamadı.")
+    return d
+
+
+@app.get("/api/universities/{uid}/facts")
+async def university_facts(uid: str, refresh: bool = False):
+    """Kurum künyesi: kimlik (Vikipedi/Wikidata), kadro sayıları (YÖK Akademik), araştırma (OpenAlex)."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(422, "Geçersiz üniversite.")
+    d = await uni_facts.facts(uid, refresh)
+    if not d:
+        raise HTTPException(404, "Üniversite YÖK listesinde bulunamadı.")
+    return d
+
+
+@app.get("/api/universities/{uid}/staff-counts")
+async def university_staff_counts(uid: str):
+    """YÖK Akademik kadro sayıları (toplam ve unvan); büyük üniversitelerde ilk okuma yarım dakikayı bulabilir."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(422, "Geçersiz üniversite.")
+    try:
+        d = await uni_facts.staff_counts(uid)
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, f"YÖK Akademik okunamadı ({type(exc).__name__}).") from None
+    if not d:
+        raise HTTPException(404, "Üniversite YÖK listesinde bulunamadı.")
+    return d
+
+
+@app.get("/api/universities/{uid}/roles")
+async def university_roles(uid: str, name: str = ""):
+    """Fakültede süren idari görevler (dekan, bölüm başkanı); yalnız önbellekteki kadro için."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not name or len(name) > 200:
+        raise HTTPException(422, "Geçersiz istek.")
+    d = await uni_facts.faculty_roles(uid, name)
+    if d is None:
+        raise HTTPException(404, "Üniversite YÖK listesinde bulunamadı.")
+    return d
 
 
 @app.get("/api/universities/{uid}/faculty")
@@ -1317,7 +1419,7 @@ async def university_papers(body: YokPapersIn):
     """Kayıt varsa ağ taraması yapmadan döner; yenileme kullanıcı isteğiyle başlar."""
     unit = f"{body.uid}|{body.faculty}|{body.department if body.department is not None else '*'}"
     saved = unit_publications.cached_unit(unit)
-    if saved is not None and (not body.refresh or saved.get("status") == "running"):
+    if saved is not None and saved.get("status") == "running":
         return _unit_publication_result(saved)
 
     async def run():
@@ -1337,6 +1439,18 @@ def _unit_publication_result(data: dict) -> dict:
     wos.annotate(data["papers"])
     publication_status.annotate(data["papers"])
     return data
+
+
+@app.post("/api/units/papers/{job_id}/people/{person_key:path}")
+async def unit_person_refresh(job_id: str, person_key: str):
+    """Birimdeki tek kişiyi tarar (satırdaki Yenile düğmesi); WoS çalışmaz."""
+    async def collect(person, institution, domain, *, on_update=None):
+        return await _collect_unit_person(person, institution, domain, on_update=on_update, refresh=True)
+
+    data = unit_publications.refresh_person(job_id, person_key[:200], collect)
+    if data is None:
+        raise HTTPException(404, "Birim ya da kişi bulunamadı; birimi yeniden açın.")
+    return _unit_publication_result(data)
 
 
 @app.get("/api/units/papers/{job_id}")

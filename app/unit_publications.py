@@ -28,6 +28,7 @@ CACHE_DIR = ROOT / 'data' / 'unit_publications'
 _LOG = logging.getLogger(__name__)
 JOBS: dict[str, dict] = {}
 TASKS: dict[str, asyncio.Task] = {}
+PERSON_TASKS: dict[tuple[str, str], asyncio.Task] = {}  # (birim işi, kişi): tek kişi yenilemesi
 _KEYS: dict[str, str] = {}
 _PERSON_CACHE: dict[str, dict] = {}
 _GATE = None
@@ -221,6 +222,12 @@ def snapshot(job_id: str) -> dict | None:
     return copy.deepcopy({k: v for k, v in job.items() if not k.startswith('_')})
 
 
+def _active(jid: str) -> bool:
+    task = TASKS.get(jid)
+    return (task is not None and not task.done()) or any(
+        j == jid and not t.done() for (j, _), t in PERSON_TASKS.items())
+
+
 def _unit_key(unit: str) -> str:
     # The caller supplies a full route identity, not a faculty/department label.
     return _hash(unit)
@@ -300,8 +307,7 @@ def cached_unit(unit: str) -> dict | None:
             _KEYS[key] = jid
     if jid in JOBS:
         job = JOBS[jid]
-        task = TASKS.get(jid)
-        if task is not None and not task.done():
+        if _active(jid):
             return snapshot(jid)
         if job['status'] == 'running':
             _interrupted(job)
@@ -359,12 +365,13 @@ def cached_unit(unit: str) -> dict | None:
 
 
 def start(people: list[dict], institution: str, domain: str, unit: str, collect_person,
-          *, refresh: bool = False) -> dict:
+          *, refresh: bool = False, collect: bool | None = None) -> dict:
+    """Birimi açar. collect=False: ağ taraması yok; kadro adları ve sistemde kayıtlı profiller gösterilir,
+    kaydı olmayanlar "idle" kalır (kişi başına Yenile ya da birim için Tekrar tara ile taranır)."""
+    collect = refresh if collect is None else collect
     previous = cached_unit(unit)
-    if previous:
-        task = TASKS.get(previous['job_id'])
-        if not refresh or (task is not None and not task.done()):
-            return previous
+    if previous and _active(previous['job_id']):
+        return previous
     previous_results = JOBS[previous['job_id']]['_results'] if previous else {}
     distinct = {}
     for person in people:
@@ -382,7 +389,7 @@ def start(people: list[dict], institution: str, domain: str, unit: str, collect_
             results[identity] = copy.deepcopy(known)
             row.update(_metrics(known), cached=True, warnings=list(known.get('collection_warnings') or []))
         staff.append(row)
-    use_saved_profiles = bool(results) and not refresh
+    use_saved_profiles = not collect
     JOBS[jid] = {'job_id': jid, 'status': 'running', 'unit': unit, 'institution': institution,
                  'domain': domain, 'papers': [], 'people': len(distinct), 'total_people': len(distinct),
                  'completed': 0, 'matched': len(results), 'missing': [], 'errors': [], 'warnings': [], 'staff': staff,
@@ -398,9 +405,10 @@ def start(people: list[dict], institution: str, domain: str, unit: str, collect_
                 job['warnings'].extend({'person_key': row['person_key'], 'name': row['name'], 'message': message}
                                        for message in row['warnings'])
             else:
-                job['missing'].append(row['name'])
+                row['status'] = 'idle'  # taranmadı; kullanıcı Yenile ile başlatır
         job['completed'] = len(results)
-        job['status'] = 'partial' if job['missing'] or job['warnings'] else 'done'
+        job['idle'] = sum(row['status'] == 'idle' for row in staff)
+        job['status'] = 'partial' if job['warnings'] else 'done'
         job['finished_at'] = time.time()
         _persist(job)
         return snapshot(jid)
@@ -409,71 +417,88 @@ def start(people: list[dict], institution: str, domain: str, unit: str, collect_
     return snapshot(jid)
 
 
-async def _run(jid: str, collect_person):
+def _gate() -> asyncio.Semaphore:
     global _GATE, _GATE_LOOP
-    job = JOBS[jid]
-    pending = iter(job['staff'])
     loop = asyncio.get_running_loop()
     if _GATE_LOOP is not loop:
         _GATE, _GATE_LOOP = asyncio.Semaphore(CONCURRENCY), loop
+    return _GATE
+
+
+async def _collect_one(job: dict, staff: dict, collect_person, *, count: bool = True):
+    identity = staff['person_key']
+    person = job['_people'][identity]
+    staff['status'] = 'running'
+    for bucket in (job['missing'],):
+        while person['name'] in bucket:
+            bucket.remove(person['name'])
+    job['errors'] = [e for e in job['errors'] if not (isinstance(e, dict) and e.get('person_key') == identity)]
+    job['warnings'] = [w for w in job['warnings'] if not (isinstance(w, dict) and w.get('person_key') == identity)]
+
+    def update(value, final=False):
+        if not _valid(value):
+            return
+        # Empty intermediate/failed stages must not blank an existing profile.
+        previous = job['_results'].get(identity)
+        warnings = list(value.get('collection_warnings') or [])
+        if not value['publications'] and previous and previous.get('publications') and (not final or warnings):
+            if final:
+                staff.update(_metrics(previous), cached=True, warnings=warnings)
+                job['_results'][identity]['collection_warnings'] = warnings
+            return
+        job['_results'][identity] = copy.deepcopy(value)
+        staff.update(_metrics(value), cached=False)
+        staff['warnings'] = warnings
+        job['_dirty'] = True
+        job['matched'] = len(job['_results'])
+
+    try:
+        value = await collect_person(person, job['institution'], job['domain'], on_update=update)
+        if not _valid(value):
+            staff['status'] = 'missing'
+            job['missing'].append(person['name'])
+            if identity in job['_results']:
+                staff['cached'] = True
+        else:
+            update(value, final=True)
+            _PERSON_CACHE[identity] = copy.deepcopy(job['_results'][identity])
+            staff['status'] = 'partial' if staff['warnings'] else 'done'
+            job['warnings'].extend({'person_key': identity, 'name': person['name'], 'message': message}
+                                   for message in staff['warnings'])
+    except asyncio.CancelledError:
+        staff['status'] = 'cancelled'
+        raise
+    except Exception as exc:
+        staff['status'] = 'error'
+        job['missing'].append(person['name'])
+        job['errors'].append({'person_key': identity, 'name': person['name'], 'error': type(exc).__name__})
+        if identity in job['_results']:
+            staff['cached'] = True
+    finally:
+        if count:
+            job['completed'] += 1
+        job['idle'] = sum(row.get('status') == 'idle' for row in job['staff'])
+        _persist(job)
+
+
+def _final_status(job: dict) -> str:
+    return ('partial' if (job['missing'] or job['warnings']) and job['_results'] else
+            'error' if job['missing'] else 'done')
+
+
+async def _run(jid: str, collect_person):
+    job = JOBS[jid]
+    pending = iter(job['staff'])
+    gate = _gate()
 
     async def worker():
         for staff in pending:
-            async with _GATE:
-                await collect(staff)
-
-    async def collect(staff):
-        identity = staff['person_key']
-        person = job['_people'][identity]
-        staff['status'] = 'running'
-
-        def update(value, final=False):
-            if not _valid(value):
-                return
-            # Empty intermediate/failed stages must not blank an existing profile.
-            previous = job['_results'].get(identity)
-            warnings = list(value.get('collection_warnings') or [])
-            if not value['publications'] and previous and previous.get('publications') and (not final or warnings):
-                if final:
-                    staff.update(_metrics(previous), cached=True, warnings=warnings)
-                    job['_results'][identity]['collection_warnings'] = warnings
-                return
-            job['_results'][identity] = copy.deepcopy(value)
-            staff.update(_metrics(value), cached=False)
-            staff['warnings'] = warnings
-            job['_dirty'] = True
-            job['matched'] = len(job['_results'])
-
-        try:
-            value = await collect_person(person, job['institution'], job['domain'], on_update=update)
-            if not _valid(value):
-                staff['status'] = 'missing'
-                job['missing'].append(person['name'])
-                if identity in job['_results']:
-                    staff['cached'] = True
-            else:
-                update(value, final=True)
-                _PERSON_CACHE[identity] = copy.deepcopy(job['_results'][identity])
-                staff['status'] = 'partial' if staff['warnings'] else 'done'
-                job['warnings'].extend({'person_key': identity, 'name': person['name'], 'message': message}
-                                       for message in staff['warnings'])
-        except asyncio.CancelledError:
-            staff['status'] = 'cancelled'
-            raise
-        except Exception as exc:
-            staff['status'] = 'error'
-            job['missing'].append(person['name'])
-            job['errors'].append({'person_key': identity, 'name': person['name'], 'error': type(exc).__name__})
-            if identity in job['_results']:
-                staff['cached'] = True
-        finally:
-            job['completed'] += 1
-            _persist(job)
+            async with gate:
+                await _collect_one(job, staff, collect_person)
 
     try:
         await asyncio.gather(*(worker() for _ in range(min(CONCURRENCY, len(job['staff'])))))
-        job['status'] = ('partial' if (job['missing'] or job['warnings']) and job['_results'] else
-                         'error' if job['missing'] else 'done')
+        job['status'] = _final_status(job)
     except asyncio.CancelledError:
         job['status'] = 'cancelled'
         for staff in job['staff']:
@@ -487,7 +512,45 @@ async def _run(jid: str, collect_person):
         TASKS.pop(jid, None)
 
 
+def refresh_person(job_id: str, person_key: str, collect_person) -> dict | None:
+    """Birim içinde tek kişiyi tarar (kişi satırındaki Yenile). Diğer satırlar beklemez."""
+    job = JOBS.get(job_id)
+    if job is None:
+        return None
+    staff = next((row for row in job['staff'] if row.get('person_key') == person_key), None)
+    if staff is None:
+        return None
+    key = (job_id, person_key)
+    if key in PERSON_TASKS and not PERSON_TASKS[key].done():
+        return snapshot(job_id)
+    if staff.get('status') in ('idle', 'missing', 'error', 'cancelled'):
+        job['completed'] = sum(row.get('status') in ('done', 'partial') for row in job['staff'])
+    staff['status'] = 'pending'
+    job['status'] = 'running'
+    job['_dirty'] = True
+
+    async def run():
+        try:
+            async with _gate():
+                await _collect_one(job, staff, collect_person, count=False)
+        finally:
+            PERSON_TASKS.pop(key, None)
+            job['completed'] = sum(row.get('status') in ('done', 'partial') for row in job['staff'])
+            if not _active(job_id):
+                job['status'] = _final_status(job) if any(r.get('status') != 'idle' for r in job['staff']) else 'done'
+                job['finished_at'] = time.time()
+            job['cached'] = True
+            _persist(job)
+
+    PERSON_TASKS[key] = asyncio.create_task(run())
+    return snapshot(job_id)
+
+
 async def close():
+    singles = list(PERSON_TASKS.values())
+    for task in singles:
+        task.cancel()
+    await asyncio.gather(*singles, return_exceptions=True)
     pending = list(TASKS.items())
     tasks = [task for _, task in pending]
     for task in tasks:

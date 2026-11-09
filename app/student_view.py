@@ -24,7 +24,7 @@ _LIMIT = asyncio.Semaphore(3)
 MAX_PAGES = 10
 DEADLINE = 90
 CACHE_VERSION = 2
-COLLECTION_VERSION = 4
+COLLECTION_VERSION = 6
 GROUPS = {
     "graduate": ("Lisansüstü programlar", r"lisansustu|yuksek.lisans|doktora|graduate|master|phd|enstitu"),
     "courses": ("Dersler ve içerikleri", r"ders|mufredat|bologna|course|curriculum|ects|akts|bilgi.paketi"),
@@ -91,7 +91,7 @@ def _load(uid: str, section: str, faculty: str = "", department: str = ""):
         group = saved["groups"][section]
         # A new collector gets one attempt at an old empty/menu/calendar-only
         # result. Useful cached facts (especially scoped catalogues) stay cached.
-        if saved.get("collection_version") == COLLECTION_VERSION or _useful(group, section):
+        if saved.get("collection_version") == COLLECTION_VERSION or (section != "courses" and _useful(group, section)):
             return saved
     # Old whole-university records are reusable only for an unscoped category.
     if faculty or department:
@@ -152,8 +152,9 @@ def _matches(text: str, unit: str) -> bool:
 
 
 def _scope_matches(page: dict, faculty: str, department: str) -> bool:
-    return ((not faculty or page.get("faculty_verified", False))
-            and (not department or page.get("department_verified", False)))
+    if department:
+        return page.get("department_verified", False)
+    return not faculty or page.get("faculty_verified", False)
 
 
 def _scope(page: dict, faculty: str, department: str, parent: dict | None = None, link: dict | None = None):
@@ -167,7 +168,15 @@ def _scope(page: dict, faculty: str, department: str, parent: dict | None = None
     a, b = urlsplit(parent["url"]), urlsplit(page["url"])
     dedicated_host = a.hostname not in {registrable(a.hostname or ""), "www." + registrable(a.hostname or "")}
     nested_path = bool(a.path.strip("/")) and b.path.startswith(a.path.rstrip("/") + "/")
-    same_branch = a.hostname == b.hostname and (dedicated_host or nested_path)
+    parent_program = dict(parse_qsl(a.query)).get("curSunit")
+    child_program = dict(parse_qsl(b.query)).get("curSunit")
+    same_program = bool(parent_program and parent_program == child_program)
+    same_branch = a.hostname == b.hostname and (same_program or (not parent_program and (dedicated_host or nested_path)))
+    if (department and _matches(link["title"], department) and child_program
+            and a.hostname == b.hostname):
+        page["department_verified"] = True
+        page["context_quote"] = link["title"]
+        page["context_source_url"] = parent["url"]
     if parent.get("faculty_verified") and (same_branch or page["department_verified"] and _matches(link["title"], department)):
         page["faculty_verified"] = True
     other_department = (bool(re.search(r"muhendisligi bolumu|engineering department|department of", fold(heading)))
@@ -181,19 +190,40 @@ def _scope(page: dict, faculty: str, department: str, parent: dict | None = None
     return page
 
 
+def _course_period(value: str) -> str:
+    match = re.search(r"\b([1-9]|1[0-2])\s*[.\-]?\s*(?:donem|yariyil|semester|term)\b", fold(value))
+    if not match:
+        match = re.search(r"\b(?:semester|term)\s*([1-9]|1[0-2])\b", fold(value))
+    if match:
+        return f"{int(match[1])}. dönem"
+    year = re.search(r"\b([1-6])\s*\.?\s*yil\s*(guz|bahar)", fold(value))
+    if year:
+        return f"{int(year[1]) * 2 - (1 if year[2] == 'guz' else 0)}. dönem"
+    return "Seçmeli dersler" if re.fullmatch(r"(?:alan |universite |bolum )?secmeli dersler", fold(value)) else ""
+
+
 def _catalog(body, url: str) -> list[dict]:
     """Extract explicit course rows/paragraphs without needing an LLM."""
     items = []
     code_pattern = r"[A-ZÇĞİÖŞÜ]{2,8}[ -]?\d{1,4}[A-Z]?"
+    period = ""
+    base = body.css("base::attr(href)").get() or url
+    proliz_details = "progCourseDetails.aspx?curCourse=" in body.get()
     for table in body.css("table"):
         columns = {}
+        prior = table.xpath("preceding::*[self::h2 or self::h3 or self::h4][1]")
+        if prior:
+            period = _course_period(clean(prior[0].get_all_text(separator=" "))) or period
         for row in table.css("tr"):
-            values = [clean(cell.get_all_text(separator=" ")) for cell in row.css("th, td")]
-            normalized = [fold(value) for value in values]
-            names = {"code": {"ders kodu", "course code", "kodu"},
-                     "name": {"ders adi", "dersin adi", "course name"},
+            values = [clean(cell.get_all_text(separator=" ")) for cell in row.xpath("./th|./td")]
+            normalized = [fold(value).strip(": ") for value in values]
+            row_period = next((_course_period(v) for v in values if _course_period(v)), "")
+            if row_period:
+                period = row_period
+            names = {"code": {"ders kodu", "course code", "kodu", "kod", "code"},
+                     "name": {"ders adi", "dersin adi", "course name", "ders", "course", "course title"},
                      "credit": {"kredi", "credit", "yerel kredi"}, "ects": {"akts", "ects"},
-                     "kind": {"ders turu", "course type"}, "period": {"donem", "yariyil", "semester"}}
+                     "kind": {"ders turu", "course type", "tipi (z/s)", "z/s"}, "period": {"donem", "yariyil", "semester"}}
             found = {key: i for key, aliases in names.items() for i, label in enumerate(normalized) if label in aliases}
             if "code" in found and "name" in found:
                 columns = found
@@ -207,16 +237,27 @@ def _catalog(body, url: str) -> list[dict]:
             for key, label in (("credit", "Kredi"), ("ects", "AKTS"), ("kind", "Tür")):
                 if key in columns and values[columns[key]]:
                     details.append(f"{label}: {values[columns[key]]}")
-            items.append({"title": clean(code + " " + name)[:200], "detail": " · ".join(details),
-                          "period": values[columns["period"]] if "period" in columns else "",
+            detail_url = ""
+            for anchor in row.css("a[href], a[onclick]"):
+                href = anchor.attrib.get("href", "")
+                if href and not href.startswith(("#", "javascript:")):
+                    detail_url = urljoin(base, href)
+                    break
+                match = re.search(r"prolizOpenCourseDetails\((\d+)\)", anchor.attrib.get("onclick", ""))
+                if match and proliz_details:
+                    detail_url = urljoin(url, "progCourseDetails.aspx?" + urlencode({"curCourse": match[1], "lang": "tr"}))
+            if detail_url and registrable(urlsplit(detail_url).hostname or "") != registrable(urlsplit(url).hostname or ""):
+                detail_url = ""
+            items.append({"title": clean(code + " " + name)[:200], "code": code, "detail_url": detail_url, "detail": " · ".join(details),
+                          "period": _course_period(values[columns["period"]]) or values[columns["period"]] if "period" in columns else period,
                           "quote": clean(" ".join(values))[:500], "source_url": url, "type": "courses"})
     current, period = None, ""
     for node in body.css("h1, h2, h3, h4, p"):
         value = clean(node.get_all_text(separator=" "))
         if node.tag != "p":
             current = None
-            if re.search(r"\b\d+\s*(?:donem|yariyil|semester|term)\b", fold(value)):
-                period = value[:120]
+            if _course_period(value):
+                period = _course_period(value)
             continue
         bold = node.css("strong, b")
         if (bold and re.match(r"^" + code_pattern + r"\s+\S", value)
@@ -230,7 +271,7 @@ def _catalog(body, url: str) -> list[dict]:
     unique = {}
     for item in items:
         unique.setdefault((fold(item["title"]), fold(item["period"])), item)
-    return list(unique.values())[:200]
+    return list(unique.values())[:2000]
 
 
 def _url_key(url: str) -> str:
@@ -246,7 +287,9 @@ def _body_blocks(html: str) -> list[dict]:
     roots = tree.xpath("//main | //article | //*[@id='content'] | //*[contains(concat(' ', normalize-space(@class), ' '), ' page-content ')]")
     body = roots[0] if roots else tree
     for node in list(body.iterdescendants()):
-        marker = " ".join(node.get(key, "") for key in ("class", "id", "role"))
+        if not isinstance(node.tag, str):
+            continue
+        marker = " ".join(node.get(key) or "" for key in ("class", "id", "role"))
         if (node.tag in _IGNORED or re.search(r"(?:^|[\s_-])(?:menu|navbar|breadcrumb|cookie|testimonial|quotes)(?:[\s_-]|$)", marker, re.I)):
             parent = node.getparent()
             if parent is not None:
@@ -302,7 +345,7 @@ def _body_blocks(html: str) -> list[dict]:
             linked = clean(" ".join(" ".join(child.itertext()) for child in node.xpath(".//a")))
             if value != linked:
                 add(value, heading)
-        elif node.tag == "div" and re.search(r"(?:stat|metric|kpi|counter)", node.get("class", ""), re.I) and not re.search(r"label|value|icon", node.get("class", ""), re.I):
+        elif node.tag == "div" and re.search(r"(?:stat|metric|kpi|counter)", (node.get("class") or ""), re.I) and not re.search(r"label|value|icon", (node.get("class") or ""), re.I):
             if 12 <= len(value) <= 350 and re.search(r"\d", value) and re.search(r"[A-Za-zÇĞİÖŞÜçğıöşü]{4}", value):
                 add(value, heading, "statistic")
     return blocks[:400]
@@ -379,19 +422,30 @@ def _page(html: str, url: str, domain: str):
     body = main[0] if main else sel
     text = clean(body.get_all_text(separator=" ", ignore_tags=_IGNORED))[:80000]
     links = []
-    for a in sel.css("a[href]"):
-        target = _url_key(urljoin(url, a.attrib.get("href", "")))
+    base = sel.css("base::attr(href)").get() or url
+    for a in sel.css("a[href], a[onclick], iframe[src]"):
+        href = a.attrib.get("href", "") or a.attrib.get("src", "")
+        click_url = re.search(r"[\"']([^\"']+\.aspx\?[^\"']+)[\"']", a.attrib.get("onclick", ""))
+        if click_url:
+            href = click_url[1]
+        if href.startswith(("#", "javascript:")):
+            continue
+        target = _url_key(urljoin(base, href))
+        if re.search(r"/oibs/bologna/?$", target, re.I):
+            target = target.rstrip("/") + "/index.aspx"
         parsed = urlsplit(target)
         if parsed.scheme not in {"http", "https"} or registrable(parsed.hostname or "") != domain:
             continue
-        title = clean(a.get_all_text(separator=" ")) or a.attrib.get("title", "") or a.attrib.get("aria-label", "")
+        title = clean(a.get_all_text(separator=" ")) or a.attrib.get("title", "") or a.attrib.get("aria-label", "") or ("Program ders bilgisi" if a.tag == "iframe" else "")
         if not title or len(title) > 200:
             continue
         keys = [key for key, (_, pattern) in GROUPS.items() if re.search(pattern, fold(title + " " + target))]
         # Unit/program index links may be needed to reach this category even when
         # their label is only a department name and contains no category keyword.
         language = a.attrib.get("hreflang") or a.attrib.get("data-lang") or a.attrib.get("lang") or ""
-        links.append({"title": title, "url": target, "groups": keys, "language": language[:2]})
+        parent_heading = a.xpath("ancestor::div[contains(concat(' ',normalize-space(@class),' '),' panel-default ')][1]//*[contains(concat(' ',normalize-space(@class),' '),' panel-title ')][1]")
+        faculty_context = clean(parent_heading[0].get_all_text(separator=" ")) if parent_heading else ""
+        links.append({"title": title, "url": target, "groups": keys, "language": language[:2], "faculty_context": faculty_context})
     for alternate in sel.css('link[rel="alternate"][hreflang][href]'):
         language = alternate.attrib["hreflang"][:2]
         target = _url_key(urljoin(url, alternate.attrib["href"]))
@@ -399,9 +453,13 @@ def _page(html: str, url: str, domain: str):
             links.append({"title": "Türkçe", "url": target, "groups": [], "language": "tr"})
     title = clean(sel.css("title::text").get() or "Kurum sayfası")
     heading = clean(" ".join(node.get_all_text(separator=" ") for node in body.css("h1, h2")[:4]))
+    # A selected programme/year option identifies this document; menu options do not.
+    selected = sel.css("select option[selected]")
+    context = sel.css(".breadcrumb, [aria-label='breadcrumb'], [id^='lblProgInfo']")
+    heading = clean(heading + " " + " ".join(n.get_all_text(separator=" ") for n in [*selected, *context]))
     return {"url": url, "title": title, "heading": heading, "text": text, "links": links,
             "language": (sel.css("html::attr(lang)").get() or "")[:2],
-            "blocks": _body_blocks(html), "course_items": _catalog(body, url)}
+            "blocks": _body_blocks(html), "course_items": _catalog(sel, url)}
 
 
 def _candidate(link: dict, page: dict, section: str, faculty: str, department: str) -> int | None:
@@ -414,6 +472,10 @@ def _candidate(link: dict, page: dict, section: str, faculty: str, department: s
         root_route = parsed.path.strip("/") in {"", "tr", "en"}
         direct = bool(re.search(_DIRECT[section], route))
         bridge = bool(re.search(_BRIDGES.get(section, r"(?!)"), route))
+        if section in {"erasmus", "work_travel"} and re.fullmatch(
+                r"(?:uluslararasi|international|global|yurt ?disi)(?: (?:ogrenci\w*|students?|ofisi?|office|iliskiler\w*|relations"
+                r"|programs?|programlar\w*|koordinatorlugu|firsatlar\w*|opportunities))?", label):
+            bridge = True
         # A short office label may only appear in its dedicated hostname.
         if root_route:
             bridge = bridge or bool(re.search(_BRIDGES.get(section, r"(?!)"), fold(parsed.hostname or "")))
@@ -446,14 +508,18 @@ def _candidate(link: dict, page: dict, section: str, faculty: str, department: s
         if re.search(r"nedir|what.is|how.to|nasil.yap", route):
             rank -= 15
         return rank
+    if section == "courses" and re.search(r"/oibs/bologna/(?:index\.aspx)?(?:\?|$)", link["url"], re.I) and not dict(parse_qsl(urlsplit(link["url"]).query)).get("curSunit"):
+        return 260
     in_group = section in link["groups"]
     if link["groups"] and not in_group:
         return None  # No unrelated student category is fetched as a discovery shortcut.
     dep_match = bool(department) and _matches(link["title"], department)
     fac_match = bool(faculty) and _matches(link["title"], faculty)
+    if dep_match and faculty and link.get("faculty_context") and not _matches(link["faculty_context"], faculty):
+        return None
     unit_link = section == "courses" and (dep_match or fac_match)
     index_link = section == "courses" and bool(re.search(
-        r"programlar|lisans program|bolumler|fakulteler|akademik birim|academic unit|degree program", label))
+        r"programlar|lisans program|bolumler|fakulteler|akademik birim|academic unit|degree program|^lisans$|^on lisans$", label))
     if not (in_group or unit_link or index_link):
         return None
     if section == "courses" and (faculty or department):
@@ -463,6 +529,10 @@ def _candidate(link: dict, page: dict, section: str, faculty: str, department: s
     language = _language(link["title"])
     language_score = (20 if language == (_language(department) or "tr") else -20 if language else 0) if dep_match else 0
     course_score = 30 if in_group and re.search(r"mufredat|curriculum|akts|ects", label) else 20 if in_group and re.search(r"icerik|content", label) else 0
+    if re.search(r"progCourses\.aspx", link["url"], re.I) and page.get("department_verified"):
+        return 400
+    if re.search(r"unitSelection\.aspx", link["url"], re.I) and re.fullmatch(r"lisans|on lisans", label):
+        return 110 if label == "lisans" else 100
     return ((120 if dep_match else 90 if fac_match else 0) + language_score + course_score + (50 if in_group else 0)
             + (150 if in_group and (faculty or department) and _scope_matches(page, faculty, department) else 0)
             + (10 if index_link else 0))
@@ -470,6 +540,18 @@ def _candidate(link: dict, page: dict, section: str, faculty: str, department: s
 
 def _retain_facts(result: dict, pages: list[dict], section: str, faculty: str, department: str):
     if section == "courses":
+        group = result["groups"][section]
+        known = {(fold(item["title"]), fold(item.get("period", ""))) for item in group["items"]}
+        for page in pages:
+            if not _scope_matches(page, faculty, department):
+                continue
+            for item in page.get("course_items", []):
+                key = (fold(item["title"]), fold(item.get("period", "")))
+                if key not in known:
+                    group["items"].append({**item, "context_quote": page.get("context_quote", ""), "context_source_url": page.get("context_source_url", page["url"])})
+                    known.add(key)
+        if group["items"]:
+            group["format"] = "course_catalog"
         return
     # Rebalance when another page arrives, so a long partners table cannot push
     # later programme conditions, fees or dates out of the bounded result.
@@ -497,6 +579,8 @@ def _retain_facts(result: dict, pages: list[dict], section: str, faculty: str, d
 def _retain_links(result: dict, pages: list[dict], section: str, faculty: str, department: str):
     candidates = {}
     for page in pages:
+        if section == "courses" and (faculty or department) and not _scope_matches(page, faculty, department):
+            continue
         for link in page["links"]:
             rank = _candidate(link, page, section, faculty, department)
             if rank is not None and (link["url"] not in candidates or rank > candidates[link["url"]][0]):
@@ -506,7 +590,13 @@ def _retain_links(result: dict, pages: list[dict], section: str, faculty: str, d
         page = next((page for page in pages if page["url"] == url), None)
         candidates[url] = (200, {"title": page["title"] if page else item["title"], "url": url})
     ranked = sorted(candidates.values(), key=lambda item: (-item[0], item[1]["url"]))
-    result["groups"][section]["links"] = [{"title": link["title"], "url": link["url"]} for _, link in ranked[:24]]
+    # Dil düğmesi ("Türkçe", "EN") gezinme aracıdır, öğrenciye gösterilecek içerik değildir. Work and Travel'da
+    # yalnız programın adını taşıyan sayfalar kalır; genel uluslararası ofis sayfası W&T bilgisi sayılmaz.
+    language_switch = re.compile(r"(?:turkce|english|ingilizce|tr|en|deutsch|english version|turkce versiyon)")
+    links = [link for _, link in ranked if not language_switch.fullmatch(fold(link["title"]).strip())]
+    if section == "work_travel":
+        links = [link for link in links if re.search(_DIRECT["work_travel"], fold(link["title"] + " " + link["url"]))]
+    result["groups"][section]["links"] = [{"title": link["title"], "url": link["url"]} for link in links[:24]]
 
 
 async def _collect(uid: str, llm, section: str, faculty: str, department: str) -> dict:
@@ -529,7 +619,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                     async with _LIMIT:
                         try:
                             fetch = fetch_home_page if is_home else read_public
-                            raw, mime, final = await fetch(client, url, 4_000_000)
+                            raw, mime, final = await fetch(client, url, 8_000_000 if section == "courses" else 4_000_000)
                             if registrable(urlsplit(final).hostname or "") != domain:
                                 return None
                             if mime == "application/pdf" or raw.startswith(b"%PDF"):
@@ -549,7 +639,17 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                                 html = raw.decode("utf-8")
                             except UnicodeDecodeError:
                                 html = raw.decode("windows-1254", errors="replace")
-                            return _scope(_page(html, final, domain), faculty, department, parent, link)
+                            page = _page(html, final, domain)
+                            if (section == "courses" and not page["course_items"] and len(page["text"]) < 300
+                                    and re.search(r"bologna|ects|bilgipaketi|curriculum", final, re.I)):
+                                from . import rea
+                                try:
+                                    capture = await asyncio.wait_for(rea.recon(final, settle_ms=1200), 18)
+                                    if capture.dom and registrable(urlsplit(capture.final_url or final).hostname or "") == domain:
+                                        page = _page(capture.dom, capture.final_url or final, domain)
+                                except Exception:
+                                    pass
+                            return _scope(page, faculty, department, parent, link)
                         except (httpx.HTTPError, ValueError, OSError):
                             return None
                 first = await read(home, is_home=True)
@@ -562,9 +662,17 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                 # The page budget includes failed attempts. Keep the working
                 # course route unchanged; other categories can reach office >
                 # programme > conditions/agreements, without a whole-site crawl.
+                if section == "courses" and department:
+                    from .websearch import site_results
+                    try:
+                        found = await asyncio.wait_for(site_results(home, f'"{department}" ders müfredat', k=4, providers=("ddgs",)), 10)
+                        for hit in found:
+                            first["links"].append({"title": hit.get("title") or department, "url": hit["url"], "groups": ["courses"], "language": ""})
+                    except Exception:
+                        pass
                 attempted = 1
-                page_limit = 6 if section == "courses" else MAX_PAGES
-                fetch_until = time.monotonic() + 45
+                page_limit = 18 if section == "courses" else MAX_PAGES
+                fetch_until = time.monotonic() + (65 if section == "courses" else 45)
                 while attempted < page_limit and time.monotonic() < fetch_until:
                     candidates = {}
                     for page in pages:
@@ -598,7 +706,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
             if scoped and not evidence_pages:
                 result["errors"].append("Seçilen fakülte/bölümün bilgileri resmî sayfa metninde doğrulanamadı; program veya ders içeriği varsayılmadı.")
             if section == "courses":
-                known = set()
+                known = {(fold(item["title"]), fold(item.get("period", ""))) for item in result["groups"][section]["items"]}
                 for index in evidence_pages:
                     page = pages[index]
                     for item in page.get("course_items", []):
@@ -690,7 +798,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
     if old:
         for key, previous in old.get("groups", {}).items():
             group = result["groups"].get(key)
-            if (group is not None and (previous.get("items") or previous.get("links"))
+            if (group is not None and (section != "courses" or previous.get("format") == "course_catalog" and previous.get("items")) and (previous.get("items") or previous.get("links"))
                     and not group["items"] and (result["errors"] or not group["links"])):
                 result["groups"][key] = {**previous,
                     "links": group["links"] or previous.get("links", []),
@@ -723,3 +831,134 @@ async def get(uid: str, llm, refresh: bool = False, section: str | None = None,
                 TASKS.pop(key, None)
         task.add_done_callback(done)
     return await asyncio.shield(task)
+
+
+# ------------------------------------------------------------------ bağlantı önizlemesi (bağlantının içeriği)
+PREVIEW_TTL = 14 * 24 * 3600
+_NOISE = r"cerez|cookie|tum haklari|all rights reserved|copyright|kvkk aydinlatma|javascript|tarayici"
+
+
+def _outline(html: str, url: str) -> tuple[list[dict], list[str]]:
+    """Ana içerik: başlık → maddeler (program adları, koşullar, bağlantı metinleri) ve uzun paragraflar."""
+    tree = html_tree.fromstring(html)
+    for node in tree.xpath("//nav|//header|//footer|//script|//style|//aside|//noscript|//svg"):
+        if node.getparent() is not None:
+            node.getparent().remove(node)
+    for node in tree.xpath("//*[@class or @id]"):
+        marker = (node.get("class") or "") + " " + (node.get("id") or "")
+        if re.search(r"(?:^|[\s_-])(?:menu|navbar|breadcrumb|cookie|footer|header|sidebar|social)(?:[\s_-]|$)", marker, re.I) \
+                and node.getparent() is not None and node.tag not in {"main", "body"}:
+            node.getparent().remove(node)
+    roots = tree.xpath("//main|//article|//*[@id='content']|//*[contains(concat(' ', normalize-space(@class), ' '), ' page-content ')]")
+    root = roots[0] if roots else (tree.find("body") if tree.find("body") is not None else tree)
+    sections, paragraphs, current = [], [], None
+
+    def section(title):
+        nonlocal current
+        current = {"heading": title[:160], "items": []}
+        sections.append(current)
+
+    def item(text, href=""):
+        if current is None:
+            section("")
+        if len(current["items"]) >= 14 or any(fold(x["text"]) == fold(text) for x in current["items"]):
+            return
+        current["items"].append({"text": text[:300], "url": href})
+
+    for node in root.iter():
+        if not isinstance(node.tag, str):
+            continue
+        text = clean(" ".join(node.itertext()))
+        if not text or re.search(_NOISE, fold(text)):
+            continue
+        if re.fullmatch(r"h[1-6]", node.tag):
+            if 3 <= len(text) <= 160:
+                section(text)
+        elif node.tag == "a":
+            href = node.get("href") or ""
+            if 4 <= len(text) <= 160 and not href.startswith(("javascript:", "#", "mailto:", "tel:")):
+                item(text, urljoin(url, href))
+        elif node.tag in {"p", "li", "dd", "td"} and not node.xpath(".//a") and not any(
+                a.tag in {"p", "li"} for a in node.iterancestors()):
+            if len(text) >= 90 and len(paragraphs) < 4:
+                paragraphs.append(text[:600])
+            elif 6 <= len(text) < 220:
+                item(text)
+    useful = [x for x in sections if x["items"]]
+    return useful[:8], paragraphs
+
+
+def _course_content(sel) -> list[dict]:
+    """Preserve labelled syllabus content and weekly topics from common tables."""
+    out, seen = [], set()
+    pattern = r"dersin (?:amaci|icerigi|ogrenme|ogrenim)|course (?:content|objective|aim|learning)|ogrenme cikti|ogrenim cikti|haftalik|weekly|ders kaynak|textbook|kaynaklar"
+    for row in sel.css("tr"):
+        cells = row.xpath("./td|./th")
+        if len(cells) < 2:
+            continue
+        label = clean(cells[0].get_all_text(separator=" "))
+        value = clean(" ".join(c.get_all_text(separator=" ") for c in cells[1:]))
+        if len(label) <= 150 and re.search(pattern, fold(label)) and value and (label, value) not in seen:
+            seen.add((label, value))
+            out.append({"heading": label, "text": value[:12000]})
+    for heading in sel.css("h2, h3, h4, h5"):
+        label = clean(heading.get_all_text(separator=" "))
+        if not re.search(pattern, fold(label)):
+            continue
+        following = heading.xpath("following-sibling::*[1]")
+        if following:
+            value = clean(following[0].get_all_text(separator=" "))
+            if value and (label, value) not in seen:
+                seen.add((label, value)); out.append({"heading": label, "text": value[:12000]})
+    return out[:30]
+
+
+def _preview_of(html: str, url: str, domain: str) -> dict:
+    page = _page(html, url, domain)
+    sel = Selector(html)
+    meta = clean(sel.css('meta[name="description"]::attr(content)').get() or sel.css('meta[property="og:description"]::attr(content)').get() or "")
+    sections, paragraphs = _outline(html, url)
+    title = clean(re.split(r"\s[|–:-]\s", page["title"])[-1 if page["title"].lower().startswith(("ostim", "home")) else 0]) or page["title"]
+    return {"url": url, "title": title[:160], "description": meta[:400], "paragraphs": paragraphs,
+            "sections": sections, "items": sum(len(x["items"]) for x in sections), "course_content": _course_content(sel)}
+
+
+async def preview(uid: str, url: str) -> dict:
+    """Resmî sitedeki tek bir bağlantının içerik özeti (yalnız kurumun kendi alan adı)."""
+    home = await university_home(uid)
+    if not home:
+        raise ValueError("Kurumun resmî site bağlantısı bulunamadı.")
+    domain = registrable(urlsplit(home).hostname or "")
+    target = _url_key(url)
+    if urlsplit(target).scheme not in {"http", "https"} or registrable(urlsplit(target).hostname or "") != domain:
+        raise ValueError("Yalnız kurumun resmî sitesindeki bağlantılar önizlenir.")
+    path = CACHE / f"preview3-{hashlib.sha256(target.encode()).hexdigest()[:24]}.json"
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if time.time() - saved.get("ts", 0) < PREVIEW_TTL:
+            return saved["data"]
+    except (OSError, ValueError, KeyError):
+        pass
+    async with public_client(timeout=12, headers={"User-Agent": USER_AGENT, "Accept-Language": "tr"}) as client:
+        raw, mime, final = await read_public(client, target, 3_000_000)
+    if registrable(urlsplit(final).hostname or "") != domain:
+        raise ValueError("Bağlantı kurum sitesi dışına yönleniyor.")
+    if mime == "application/pdf" or raw.startswith(b"%PDF"):
+        def pdf_text():
+            from pypdf import PdfReader
+            pdf = PdfReader(io.BytesIO(raw))
+            return len(pdf.pages), clean(" ".join(p.extract_text() or "" for p in pdf.pages[:3]))
+        pages, text = await asyncio.wait_for(asyncio.to_thread(pdf_text), 10)
+        data = {"url": final, "title": "PDF belgesi", "description": f"{pages} sayfalık belge",
+                "paragraphs": [text[:600]] if text else [], "sections": [], "items": 0, "pdf": True}
+    elif "html" in mime:
+        try:
+            html = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            html = raw.decode("windows-1254", errors="replace")
+        data = await asyncio.to_thread(_preview_of, html, final, domain)
+    else:
+        raise ValueError("Bu bağlantı önizlenebilir bir sayfa değil.")
+    CACHE.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"ts": time.time(), "data": data}, ensure_ascii=False), encoding="utf-8")
+    return data

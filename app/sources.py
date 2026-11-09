@@ -521,6 +521,28 @@ def _yok_section(sel) -> list[dict]:
     timelines = _yok_timelines(sel)
     if timelines:
         return [item for items in timelines.values() for item in items]
+    # Proje (ve benzeri) sayfalarının güncel düzeni: .projectmain kartları
+    for block in sel.css(".projectmain"):
+        title = _text_of(block, ".baslika")
+        if not title:
+            continue
+        labels = [clean(x.get_all_text(separator=" ")) for x in block.css(".projectType .label")]
+        people, roles = [], []
+        for a in block.css("a.popoverData"):
+            people.append(tr_title(clean(a.get_all_text())))
+            info = re.sub(r"<br\s*/?>", " · ", a.attrib.get("data-content") or "", flags=re.I)
+            info = clean(re.sub(r"<[^>]+>", "", info)).strip(" ·")
+            roles.append(re.sub(r"Üniversite:\s*(.+)$", lambda m: "Üniversite: " + tr_title(m.group(1)), info))
+        type_text = _text_of(block, ".projectType")
+        for label in labels:
+            type_text = type_text.replace(label, "", 1)
+        parent = block.parent
+        topic = _text_of(parent, ".collapse p") if parent is not None else ""
+        rows.append({"labels": [x for x in labels if x], "title": title,
+                     "detail": " · ".join(x for x in [", ".join(people[:6]), roles[0] if roles else ""] if x),
+                     "extra": " · ".join(x for x in [clean(type_text).strip(" ,"), f"Konu: {topic}" if topic else ""] if x)})
+    if rows:
+        return rows
     for r in sel.css(".listrow"):
         rows.append({"labels": [clean(x.get_all_text(separator=" ")) for x in r.css(".listRowType .label")],
                      "title": _text_of(r, ".listRowTitle"), "detail": _text_of(r, ".listRowAuthor"),

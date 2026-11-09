@@ -60,10 +60,14 @@ def _areas() -> dict:
 
 # ------------------------------------------------------------------ uygulamadaki profiller
 _LOCAL: dict[str, tuple[float, list]] = {}
+_PROFILE_LINKS_CACHE: tuple[float, dict] = (0, {})
 
 
 def _profile_links() -> dict[str, list[dict]]:
     """Firma adı → profili çıkarılmış ve o firmayla iş birliği bulunan akademisyenler."""
+    global _PROFILE_LINKS_CACHE
+    if time.monotonic() - _PROFILE_LINKS_CACHE[0] < 30:
+        return _PROFILE_LINKS_CACHE[1]
     out: dict[str, list[dict]] = {}
     for chat in history_store.list_all():
         jid = chat.get("job_id") or ""
@@ -88,6 +92,7 @@ def _profile_links() -> dict[str, list[dict]]:
             out.setdefault(e["name"], []).append({
                 "name": chat.get("name"), "title": chat.get("title"), "institution": chat.get("institution"),
                 "chat_id": chat.get("id"), "evidence": [{"type": v["type"], "text": v["text"]} for v in e["evidence"]]})
+    _PROFILE_LINKS_CACHE = (time.monotonic(), out)
     return out
 
 
@@ -153,7 +158,7 @@ async def _openalex(client, g: dict) -> tuple[list[dict], str]:
             r = await client.get(f"{OPENALEX}/works", params={
                 "filter": f"{f},institutions.type:education", "per-page": 200, "page": page,
                 "sort": "publication_year:desc", **OPENALEX_PARAMS,
-                "select": "id,doi,display_name,publication_year,authorships,cited_by_count"})
+                "select": "id,doi,display_name,publication_year,authorships,cited_by_count,abstract_inverted_index"})
             if r.status_code == 429:
                 return _openalex_rows(works.values(), at_firm), QUOTA
             batch = (r.json().get("results") or []) if r.status_code == 200 else []
@@ -253,7 +258,8 @@ def _openalex_rows(works, at_firm) -> list[dict]:
             continue  # ham adres araması firmayı başka bağlamda (ör. teşekkür) bulmuş olabilir
         paper = {"title": clean(w.get("display_name") or ""), "year": w.get("publication_year"),
                  "url": w.get("doi") or w["id"], "source": "OpenAlex", "firm_people": firm_people[:6],
-                 "citations": w.get("cited_by_count")}
+                 "citations": w.get("cited_by_count"),
+                 "abstract": " ".join(word for _, word in sorted((position, word) for word, positions in (w.get("abstract_inverted_index") or {}).items() for position in positions))}
         rows += [{"name": n, "openalex": aid, "institution": inst, "paper": paper} for n, aid, inst in academics]
     return rows
 
@@ -281,7 +287,7 @@ async def _trdizin(client, g: dict) -> tuple[list[dict], str]:
         abstracts = s.get("abstracts") or []
         title = next((x.get("title") for x in abstracts if x.get("title")), "")
         paper = {"title": clean(title), "year": s.get("publicationYear"), "url": f"{trsources.TRDIZIN_PAGE}{s.get('id')}",
-                 "source": "TR Dizin", "firm_people": firm_people[:6], "citations": s.get("orderCitationCount")}
+                 "source": "TR Dizin", "firm_people": firm_people[:6], "citations": s.get("orderCitationCount"), "abstract": next((x.get("abstract") for x in abstracts if x.get("abstract")), "")}
         for a in authors:
             # Adres metninin üniversite geçen parçası ("Bilgi Teknolojileri Grubu, Wageningen University, …")
             uni = next((part for t in texts(a) for part in (t or "").split(",") if UNIVERSITY.search(part)), "")
@@ -339,8 +345,14 @@ async def _teydeb(g: dict) -> tuple[list[dict], str]:
 
 def _merge(rows: list[dict], local: list[dict]) -> list[dict]:
     people: dict[tuple, dict] = {}
+    seen_papers: dict[tuple, set] = {}
+    title_keys: dict[str, str] = {}
+    person_keys: dict[str, tuple] = {}
     for row in rows:
-        key = tuple(sorted(name_tokens(row["name"])))
+        name = row["name"]
+        if name not in person_keys:
+            person_keys[name] = tuple(sorted(name_tokens(name)))
+        key = person_keys[name]
         if not key:
             continue
         p = people.setdefault(key, {"name": row["name"], "institution": "", "papers": [], "sources": set(),
@@ -348,8 +360,12 @@ def _merge(rows: list[dict], local: list[dict]) -> list[dict]:
         p["institution"] = p["institution"] or row.get("institution", "")
         p["openalex"] = p["openalex"] or row.get("openalex", "")
         p["sources"].add(row["paper"]["source"])
-        if not any(fold(x["title"]) == fold(row["paper"]["title"]) for x in p["papers"]):
-            p["papers"].append(row["paper"])
+        title = row["paper"]["title"]
+        if title not in title_keys:
+            title_keys[title] = fold(title)
+        seen = seen_papers.setdefault(key, set())
+        if title_keys[title] not in seen:
+            seen.add(title_keys[title]); p["papers"].append(row["paper"])
     for row in local:
         key = tuple(sorted(name_tokens(row["name"] or "")))
         p = people.setdefault(key, {"name": row["name"], "institution": row.get("institution") or "", "papers": [],
@@ -369,22 +385,62 @@ def _path(fid: str, kind: str = ""):
     return FIRMS_DIR / f"{re.sub(r'[^a-z0-9-]', '', fid)}{'.' + kind if kind else ''}.json"
 
 
+_FILE_CACHE: dict[str, tuple[int, dict]] = {}
+
+
 def _cached(fid: str, kind: str = "") -> dict | None:
-    p = _path(fid, kind)
-    if not p.exists():
-        return None
+    path = _path(fid, kind)
     try:
-        d = json.loads(p.read_text())
-    except ValueError:
+        stamp = path.stat().st_mtime_ns
+        key = str(path)
+        previous = _FILE_CACHE.get(key)
+        if previous and previous[0] == stamp:
+            data = previous[1]
+        else:
+            data = json.loads(path.read_text())
+            _FILE_CACHE[key] = (stamp, data)
+    except (OSError, ValueError):
         return None
-    return d if d.get("v") == CACHE_V and time.time() - d.get("ts", 0) < TTL else None
+    return data if data.get("v") == CACHE_V and time.time() - data.get("ts", 0) < (300 if data.get("errors") else TTL) else None
+
+
+async def firm_snapshot(fid: str, refresh: bool = False) -> dict | None:
+    """Render immediately from disk/local profiles; external collection is a separate request."""
+    group = _groups().get(fid)
+    if not group:
+        return None
+    cached = _cached(fid)
+    try:
+        stale = cached or await asyncio.to_thread(lambda: json.loads(_path(fid).read_text()))
+        if stale.get("v") != CACHE_V:
+            stale = {}
+    except (OSError, ValueError):
+        stale = {}
+    local = _PROFILE_LINKS_CACHE[1].get(group["name"], [])
+    rows = stale.get("rows") or []
+    people = await asyncio.to_thread(_merge, rows, local)
+    sources = Counter(source for person in people for source in person["sources"])
+    return {"firm": _public(fid, group), "academics": people, "by_source": dict(sources),
+            "errors": [], "papers": len({fold(row["paper"]["title"]) for row in rows}),
+            "ardeb": stale.get("ardeb") or [], "updated": time.strftime("%Y-%m-%d %H:%M", time.localtime(stale["ts"])) if stale.get("ts") else "", "pending": bool(refresh or not cached or not _PROFILE_LINKS_CACHE[0])}
+
+
+_DETAIL_TASKS: dict[str, asyncio.Task] = {}
 
 
 async def firm_detail(fid: str, refresh: bool = False) -> dict | None:
+    task = _DETAIL_TASKS.get(fid)
+    if task is None:
+        task = _DETAIL_TASKS[fid] = asyncio.create_task(_build_firm_detail(fid, refresh))
+        task.add_done_callback(lambda done: _DETAIL_TASKS.pop(fid, None) if _DETAIL_TASKS.get(fid) is done else None)
+    return await asyncio.shield(task)
+
+
+async def _build_firm_detail(fid: str, refresh: bool = False) -> dict | None:
     g = _groups().get(fid)
     if not g:
         return None
-    local = _profile_links().get(g["name"], [])
+    local = (await asyncio.to_thread(_profile_links)).get(g["name"], [])
     cached = None if refresh else _cached(fid)
     if cached:
         rows, errors, ts = cached["rows"], cached["errors"], cached["ts"]
@@ -404,13 +460,18 @@ async def firm_detail(fid: str, refresh: bool = False) -> dict | None:
             if res[-1]:
                 errors.append(res[-1])
         ts = time.time()
-        # Kota/ağ hatasıyla eksik kalan sonuç saklanmaz: bir sonraki açılışta yeniden denenir.
-        if not errors:
+        # Retain partial responses briefly so revisiting does not repeat slow failed calls.
+        # A refresh failure must never overwrite a complete cached response.
+        previous = _cached(fid)
+        if not errors or not previous or previous.get("errors"):
             FIRMS_DIR.mkdir(parents=True, exist_ok=True)
             count = len({tuple(sorted(name_tokens(r["name"]))) for r in rows})
-            _path(fid).write_text(json.dumps({"v": CACHE_V, "ts": ts, "rows": rows, "errors": errors, "ardeb": ardeb,
-                                              "academic_count": count}, ensure_ascii=False))
-    academics = _merge(rows, local)
+            target = _path(fid)
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"v": CACHE_V, "ts": ts, "rows": rows, "errors": errors, "ardeb": ardeb,
+                                             "academic_count": count}, ensure_ascii=False))
+            temporary.replace(target)
+    academics = await asyncio.to_thread(_merge, rows, local)
     by_source: dict[str, int] = {}
     for p in academics:
         for s in p["sources"]:
