@@ -45,8 +45,11 @@ def _wikitext_value(raw: str) -> str:
     return clean(v.strip(" ,;"))
 
 
-def _infobox(text: str) -> dict:
-    m = re.search(r"\{\{\s*(?:Üniversite bilgi kutusu|Bilgi kutusu üniversite|Infobox university)", text, re.I)
+UNI_BOX = r"\{\{\s*(?:Üniversite bilgi kutusu|Bilgi kutusu üniversite|Infobox university)"
+
+
+def _infobox(text: str, pattern: str = UNI_BOX) -> dict:
+    m = re.search(pattern, text, re.I)
     if not m:
         return {}
     depth, i = 0, m.start()
@@ -152,42 +155,21 @@ async def _wikidata(client, qid: str) -> dict:
 
 # ------------------------------------------------------------------ YÖK Akademik kadro sayıları
 async def _yok_staff(uni: dict) -> dict:
-    """Üniversitenin YÖK Akademik araması: toplam ve unvan başına kişi sayısı.
+    """Üniversitenin aktif akademisyen sayısı ve unvan dağılımı (YÖK API; unvan başına tek küçük istek)."""
+    async with yokdir._client() as client:
+        base = {"page": 1, "length": 1, "birimId": uni["birim_id"], "birimId_matchMode": "equals", **yokdir.ACTIVE}
+        titles = await yokdir.api(client, "/genel/kadro-unvan/name-value-list") or []
 
-    YÖK büyük üniversitelerde her sayfayı yavaş döndürür; unvan filtresi oturuma bağlı olduğundan
-    üç ayrı oturum paralel çalışır (her biri: üniversite sayfası → kendi unvan filtreleri).
-    """
-    def total(page: str) -> int | None:
-        m = re.search(r"Arama sonucu:\s*([\d.]+)\s*sonuç", page)
-        return int(m.group(1).replace(".", "")) if m else None
-
-    def action(page: str) -> str:
-        m = re.search(r'id="filterForm"[^>]*action="([^"]+)"', page)
-        return html.unescape(m.group(1)) if m else ""
-
-    counts: dict[int, int] = {}
-    grand: list[int] = []
-
-    async def session(indexes: list[int]):
-        async with yokdir._client() as client:
-            client.timeout = httpx.Timeout(60)
-            r = await client.get(uni["url"])
-            r.raise_for_status()
-            if (n := total(r.text)) is not None:
-                grand.append(n)
-            act = action(r.text)
-            for i in indexes:
-                if not act:
-                    return
-                r = await client.post(yokdir.BASE + act, data={f"sec{i}": TITLES[i][0], "unvanSay": str(len(TITLES)), "kaydet": ""})
-                if (n := total(r.text)) is not None:
-                    counts[i] = n
-                act = action(r.text)
-
-    await asyncio.gather(session([0, 1]), session([2, 3]), session([4]))
-    if not grand:
+        async def total(**extra):
+            d = await yokdir.api(client, "/akademisyen/list", **base, **extra)
+            return (d or {}).get("totalElements")
+        grand, *counts = await asyncio.gather(total(), *(total(kadroUnvanId=t["value"], kadroUnvanId_matchMode="equals") for t in titles))
+    if grand is None:
         raise ValueError("YÖK arama sonucu okunamadı")
-    return {"total": grand[0], "titles": [{"title": TITLES[i][1], "count": counts[i]} for i in sorted(counts)]}
+    order = {label: i for i, (_, label) in enumerate(TITLES)}
+    rows = [{"title": yokdir.YOK_TITLES.get(t["label"], yokdir.tr_title(t["label"])), "count": n}
+            for t, n in zip(titles, counts) if n]
+    return {"total": grand, "titles": sorted(rows, key=lambda r: order.get(r["title"], 9))}
 
 
 _STAFF_TASKS: dict[str, asyncio.Task] = {}
@@ -351,30 +333,23 @@ ROLE_RE = re.compile(r"dekan|bolum baskan|rektor|mudur|anabilim dali baskan|enst
 
 
 async def _person_roles(client, person: dict, university: str) -> list[dict]:
-    """YÖK "İdari Görevler" sayfası oturumdaki son açılan profile göre çalışır: önce profil, sonra görevler."""
+    """YÖK idari görevleri (API). Bitiş tarihi olmayan görev sürüyor sayılır; yalnız bu üniversitedeki görevler."""
     yok_id = person["yok_id"]
-    key = f"role-{yok_id}"
+    key = f"role2-{yok_id}"
     cached = yokdir._load(key, ROLE_TTL)
     if cached is not None:
         return cached
-    (await client.get(person["url"])).raise_for_status()
-    r = await client.get(f"{yokdir.BASE}/AkademikArama/AkademisyenIdariGorevBilgileri", params={"authorId": yok_id})
-    r.raise_for_status()
-    sel, uni = Selector(r.text), fold(university)
-    roles, period = [], ""
-    for li in sel.css("ul.timeline li"):
-        cls = li.attrib.get("class") or ""
-        if "time-label" in cls:
-            period = clean(li.get_all_text(separator=" "))
+    d = await yokdir.api(client, "/deneyim/idari/gorev", authorGuidId=yok_id, page=1, length=50)
+    uni, roles = fold(university), []
+    for x in (d or {}).get("data") or []:
+        place = clean(x.get("unvBirimAdi") or x.get("yerAdi") or x.get("yurticiBirimAdi") or "")
+        if x.get("bitisTarihi") or (place and fold(place) != uni):
             continue
-        if not li.css(".timeline-item"):
-            continue
-        role = clean(" ".join(x.get_all_text(separator=" ") for x in li.css(".timeline-footer")))
-        place = clean(" ".join(x.get_all_text(separator=" ") for x in li.css(".timeline-item h4")))
-        unit = clean(" ".join(x.get_all_text(separator=" ") for x in li.css(".timeline-body h5")))
-        # Bitiş yılı yazılmayan görev sürüyor sayılır ("2022" sürüyor, "2015-2018" bitti)
-        if re.fullmatch(r"\d{4}", period) and role and fold(place) == uni:
-            roles.append({"role": role, "unit": unit, "since": period})
+        year = re.search(r"(19|20)\d{2}", str(x.get("baslangicTarihi") or x.get("tarih") or ""))
+        unit = clean(" ".join(v for v in (x.get("fakulteBilgisi"), x.get("bolumBilgisi")) if v))
+        role = clean(x.get("gorevAdi") or "")
+        if role and year:
+            roles.append({"role": role, "unit": unit, "since": year.group(0)})
     yokdir._save(key, roles)
     return roles
 
@@ -384,12 +359,7 @@ async def faculty_roles(uid: str, faculty_raw: str) -> dict | None:
     uni = await yokdir._university(uid)
     if not uni:
         return None
-    want = yokdir._unit_tokens(faculty_raw)
-    people = None
-    for label in (uni["raw"], uni["name"]):
-        people = yokdir._load("people-" + hashlib.sha1(f"{label}|{' '.join(sorted(want))}".encode()).hexdigest()[:12])
-        if people:
-            break
+    people = yokdir._load(yokdir.people_key(uni["raw"], faculty_raw))
     if not people:
         return {"roles": {}, "dean": None, "heads": {}, "checked": 0, "cached": False}
     rank = {"Prof. Dr.": 0, "Doç. Dr.": 1, "Dr. Öğr. Üyesi": 2}
@@ -398,7 +368,7 @@ async def faculty_roles(uid: str, faculty_raw: str) -> dict | None:
     roles: dict[str, list[dict]] = {}
     queue = list(pool)
 
-    async def worker():  # her işçinin kendi YÖK oturumu: profil → görev sırası karışmaz
+    async def worker():
         async with yokdir._client() as client:
             while queue:
                 p = queue.pop(0)

@@ -433,183 +433,239 @@ async def scholar_search_works(profile: Profile, log, pages: int = 3) -> tuple[l
     return out, meta
 
 
-# -------------------------------------------------------------------------- YÖK
-def _yok_parse_profile(sel) -> dict:
-    row = sel.css("#authorlistTb tr")
-    if not row:
-        return {}
-    td = row[0]
-    title = clean(td.css("h6::text").get() or "")
-    name = clean(td.css("h4::text").get() or "")
-    full = clean(td.get_all_text(separator=" "))
-    path_m = re.search(r"([A-ZÇĞİÖŞÜ0-9 .'’\-]+ÜNİVERSİTESİ[^@]*?)/\s*(?:[A-ZÇĞİÖŞÜa-zçğıöşü ]+Temel Alanı|$)", full)
-    path = [p.strip() for p in (path_m.group(1) if path_m else "").split("/") if p.strip()]
-    if path:  # bazı sonuç düzenlerinde kurumun önüne kimlik no, unvan ve ad yapışıyor → yalnızca kurum adı kalsın
-        m = re.search(r"((?:[A-ZÇĞİÖŞÜ.'’\-]+\s+){0,4}(?:TEKNİK\s+)?ÜNİVERSİTESİ)$", path[0])
-        head = path[0]
-        for junk in [title, name] + list(YOK_TITLES):
-            if junk:
-                head = head.replace(junk, " ")
-        head = re.sub(r"^\s*\d+\s*", "", re.sub(r"\s+", " ", head)).strip()
-        path[0] = head or (m.group(1) if m else path[0])
-    labels = [clean(x) for x in td.css("span.label::text").getall()]
-    tail = full.split(labels[-1], 1)[-1] if labels else ""
-    tail = re.split(r"\S+\[at\]\S+", tail)[0]
-    keywords = [clean(k) for k in re.split(r"[,;]", tail) if 2 < len(clean(k)) < 60]
-    orcid = re.search(r"ORCID:\s*(\d{4}-\d{4}-\d{4}-\d{3}[\dX])", sel.get_all_text(separator=" "))
-    dept = next((p for p in path if re.search(r"BÖLÜMÜ|ANABİLİM|PROGRAM|PR\.", p)), path[-1] if path else "")
-    return {"title_raw": title, "name": name, "path": path, "institution": path[0] if path else "",
-            "department": dept, "field": labels[1] if len(labels) > 1 else (labels[0] if labels else ""),
-            "keywords": keywords, "orcid": orcid.group(1) if orcid else ""}
-
-
+# -------------------------------------------------------------------------- YÖK (yeni herkese açık API)
 YOK_TITLES = {"PROFESÖR": "Prof. Dr.", "DOÇENT": "Doç. Dr.", "DOKTOR ÖĞRETİM ÜYESİ": "Dr. Öğr. Üyesi",
               "ÖĞRETİM GÖREVLİSİ": "Öğr. Gör.", "ARAŞTIRMA GÖREVLİSİ": "Arş. Gör."}
-
-# YÖK profil menüsündeki yayın dışı bölümler → sonuçtaki anahtar
-YOK_SECTIONS = {"Projeler": "projects", "Dersler": "courses", "Yönetilen Tezler": "theses", "Ödüller": "awards",
-                "Patentler": "patents", "Üyelikler": "memberships", "Sanatsal faaliyetler": "art",
-                "İdari Görevler": "admin", "Üniversite Dışı Deneyim": "experience"}
-_NODE_RE = re.compile(r"graph\.addNode\('([^']+)',\s*\{url\s*:\s*'([^']*)',\s*name:\s*'([^']*)'"
-                      r"(?:,\s*unvan:\s*'([^']*)')?(?:,\s*universite:\s*'([^']*)')?")
+YOK_PROFILE = "https://akademik.yok.gov.tr/academician-details?authorGuidId="
+# Eski (AkademikArama ?authorId=) ve yeni (?authorGuidId=) bağlantılarda aynı 16 haneli kimlik kullanılır
+YOK_ID_RE = re.compile(r"author(?:Guid)?Id=([0-9A-Fa-f]{16})")
+YOK_PUB_TYPES = {"MAKALE": "article", "BİLDİRİ": "proceedings", "KİTAP": "book"}
 
 
-def _text_of(node, css: str) -> str:
-    found = node.css(css)
-    return clean(" ".join(x.get_all_text(separator=" ") for x in found)) if found else ""
+def yok_guid(link: str) -> str:
+    m = YOK_ID_RE.search(link or "")
+    return m.group(1).upper() if m else ""
 
 
-def _yok_timelines(sel) -> dict[str, list[dict]]:
-    """`ul.timeline` listeleri (görev, öğrenim, idari görev): başlık → [dönem, rol, kurum, birim, not]."""
-    out = {}
-    for ul in sel.css("ul.timeline"):
-        heading, period, items = "", "", []
-        for li in ul.css("li"):
-            if "time-label" in (li.attrib.get("class") or ""):
-                text = clean(li.get_all_text(separator=" "))
-                if re.search(r"\d{4}", text):
-                    period = text
-                elif text:
-                    heading = text
-                continue
-            if not li.css(".timeline-item"):
-                continue
-            items.append({"period": period, "role": _text_of(li, ".timeline-footer"),
-                          "place": tr_title(_text_of(li, ".timeline-item h4")),
-                          "unit": tr_title(_text_of(li, ".timeline-body h5")),
-                          "note": _text_of(li, ".timeline-body h6")})
-        if items:
-            out[heading or f"liste{len(out) + 1}"] = items
+_TOKEN = re.compile(r"^[A-Za-z0-9_-]{18,}$")  # API'nin şifreli kimlikleri (gösterilmez)
+
+
+def _ok(value) -> bool:
+    text = clean(str(value or ""))
+    return bool(text) and text not in ("0", "None") and not (_TOKEN.match(text) and not text.isdigit())
+
+
+def _cap(text) -> str:
+    """Tamamı büyük ya da küçük harfli adları düzeltir; karışık yazılmış ("Prof. Dr.", "IEEE Xplore") olduğu gibi kalır."""
+    from .yokdir import _upper_tr
+    text = clean(str(text or ""))
+    return tr_title(_upper_tr(text)) if text and (text.isupper() or text.islower()) else text
+
+
+def _tl(period_from, period_to, role="", place="", unit="", note="") -> dict:
+    start, end = clean(str(period_from or "")), clean(str(period_to or ""))
+    period = f"{start} - {end}" if start and end and start != end else start or end
+    return {"period": period, "role": _cap(role), "place": _cap(place), "unit": _cap(unit), "note": clean(note or "")}
+
+
+def _join(*parts) -> str:
+    return " · ".join(clean(str(p)) for p in parts if _ok(p))
+
+
+def _labels(*parts) -> list[str]:
+    return [clean(str(p)) for p in parts if _ok(p)]
+
+
+def _team(team) -> str:
+    if not isinstance(team, list):
+        return clean(str(team or ""))
+    people = [_cap(" ".join(x for x in (m.get("yazarad"), m.get("yazarsoyad")) if x))
+              + (f" ({m['projedekiGoreviAd']})" if m.get("projedekiGoreviAd") else "") for m in team if isinstance(m, dict)]
+    lead = [x for x in people if "Yürütücü" in x]
+    return ", ".join((lead + [x for x in people if x not in lead])[:6]) + (f" +{len(people) - 6}" if len(people) > 6 else "")
+
+
+def _units(*parts) -> str:
+    return " / ".join(clean(p).strip("/ ") for p in parts if p and clean(p).strip("/ "))
+
+
+def _generic_row(r: dict) -> dict:
+    """Alanları önceden bilinmeyen bölümler (ders, üyelik, sanatsal faaliyet): ad içeren ilk alan başlık olur."""
+    vals = {k: v for k, v in r.items() if isinstance(v, (str, int)) and v not in ("", None) and not re.search(r"Id$|Guid|En$", k)}
+    title_key = next((k for k in vals if re.search(r"(?i)(adi|ad|baslik|konu)$", k) and isinstance(vals[k], str)
+                      and len(vals[k]) > 3 and k != "personelAdiSoyadi"), None)
+    title = vals.pop(title_key, "") if title_key else ""
+    vals.pop("personelAdiSoyadi", None)
+    return {"labels": [], "title": clean(str(title)), "detail": _join(*list(vals.values())[:4]), "extra": ""}
+
+
+def _yok_profile_of(d: dict) -> dict:
+    path = [p for p in (d.get("universiteAd"), d.get("fakulteAd"), d.get("bolumAd")) if p]
+    return {"title_raw": clean(d.get("kadroUnvanAdi") or ""), "name": clean(d.get("personelAdiSoyadi") or ""),
+            "path": path, "institution": path[0] if path else "", "department": d.get("bolumAd") or (path[-1] if path else ""),
+            "field": clean(d.get("bilimAlanAd") or ""), "area": clean(d.get("temelAlanAd") or ""),
+            "keywords": [clean(d[k]) for k in ("anahtarkelime1Ad", "anahtarkelime2Ad", "anahtarkelime3Ad") if d.get(k)],
+            "orcid": d.get("orcid") or "", "researcher_id": d.get("researcherId") or "", "scopus_id": d.get("scopusId") or ""}
+
+
+async def _yok_rows(client, path: str, **params) -> list[dict]:
+    from . import yokdir
+    d = await yokdir.api(client, path, **params)
+    if isinstance(d, dict):
+        return d.get("data") or []
+    return d or []
+
+
+async def _yok_find(client, name: str, institution: str, emit) -> str:
+    """Bağlantı yoksa ad araması: aynı adlı kişiler arasından kurumla eşleşen seçilir."""
+    from . import yokdir
+    rows = await _yok_rows(client, "/akademisyen/list", page=1, length=60, personelAdiSoyadi=yokdir._upper_tr(clean(name)),
+                           personelAdiSoyadi_matchMode="contains")
+    inst_f = fold(institution)
+    scored = []
+    for r in rows:
+        score = name_score(name, clean(r.get("personelAdiSoyadi") or ""))
+        if score < 0.75:
+            continue
+        if inst_f and inst_f.split()[0] in fold(r.get("universiteAd") or ""):
+            score += 1
+        scored.append((score, r.get("authorGuidId") or ""))
+    scored.sort(reverse=True)
+    if not scored or (institution and scored[0][0] < 1):
+        emit(f"YÖK: {len(scored)} aynı adlı akademisyen var, kurumla eşleşen yok; atlandı.")
+        return ""
+    emit(f"YÖK: {len(scored)} aynı adlı akademisyen arasından kurumla eşleşen seçildi.")
+    return scored[0][1]
+
+
+async def _yok_publications(client, guid: str, profile_url: str, emit) -> list[dict]:
+    types = await _yok_rows(client, "/yayin/ana/tur/list")
+    wanted = [(t["value"], YOK_PUB_TYPES[t["label"]], t["label"]) for t in types if t.get("label") in YOK_PUB_TYPES]
+    lists = await asyncio.gather(*[_yok_rows(client, "/yayin/list", authorGuidId=guid, yayinAnaTurId=v, page=1, length=1000)
+                                   for v, _k, _l in wanted], return_exceptions=True)
+    out = []
+    for (_v, kind, label), rows in zip(wanted, lists):
+        if isinstance(rows, BaseException):
+            emit(f"YÖK {_cap(label)} okunamadı ({type(rows).__name__}).")
+            continue
+        for r in rows:
+            doi = doi_key(r.get("doi") or "")
+            pages = "-".join(x for x in (r.get("ilkSayfa"), r.get("sonSayfa")) if x)
+            out.append(record(
+                "yok", source_id=str(r.get("yayinId") or ""), title=r.get("yayinAdi") or "", year=r.get("yil"),
+                venue=clean(r.get("yayinYeri") or ""), doi=doi, issn=r.get("issn") or "", isbn=r.get("isbn") or "",
+                authors=[_cap(a) for a in (r.get("yazarAdi") or "").split(",") if clean(a)],
+                url=f"https://doi.org/{doi}" if doi else profile_url, type=kind,
+                volume=r.get("cilt") or "", issue=r.get("sayi") or "", pages=pages,
+                labels=[x for x in [clean(r.get("yayinTuruAdi") or ""), "Uluslararası" if str(r.get("kapsam")) == "1" else ""] if x]))
+        emit(f"YÖK {_cap(label)}: {sum(1 for x in out if x['type'] == kind)} kayıt.")
     return out
 
 
-def _yok_section(sel) -> list[dict]:
-    """Bölüm sayfaları üç düzenden birini kullanır: sekmeli tablo, zaman çizelgesi ya da liste satırı."""
-    rows = []
-    for panel in sel.css(".panel-group .panel"):
-        group = _text_of(panel, ".panel-title")
-        heads = [clean(th.get_all_text(separator=" ")) for th in panel.css("thead th")]
-        for tr in panel.css("tbody tr"):
-            cells = [clean(td.get_all_text(separator=" ")) for td in tr.css("td")]
-            row = {"group": group, **dict(zip(heads, cells))}
-            link = tr.css("a[href^='http']")
-            if link:
-                row["url"] = link[0].attrib.get("href", "")
-            rows.append(row)
-    if rows:
-        return rows
-    timelines = _yok_timelines(sel)
-    if timelines:
-        return [item for items in timelines.values() for item in items]
-    # Proje (ve benzeri) sayfalarının güncel düzeni: .projectmain kartları
-    for block in sel.css(".projectmain"):
-        title = _text_of(block, ".baslika")
-        if not title:
-            continue
-        labels = [clean(x.get_all_text(separator=" ")) for x in block.css(".projectType .label")]
-        people, roles = [], []
-        for a in block.css("a.popoverData"):
-            people.append(tr_title(clean(a.get_all_text())))
-            info = re.sub(r"<br\s*/?>", " · ", a.attrib.get("data-content") or "", flags=re.I)
-            info = clean(re.sub(r"<[^>]+>", "", info)).strip(" ·")
-            roles.append(re.sub(r"Üniversite:\s*(.+)$", lambda m: "Üniversite: " + tr_title(m.group(1)), info))
-        type_text = _text_of(block, ".projectType")
-        for label in labels:
-            type_text = type_text.replace(label, "", 1)
-        parent = block.parent
-        topic = _text_of(parent, ".collapse p") if parent is not None else ""
-        rows.append({"labels": [x for x in labels if x], "title": title,
-                     "detail": " · ".join(x for x in [", ".join(people[:6]), roles[0] if roles else ""] if x),
-                     "extra": " · ".join(x for x in [clean(type_text).strip(" ,"), f"Konu: {topic}" if topic else ""] if x)})
-    if rows:
-        return rows
-    for r in sel.css(".listrow"):
-        rows.append({"labels": [clean(x.get_all_text(separator=" ")) for x in r.css(".listRowType .label")],
-                     "title": _text_of(r, ".listRowTitle"), "detail": _text_of(r, ".listRowAuthor"),
-                     "extra": _text_of(r, ".listRowExtra, .listRowDescription")})
-    return [r for r in rows if r["title"] or r["detail"]]
+async def yok_profile_api(name: str, institution: str, link: str, emit, sections: set[str] | None = None,
+                          publications: bool = True) -> dict:
+    """YÖK Akademik'in herkese açık JSON API'si: kimlik, görev/öğrenim, bölümler, birlikte çalışılanlar ve yayınlar.
 
+    Tarayıcı ve REA gerekmez; istekler yokdir.api üzerinden en fazla üç eşzamanlı çağrıyla sınırlanır.
+    """
+    from . import yokdir
 
-def _yok_collaborators(html: str, self_id: str) -> list[dict]:
-    out = []
-    for aid, photo, name, title, unit in _NODE_RE.findall(html):
-        if aid == self_id:
-            continue
-        path = [p.strip() for p in unit.split("/") if p.strip()]
-        out.append({"yok_id": aid, "name": tr_title(name), "title": YOK_TITLES.get(title, tr_title(title)),
-                    "institution": tr_title(path[0]) if path else "", "unit": tr_title(" / ".join(path[1:3])),
-                    "photo": photo if photo.startswith("data:image") else "",
-                    "url": f"{YOK}AkademisyenGorevOgrenimBilgileri?islem=direct&authorId={aid}"})
-    return out[:60]
+    result: dict = {"profile": {}, "records": [], "rea": None}
+    want = lambda group: sections is None or group in sections  # noqa: E731
+    async with yokdir._client() as client:
+        guid = yok_guid(link) or await _yok_find(client, name, institution, emit)
+        if not guid:
+            return result
+        url = YOK_PROFILE + guid
+        detail = await yokdir.api(client, "/akademisyen/detay", authorGuidId=guid)
+        if not detail:
+            emit("YÖK profili bulunamadı (kimlik artık geçerli değil).")
+            return result
+        prof = _yok_profile_of(detail)
+        result.update(profile=prof, profile_url=url)
+        emit(f"YÖK profili (API): {prof['title_raw']} · {' / '.join(prof['path'][:3])}"
+             + (f" · ORCID {prof['orcid']}" if prof["orcid"] else ""))
+        page = {"authorGuidId": guid, "page": 1, "length": 1000}
+        jobs = {}
+        if want("career"):
+            jobs |= {"career": ("/deneyim/akademik/gorev", page), "education": ("/akademisyen/ogrenim/bilgiler", page),
+                     "admin": ("/deneyim/idari/gorev", page), "experience": ("/deneyim/universite/disi", page)}
+        if want("projects"):
+            jobs |= {"projects": ("/proje/list", page), "awards": ("/odul/list", page),
+                     "memberships": ("/uyelik/list", page), "art": ("/sanatsal/faaliyet/list", page)}
+        if want("courses"):
+            jobs["courses"] = ("/ders/list", page)
+        if want("theses"):
+            jobs["theses"] = (f"/tez/yurt/ici/yonetilen/{guid}", {})
+        if want("patents"):
+            jobs["patents"] = ("/patent/list", page)
+        if want("industry"):
+            jobs["collaborators"] = (f"/akademisyen/birlikte/calisanlar/{guid}", {})
+        tasks = [_yok_rows(client, path, **params) for path, params in jobs.values()]
+        if publications:
+            tasks.append(_yok_publications(client, guid, url, emit))
+        got = await asyncio.gather(*tasks, return_exceptions=True)
+        data = {}
+        for key, rows in zip(jobs, got):
+            if isinstance(rows, BaseException):
+                emit(f"YÖK {key} okunamadı ({type(rows).__name__}).")
+            else:
+                data[key] = rows
+        if publications:
+            pubs = got[-1]
+            result["records"] = [] if isinstance(pubs, BaseException) else pubs
 
-
-def _yok_extra(bridge, page, link: str, emit, sections: set[str] | None = None) -> dict:
-    """Profilin yayın dışı her şeyi: fotoğraf, e-posta, görev/öğrenim, bölümler ve birlikte çalıştığı kişiler."""
-    photo = next((img.attrib.get("src", "") for img in page.css("img.img-circle")
-                  if (img.attrib.get("src") or "").startswith("data:image")), "")
-    mail = next((a.attrib.get("href", "")[7:] for a in page.css("#authorlistTb a[href^='mailto:']")), "")
-    updated = re.search(r"Son güncelleme:\s*([\d.]+)", page.get_all_text(separator=" "))
-    timelines = _yok_timelines(page)
-    extra = {"photo": photo, "email": clean(mail), "updated": updated.group(1) if updated else "",
-             "career": next((v for k, v in timelines.items() if "Görev" in k), []),
-             "education": next((v for k, v in timelines.items() if "Öğrenim" in k), []),
-             "sections": {}, "collaborators": []}
-    self_id = (re.search(r"authorId=([A-Z0-9]+)", link) or [None, ""])[1]
-    if sections is None or "industry" in sections:
-        try:  # graf sayfası oturumdaki son profile göre oluşur
-            graph = bridge.fetch(urljoin(YOK, "view/viewAuthorGraphs.jsp"), network_idle=False)
-            extra["collaborators"] = _yok_collaborators(graph.html_content or "", self_id)
-        except Exception as exc:  # noqa: BLE001
-            extra.pop("collaborators", None)
-            emit(f"YÖK birlikte çalıştığı kişiler okunamadı ({type(exc).__name__}).")
-    else:
-        extra.pop("collaborators", None)
-    menu = {clean(a.get_all_text()): urljoin(YOK, a.attrib.get("href", "")) for a in page.css("a[href]")}
-    for label, key in YOK_SECTIONS.items():
-        group = "career" if key in {"admin", "experience"} else "projects" if key in {"projects", "awards", "memberships", "art"} else key
-        if sections is not None and group not in sections:
-            continue
-        if label not in menu:
-            continue
-        try:
-            section_page = bridge.fetch(menu[label], network_idle=False)
-            rows = _yok_section(section_page)
-        except Exception as exc:  # noqa: BLE001
-            emit(f"YÖK {label} okunamadı ({type(exc).__name__}).")
-            continue
-        explicitly_empty = re.search(r"kayit (?:bulunamadi|bulunmamaktadir|yok)", fold(section_page.get_all_text()))
-        if rows or sections is not None and explicitly_empty:
-            extra["sections"][key] = rows
-    counts = ", ".join(f"{label} {len(extra['sections'][key])}" for label, key in YOK_SECTIONS.items()
-                       if key in extra["sections"])
-    emit(f"YÖK profil ayrıntıları: görev {len(extra['career'])}, öğrenim {len(extra['education'])}, "
+    sec = {}
+    if "admin" in data:
+        sec["admin"] = [_tl(r.get("baslangicTarihi"), r.get("bitisTarihi"), r.get("gorevAdi"), r.get("yerAdi") or r.get("unvBirimAdi"),
+                            _units(r.get("fakulteBilgisi"), r.get("bolumBilgisi"))) for r in data["admin"]]
+    if "experience" in data:
+        sec["experience"] = [_tl(r.get("baslangicTarihi"), r.get("bitisTarihi"), r.get("gorevAdi"), r.get("kurulusAdi") or r.get("kurumAdi"),
+                                 r.get("isyeriTuruAdi"), r.get("isTanimi")) for r in data["experience"]]
+    if "projects" in data:
+        sec["projects"] = [{"labels": _labels(r.get("projeTuruAd"), r.get("projeDurumuAd")), "title": clean(r.get("projeAdi") or ""),
+                            "detail": _join(f"{r.get('butcesi')} {r.get('paraBirimi')}" if str(r.get("butcesi") or "0") != "0" else "",
+                                            _team(r.get("projeEkip"))),
+                            "extra": _join(r.get("baslangicTarihi"), r.get("bitisTarihi") or r.get("bitisyil"))} for r in data["projects"]]
+    if "awards" in data:
+        sec["awards"] = [{"labels": _labels(r.get("turAdi"), r.get("isyeriTuruAdi")), "title": clean(r.get("odulAdi") or ""),
+                          "detail": clean(r.get("kurulusAdi") or ""), "extra": _join(r.get("odulTarih"), tr_title(r.get("ulkeAd") or ""))}
+                         for r in data["awards"]]
+    if "theses" in data:
+        sec["theses"] = [{"labels": _labels(r.get("tezTurAd"), r.get("durumAdi")), "title": clean(r.get("tezAdi") or ""),
+                          "detail": _cap(r.get("hazAdSoyad") or f"{r.get('hazAd') or ''} {r.get('hazSoyad') or ''}"),
+                          "extra": _join(tr_title(r.get("universiteAd") or ""), r.get("yil"))} for r in data["theses"]]
+    if "patents" in data:
+        sec["patents"] = [{"labels": _labels(r.get("kategoriAd"), r.get("basvuruTuru"), r.get("patentDosyaTipi")),
+                           "title": clean(r.get("patentBaslik") or ""), "detail": _join(r.get("patentBulusSahip"), r.get("patentBasvuruSahip")),
+                           "extra": _join(r.get("patentNo"), r.get("patentTarih"))} for r in data["patents"]]
+    for key in ("courses", "memberships", "art"):
+        if key in data:
+            sec[key] = [x for x in (_generic_row(r) for r in data[key]) if x["title"] or x["detail"]]
+    extra = {"photo": detail.get("authorImage") if str(detail.get("authorImage") or "").startswith("data:image") else "",
+             "email": "", "updated": "", "sections": sec}
+    if "career" in data:
+        extra["career"] = [_tl(r.get("baslangicTarihi"), r.get("bitisTarihi"), YOK_TITLES.get(r.get("kadroUnvanAdi") or "", r.get("kadroUnvanAdi")),
+                               r.get("unvBirimAdi"), _units(r.get("fakultebilgisi"), r.get("bolumbilgisi")), r.get("akademikDurumAdi"))
+                           for r in data["career"]]
+    if "education" in data:
+        extra["education"] = [_tl(r.get("baslangicTarihi"), r.get("bitisTarihi"), r.get("programAdi"),
+                                  r.get("unvBirimAdi") or r.get("digerUniversite") or r.get("yerAd"),
+                                  _units(r.get("fakulteBilgisi"), r.get("bolumBilgisi")), r.get("tezAdi")) for r in data["education"]]
+    if "collaborators" in data:
+        extra["collaborators"] = [{"yok_id": c.get("authorGuidId") or "", "name": _cap(c.get("personelAdiSoyadi")),
+                                   "title": YOK_TITLES.get(c.get("kadroUnvanAdi") or "", tr_title(c.get("kadroUnvanAdi") or "")),
+                                   "institution": tr_title(c.get("universiteAd") or ""), "unit": tr_title(_units(c.get("fakulteAd"), c.get("bolumAd"))),
+                                   "photo": c.get("authorImage") if str(c.get("authorImage") or "").startswith("data:image") else "",
+                                   "url": YOK_PROFILE + (c.get("authorGuidId") or "")} for c in data["collaborators"]][:60]
+    counts = ", ".join(f"{k} {len(v)}" for k, v in sec.items())
+    emit(f"YÖK profil ayrıntıları: görev {len(extra.get('career', []))}, öğrenim {len(extra.get('education', []))}, "
          f"birlikte çalıştığı {len(extra.get('collaborators', []))} kişi" + (f", {counts}" if counts else "") + ".")
-    if sections is not None and "career" not in sections:
-        extra.pop("career", None)
-        extra.pop("education", None)
-    return extra
+    result["extra"] = extra
+    return result
 
 
+# Eski AkademikArama kayıtları (yok_context taşıyanlar) için künye okuyucu
 def _yok_pubs(sel, kind: str, profile_url: str = "") -> list[dict]:
     out = []
     pane = sel.css("#all tbody.searchable > tr") or sel.css("tbody.searchable > tr")
@@ -731,136 +787,25 @@ def yok_detail_sync(paper: dict, profile_url: str, emit) -> dict:
     return out
 
 
-def yok_sync(name: str, institution: str, link: str, emit, sections: set[str] | None = None, publications: bool = True) -> dict:
-    """Scrapling stealth tarayıcı + REA CDP köprüsü ile YÖK Akademik.
-
-    `emit(msg)` iş parçacığından güvenli log fonksiyonudur.
-    """
-    from .rea import StealthBridge
-
-    result: dict = {"profile": {}, "records": [], "rea": None}
-    with StealthBridge() as bridge:
-        if not link:
-            store = recipes.load("yok.gov.tr")
-            recipe = store["replay"].get("yok_search")
-            home = bridge.fetch(YOK)
-            emit(f"YÖK ana sayfası Scrapling stealth ile açıldı (HTTP {home.status}); düz istemciler 418 alıyor.")
-            dom = None
-            if recipe:
-                box: dict = {}
-
-                def action(page):
-                    box.update(recipes.replay_in_browser(page, recipe, name))
-                    return page
-
-                try:
-                    bridge.fetch(YOK, page_action=action)
-                except Exception as exc:  # noqa: BLE001
-                    box["error"] = type(exc).__name__
-                if box.get("status") == 200 and "Akademisyenler" in box.get("text", ""):
-                    dom = parse(box["text"], box["url"])
-                    recipe["hits"] = recipe.get("hits", 0) + 1
-                    recipes.event(store, "replay_ok", f"POST {recipe['url']}", elapsed=box.get("elapsed"))
-                    emit(f"REA tarifi (öğrenildi {recipe['learned_at']}) stealth bağlamında tekrar oynatıldı: "
-                         f"{recipe['method']} {recipe['url']} → {box.get('elapsed')} sn; REA gözlemine gerek kalmadı.")
-                    result["rea"] = {"method": recipe["method"], "url": recipe["url"], "body": "(tarif)",
-                                     "replayed": True, "elapsed": box.get("elapsed")}
-                else:
-                    recipe["failures"] = recipe.get("failures", 0) + 1
-                    recipes.event(store, "replay_failed", f"{recipe['url']}: {box.get('status') or box.get('error')}")
-                    emit("DEĞİŞİKLİK: YÖK arama tarifi artık çalışmıyor → REA formu yeniden gözlemleyecek.")
-            if dom is None and rea.available():
-                cap = bridge.observe(YOK, [
-                    {"step_id": "fill", "action": "fill", "locator": {"kind": "css", "selector": "#aramaTerim"},
-                     "value": {"source": "literal", "value": name}, "timeout_ms": 8000},
-                    {"step_id": "submit", "action": "press", "locator": {"kind": "css", "selector": "#aramaTerim"},
-                     "key": "Enter", "timeout_ms": 8000},
-                    {"step_id": "settle", "action": "wait_for_timeout", "duration_ms": 3000},
-                ])
-                hidden = next((t for t in cap.documents if t.method == "POST"), None)
-                if hidden:
-                    emit(f"REA arama formunun gizli isteğini çözdü: POST {hidden.url} "
-                         f"(gövde alanları: {', '.join(k.split('=')[0] for k in (hidden.request_body or '').split('&')[:4])}…)")
-                    result["rea"] = {"method": "POST", "url": hidden.url, "body": (hidden.request_body or "")[:300],
-                                     "evidence_id": cap.evidence_id, "requests": len(cap.transactions)}
-                learned = recipes.learn_replay(cap, name, "yok_search")
-                if learned:
-                    store["replay"]["yok_search"] = learned
-                    recipes.event(store, "relearned" if recipe else "learned", f"POST {learned['url']}",
-                                  evidence_id=cap.evidence_id)
-                    emit("Tarif kaydedildi: sonraki aramalarda bu istek REA'sız, doğrudan tekrar oynatılacak.")
-                dom = parse(cap.dom, cap.final_url or YOK) if cap.dom else None
-            recipes.save(store)
-            if dom is None:
-                emit("REA yok veya gözlem başarısız; YÖK araması atlandı.")
-                return result
-            list_link = next((urljoin(YOK, a.attrib.get("href", "")) for a in dom.css("a")
-                              if "Akademisyenler" in a.get_all_text()), None)
-            if not list_link:
-                emit("YÖK: akademisyen sonucu yok.")
-                return result
-            listing = bridge.fetch(list_link)
-            best, best_score = None, 0.0
-            inst_f = fold(institution)
-            def row_name(tr):  # isim <h4> içinde doğrudan ya da bir <a> içinde olabilir
-                h = tr.css("h4")
-                return clean(h[0].get_all_text(separator=" ")) if h else ""
-
-            for tr in listing.css("tr"):
-                text = clean(tr.get_all_text(separator=" "))
-                h4 = row_name(tr)
-                score = name_score(name, h4 or text)
-                if score < 0.75:
-                    continue
-                if inst_f and inst_f.split()[0] in fold(text):
-                    score += 1
-                href = next((a.attrib.get("href") for a in tr.css("a") if re.search(r"authorId|AkademisyenGorevOgrenim",
-                                                                                   a.attrib.get("href") or "")), None)
-                if href and score > best_score:
-                    best, best_score = urljoin(YOK, href), score
-            n = len([1 for tr in listing.css("tr") if name_score(name, row_name(tr)) >= 0.75])
-            if not best or (institution and best_score < 1):
-                emit(f"YÖK: {n} aynı adlı akademisyen var, kurumla eşleşen yok; atlandı.")
-                return result
-            emit(f"YÖK: {n} aynı adlı akademisyen arasından kurumla eşleşen seçildi.")
-            link = best
-        page = bridge.fetch(link)
-        prof = _yok_parse_profile(page)
-        if not prof:
-            emit("YÖK profil sayfası ayrıştırılamadı.")
-            return result
-        result["profile"] = prof
-        result["profile_url"] = link
-        emit(f"YÖK profili: {prof.get('title_raw')} · {' / '.join(prof.get('path', [])[:3])}"
-             + (f" · ORCID {prof['orcid']}" if prof.get("orcid") else ""))
-        result["extra"] = _yok_extra(bridge, page, link, emit, sections)
-        pub_links = [(clean(a.get_all_text()), urljoin(YOK, a.attrib.get("href", ""))) for a in page.css("a")
-                     if "AkademisyenYayinBilgileri" in (a.attrib.get("href") or "")]
-        for label, url in pub_links:
-            if not publications:
-                break
-            if label not in ("Makaleler", "Bildiriler", "Kitaplar"):
-                continue
-            pubs = _yok_pubs(bridge.fetch(url), {"Makaleler": "article", "Bildiriler": "proceedings",
-                                                 "Kitaplar": "book"}[label], link)
-            emit(f"YÖK {label}: {len(pubs)} kayıt.")
-            result["records"].extend(pubs)
-    return result
-
-
 async def yok_works(profile: Profile, log, *, sections: set[str] | None = None, publications: bool = True) -> tuple[list[dict], dict | None]:
-    loop = asyncio.get_running_loop()
+    pending: list = []
 
     def emit(msg: str):
-        asyncio.run_coroutine_threadsafe(log("yok", "running", msg), loop)
+        pending.append(asyncio.ensure_future(log("yok", "running", msg)))
 
-    res = await asyncio.to_thread(yok_sync, profile.name or profile.query_name, profile.get("institution", ""),
-                                  profile.links.get("yok", ""), emit, sections, publications)
+    try:
+        res = await yok_profile_api(profile.name or profile.query_name, profile.get("institution", ""),
+                                    profile.links.get("yok", ""), emit, sections, publications)
+    except httpx.HTTPError as exc:
+        emit(f"YÖK'e ulaşılamadı ({type(exc).__name__}).")
+        res = {}
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
     prof = res.get("profile") or {}
     if prof:
         if res.get("profile_url"):
             profile.links["yok"] = res["profile_url"]
-        src = profile.links.get("yok") or YOK
+        src = profile.links.get("yok") or YOK_PROFILE
         profile.set("title", YOK_TITLES.get(prof.get("title_raw", ""), tr_title(prof.get("title_raw", ""))), "yok", src,
                     override=True)
         if prof.get("institution"):

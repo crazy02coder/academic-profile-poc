@@ -12,7 +12,7 @@ from .text import fold
 
 CHATS_DIR = ROOT / "data" / "chats"
 ORCID_RE = re.compile(r"\d{4}-\d{4}-\d{4}-\d{3}[\dXx]")
-YOK_ID_RE = re.compile(r"authorId=([0-9A-Fa-f]+)")
+YOK_ID_RE = re.compile(r"author(?:Guid)?Id=([0-9A-Fa-f]+)")
 
 
 def _now() -> str:

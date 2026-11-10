@@ -920,7 +920,8 @@ def _preview_of(html: str, url: str, domain: str) -> dict:
     sections, paragraphs = _outline(html, url)
     title = clean(re.split(r"\s[|–:-]\s", page["title"])[-1 if page["title"].lower().startswith(("ostim", "home")) else 0]) or page["title"]
     return {"url": url, "title": title[:160], "description": meta[:400], "paragraphs": paragraphs,
-            "sections": sections, "items": sum(len(x["items"]) for x in sections), "course_content": _course_content(sel)}
+            "sections": sections, "items": sum(len(x["items"]) for x in sections), "course_content": _course_content(sel),
+            "syllabus": _syllabus(sel)}
 
 
 async def preview(uid: str, url: str) -> dict:
@@ -932,7 +933,7 @@ async def preview(uid: str, url: str) -> dict:
     target = _url_key(url)
     if urlsplit(target).scheme not in {"http", "https"} or registrable(urlsplit(target).hostname or "") != domain:
         raise ValueError("Yalnız kurumun resmî sitesindeki bağlantılar önizlenir.")
-    path = CACHE / f"preview3-{hashlib.sha256(target.encode()).hexdigest()[:24]}.json"
+    path = CACHE / f"preview4-{hashlib.sha256(target.encode()).hexdigest()[:24]}.json"
     try:
         saved = json.loads(path.read_text(encoding="utf-8"))
         if time.time() - saved.get("ts", 0) < PREVIEW_TTL:
@@ -961,4 +962,136 @@ async def preview(uid: str, url: str) -> dict:
         raise ValueError("Bu bağlantı önizlenebilir bir sayfa değil.")
     CACHE.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"ts": time.time(), "data": data}, ensure_ascii=False), encoding="utf-8")
+    return data
+
+
+def _rows(table) -> list[list[str]]:
+    return [[clean(c.get_all_text(separator=" ")) for c in r.xpath("./th|./td")] for r in table.xpath(".//tr")]
+
+
+def _syllabus(sel) -> dict:
+    """Ders izlencesi: haftalık konular, değerlendirme yüzdeleri, iş yükü, öğrenme çıktıları ve ders künyesi.
+
+    Başlık satırına göre tanır (OIBS ve benzeri Bologna tabloları); tablo kimliğine bağlı değildir.
+    """
+    out = {"info": [], "weeks": [], "assessment": [], "workload": {}, "outcomes": []}
+    info_re = r"^(?:dersin )?(?:dili|duzeyi|turu|ogretim sekli|koordinatoru|veren|verenler|on ?kosul|on ?sart|language|level|type|course type|mode of delivery|coordinator|instructors?|prerequisites?)"
+    for table in sel.css("table"):
+        if table.css("table table"):
+            continue
+        rows = [r for r in _rows(table) if any(r)]
+        if not rows:
+            continue
+        head = [fold(x) for x in rows[0]]
+        if head and head[0] in {"hafta", "week", "weeks"} and len(head) > 1 and not out["weeks"]:
+            topic = next((i for i, h in enumerate(head) if re.search(r"konu|topic|subject|icerik|content", h)), 1)
+            prep = next((i for i, h in enumerate(head) if re.search(r"hazirlik|preparation", h)), None)
+            for r in rows[1:]:
+                if len(r) > topic and r[topic] and re.fullmatch(r"\d{1,2}(?:\s*[-–]\s*\d{1,2})?", r[0]):
+                    out["weeks"].append({"week": r[0], "topic": r[topic][:400],
+                                         "prep": r[prep][:200] if prep is not None and len(r) > prep else ""})
+            continue
+        if any(re.search(r"katki|contribution|agirlik|weight|etki|percent|yuzde", h) for h in head[1:]) and not out["assessment"]:
+            col = next(i for i, h in enumerate(head) if i and re.search(r"katki|contribution|agirlik|weight|etki|percent|yuzde", h))
+            num = next((i for i, h in enumerate(head) if re.search(r"sayi|number|adet|quantity", h)), None)
+            for r in rows[1:]:
+                m = re.search(r"(\d{1,3})", r[col]) if len(r) > col else None
+                if not m or not r[0] or re.search(r"toplam|total", fold(r[0])):
+                    continue
+                pct = int(m[1])
+                if 0 < pct <= 100:
+                    out["assessment"].append({"name": r[0][:80], "count": r[num] if num is not None and len(r) > num else "", "percent": pct})
+            continue
+        if head and re.search(r"is yuku|workload", head[0]) and not out["workload"]:
+            items = []
+            for r in rows[1:]:
+                if re.search(r"toplam|total", fold(r[0])):
+                    text = " ".join(r)
+                    if m := re.search(r"(?:akts|ects)[^\d]*(\d+(?:[.,]\d+)?)", fold(text)):
+                        out["workload"]["ects"] = m[1]
+                    nums = re.findall(r"\d+", r[-1])
+                    if nums:
+                        out["workload"]["hours"] = nums[-1]
+                elif len(r) >= 2 and r[0]:
+                    items.append({"name": r[0][:60], "hours": r[-1]})
+            out["workload"]["items"] = items[:12]
+            continue
+        if len(head) == 2 and re.search(r"sira|no|#", head[0]) and re.search(r"aciklama|description|cikti|outcome", head[1]) and not out["outcomes"]:
+            out["outcomes"] = [r[1][:300] for r in rows[1:] if len(r) > 1 and r[1]][:15]
+            continue
+        for r in rows:
+            if len(r) == 2 and r[1] and len(r[0]) <= 40 and re.search(info_re, fold(r[0])) and len(out["info"]) < 10:
+                out["info"].append({"label": r[0], "value": r[1][:200]})
+    if not out["workload"].get("items") and not out["workload"].get("hours"):
+        out["workload"] = {}
+    return out if out["weeks"] or out["assessment"] or out["outcomes"] else {}
+
+
+# ------------------------------------------------------------------ OIBS program profili
+PROGRAM_PAGES = (("profile", "progProfile", "Program profili"), ("employment", "progOccupationalProf", "Mezunların iş alanları"),
+                 ("further", "progAccessFurhterStudies", "Üst kademeye geçiş"), ("goals", "progGoalsObjectives", "Amaç ve hedefler"),
+                 ("degree", "progDegree", "Kazanılan derece"))
+
+
+def _panel_text(html: str) -> str:
+    tree = html_tree.fromstring(html)
+    for bad in tree.xpath("//script|//style|//input|//*[contains(@class,'panel-heading')]|//*[contains(@class,'aspNetHidden')]"):
+        bad.drop_tree()
+    for br in tree.xpath("//br"):
+        br.tail = "\n" + (br.tail or "")
+    for block in tree.xpath("//p|//li|//tr|//div"):
+        block.tail = "\n" + (block.tail or "")
+    root = (tree.xpath("//*[contains(@class,'panel')]") or tree.xpath("//form") or [tree])[0]
+    lines = [clean(x) for x in root.text_content().splitlines()]
+    out = []
+    for line in lines:
+        if line and line not in out:
+            out.append(line)
+    return "\n".join(out)[:4000]
+
+
+async def program(uid: str, url: str) -> dict:
+    """OIBS Bologna program sayfaları (profil, istihdam, üst kademe, amaç, derece) — yalnız kurumun alan adı."""
+    home = await university_home(uid)
+    if not home:
+        raise ValueError("Kurumun resmî site bağlantısı bulunamadı.")
+    domain = registrable(urlsplit(home).hostname or "")
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    unit = query.get("curSunit", "")
+    if parts.scheme not in {"http", "https"} or registrable(parts.hostname or "") != domain:
+        raise ValueError("Yalnız kurumun resmî sitesindeki programlar okunur.")
+    if not re.search(r"/oibs/bologna/", parts.path, re.I) or not unit.isdigit():
+        return {"url": url, "sections": [], "supported": False}
+    base = f"{parts.scheme}://{parts.netloc}{parts.path.rsplit('/', 1)[0]}/"
+    lang = query.get("lang", "tr")
+    path = CACHE / f"program1-{hashlib.sha256((base + unit + lang).encode()).hexdigest()[:24]}.json"
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if time.time() - saved.get("ts", 0) < PREVIEW_TTL:
+            return saved["data"]
+    except (OSError, ValueError, KeyError):
+        pass
+    sections = []
+    async with public_client(timeout=12, headers={"User-Agent": USER_AGENT, "Accept-Language": "tr"}) as client:
+        async def one(key, page, label):
+            target = f"{base}{page}.aspx?" + urlencode({"lang": lang, "curSunit": unit})
+            try:
+                raw, mime, final = await read_public(client, target, 1_000_000)
+            except Exception:
+                return None
+            if "html" not in mime or registrable(urlsplit(final).hostname or "") != domain:
+                return None
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("windows-1254", errors="replace")
+            body = await asyncio.to_thread(_panel_text, text)
+            return {"key": key, "heading": label, "text": body, "url": target} if len(body) >= 15 else None
+        found = await asyncio.gather(*(one(*p) for p in PROGRAM_PAGES))
+    sections = [s for s in found if s]
+    data = {"url": url, "sections": sections, "supported": True}
+    if sections:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"ts": time.time(), "data": data}, ensure_ascii=False), encoding="utf-8")
     return data

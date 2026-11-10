@@ -1,48 +1,46 @@
 """YÖK Akademik kurum dizini: üniversite → fakülte → akademisyen.
 
-Her satırda unvan, ad, birim yolu ("ÜNİVERSİTE/FAKÜLTE/BÖLÜM/PROGRAM"), ORCID, e-posta ve YÖK kimliği bulunur.
-Yapı Türkiye'deki tüm üniversitelerde aynıdır; kurum sitelerinin birbirinden farklı kadro sayfası düzenlerine
-bağımlı değildir. Kurum sitesi ayrıştırması (directory._people) fotoğraf/profil bağlantısı ve YÖK'e
-ulaşılamadığında yedek için kullanılır.
-
-Liste sayfaları (universityListview.jsp, AkademisyenArama?birim=…) herkese açıktır; istekler sıralı ve
-önbelleklidir (data/yok/, 7 gün).
+Kasım 2026'dan itibaren YÖK Akademik yeni bir uygulamadır; veriler herkese açık JSON API'den
+(akademik.yok.gov.tr/api) gelir. Bir üniversitenin bütün aktif kadrosu birkaç büyük sayfayla çekilir,
+fakülte/bölüm ayrımı yerelde yapılır (eski HTML dizininde onlarca sayfa ve dakikalar süren iş saniyeler sürer).
+Kimlikler (birimId vb.) YÖK tarafından şifreli ve dönemsel olduğundan liste önbelleği kısa tutulur.
+Kurum sitesi ayrıştırması (directory._people) fotoğraf/profil bağlantısı ve yedek için kullanılır.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import html
 import json
 import re
 import time
 from collections import Counter
-from urllib.parse import urljoin
 
 import httpx
 
-from . import recipes
 from .config import ROOT
 from .discover import registrable, tr_title
 from .sources import YOK_TITLES
 from .text import clean, fold, name_score, name_tokens
 
 BASE = "https://akademik.yok.gov.tr"
-UNIVERSITIES = f"{BASE}/AkademikArama/view/universityListview.jsp"
+API = f"{BASE}/api"
 DIR = ROOT / "data" / "yok"
 TTL = 7 * 24 * 3600
-MAX_PAGES = 120  # sayfa başına 20 kişi
-SEARCH_URL = f"{BASE}/AkademikArama/AkademisyenArama"
-# Ad araması formu; REA'nın öğrendiği tarif (data/recipes/yok.gov.tr.json) varsa o kullanılır
-SEARCH_FORM = [["aramaTerim", "{name}"], ["islem", "1"], ["yazarCheckbox", "on"]]
+LIST_TTL = 24 * 3600  # üniversite listesi: şifreli kimlikler dönemsel
+PAGE = 500
+MAX_PEOPLE = 12000
 FREE_MAIL = {"gmail.com", "hotmail.com", "yahoo.com", "outlook.com", "yandex.com", "icloud.com", "live.com", "msn.com",
              "windowslive.com", "mynet.com", "hotmail.com.tr", "yahoo.com.tr"}
 TITLE_RANK = {"Prof. Dr.": 0, "Doç. Dr.": 1, "Dr. Öğr. Üyesi": 2, "Öğr. Gör.": 3, "Arş. Gör.": 4}
 # tr_title kısaltmaları bozmasın: "Ted Üniversitesi" değil "TED Üniversitesi"
 ACRONYMS = ("TED", "TOBB", "MEF", "OSTİM", "KTO", "SANKO", "TOGÜ", "ODTÜ", "İSTE", "ERÜ")
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+WIKI_UA = "AkademikIz/2.0 (https://github.com/akademik-iz; academic research PoC) httpx"
 # Birim adlarında eşleştirmeyi bozan ekler: "Yazılım Mühendisliği Bölümü", "… Lisans", "… (İngilizce)"
 UNIT_NOISE = {"bolumu", "bolum", "lisans", "programi", "program", "pr", "turkce", "ingilizce", "department", "of",
               "anabilim", "dali", "fakultesi", "faculty", "the"}
+ACTIVE = {"aktifAkademisyen": "true", "aktifAkademisyen_matchMode": "equals"}
+_GATE = asyncio.Semaphore(3)  # YÖK'ü yormamak için aynı anda en fazla üç istek
 
 
 def _key(text: str) -> str:
@@ -54,7 +52,8 @@ def _unit_tokens(text: str) -> set[str]:
 
 
 def _client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": UA, "Accept-Language": "tr"})
+    return httpx.AsyncClient(timeout=45, follow_redirects=True, headers={
+        "User-Agent": UA, "Accept-Language": "tr", "Accept": "application/json", "Referer": f"{BASE}/"})
 
 
 def _cache(name: str):
@@ -75,17 +74,42 @@ def _save(name: str, data):
     _cache(name).write_text(json.dumps({"ts": time.time(), "data": data}, ensure_ascii=False))
 
 
+def people_key(university_label: str, faculty_name: str) -> str:
+    """Fakülte kadrosu önbellek anahtarı (yeni API kimlikleriyle; eski HTML önbelleğiyle karışmaz)."""
+    want = _unit_tokens(faculty_name)
+    return "people2-" + hashlib.sha1(f"{university_label}|{' '.join(sorted(want))}".encode()).hexdigest()[:12]
+
+
+async def api(client, path: str, **params):
+    """YÖK API çağrısı: `data` alanını döndürür. Zaman aşımında bir kez daha dener."""
+    for attempt in range(2):
+        try:
+            async with _GATE:
+                r = await client.get(API + path, params=params)
+            break
+        except httpx.TimeoutException:
+            if attempt:
+                raise
+            await asyncio.sleep(1.5)
+    r.raise_for_status()
+    body = r.json()
+    if not body.get("result", True):
+        raise httpx.HTTPStatusError(body.get("errorMessage") or "YÖK API hatası", request=r.request, response=r)
+    return body.get("data")
+
+
 # ------------------------------------------------------------------ üniversite ve fakülteler
-async def universities(client) -> list[dict]:
-    cached = _load("universities", 30 * 24 * 3600)
+async def universities(client, refresh: bool = False) -> list[dict]:
+    cached = None if refresh else _load("universities2", LIST_TTL)
     if cached:
         return cached
-    r = await client.get(UNIVERSITIES)
-    r.raise_for_status()
-    out = [{"name": clean(html.unescape(n)), "url": BASE + html.unescape(h)}
-           for h, n in re.findall(r'<a href="(/AkademikArama/AkademisyenArama\?islem=[^"]+)">([^<]+)</a>', r.text)]
+    d = await api(client, "/university/list", page=1, length=1000)
+    out = [{"name": clean(u["birimAdi"]), "url": f"{BASE}/universities", "birim_id": u["birimId"],
+            "name_en": u.get("birimAdiEn") or "", "city": u.get("ilAdi") or "", "type": u.get("tur") or "",
+            "year": u.get("yil"), "rector": u.get("adSoyad") or "", "rector_guid": u.get("authorGuidId") or ""}
+           for u in (d or {}).get("data", []) if u.get("birimAdi")]
     if out:
-        _save("universities", out)
+        _save("universities2", out)
     return out
 
 
@@ -106,63 +130,46 @@ def match_university(unis: list[dict], names: list[str]) -> dict | None:
     return best if score >= 0.75 else None
 
 
-def _units(page: str) -> list[dict]:
-    return [{"name": clean(html.unescape(n)), "url": BASE + html.unescape(h)}
-            for h, n in re.findall(r'<a href="(/AkademikArama/AkademisyenArama\?birim=[^"]+)"[^>]*><span>([^<]+)', page)]
+def _person(row: dict) -> dict:
+    guid = row.get("authorGuidId") or ""
+    title_raw = clean(row.get("kadroUnvanAdi") or "")
+    keywords = [clean(row.get(f"anahtarkelime{i}Ad") or "") for i in (1, 2, 3)]
+    return {
+        "name": tr_title(clean(row.get("personelAdiSoyadi") or "")),
+        "title": YOK_TITLES.get(title_raw, tr_title(title_raw)), "university": clean(row.get("universiteAd") or ""),
+        "faculty": clean(row.get("fakulteAd") or ""), "department": clean(row.get("bolumAd") or ""),
+        "orcid": row.get("orcid") or "", "email": "", "url": f"{BASE}/academician-details?authorGuidId={guid}" if guid else "",
+        "yok_id": guid, "photo": "", "source": "yok", "field": clean(row.get("bilimAlanAd") or ""),
+        "area": clean(row.get("temelAlanAd") or ""), "keywords": [k for k in keywords if k],
+        "scopus_id": row.get("scopusId") or "", "researcher_id": row.get("researcherId") or ""}
 
 
-def _rows(page: str) -> list[dict]:
-    out = []
-    for row in re.findall(r'<tr id="authorInfo_\d+">(.*?)</tr>', page, re.S):
-        name = re.search(r"<h4><a href=\"([^\"]+)\">([^<]+)</a></h4>", row)
-        if not name:
-            continue
-        h6 = [clean(html.unescape(x)) for x in re.findall(r"<h6>([^<]*)</h6>", row)]
-        path = [clean(x) for x in (h6[1] if len(h6) > 1 else "").split("/") if clean(x)]
-        orcid = re.search(r"ORCID:(\d{4}-\d{4}-\d{4}-\d{3}[\dX])", row)
-        mail = re.search(r'href="mailto:([^"]+)"', row)
-        yok_id = re.search(r"authorId=([0-9A-F]+)", name.group(1))
-        out.append({
-            "name": tr_title(clean(html.unescape(name.group(2)))),
-            "title": YOK_TITLES.get(h6[0], tr_title(h6[0])) if h6 else "", "university": path[0] if path else "",
-            "faculty": path[1] if len(path) > 1 else "", "department": path[2] if len(path) > 2 else "",
-            "orcid": orcid.group(1) if orcid else "", "email": clean(mail.group(1)) if mail else "",
-            "url": BASE + html.unescape(name.group(1)), "yok_id": yok_id.group(1) if yok_id else "",
-            "photo": "", "source": "yok"})
-    return out
-
-
-async def _listing(client, url: str, max_pages: int = MAX_PAGES) -> list[dict]:
-    """Bir birimin tüm akademisyenleri. Sayfalama bağlantıları oturuma bağlı ve her açılışta farklı kodlu olduğu
-    için sayfa numarasına göre sıralı gezilir (URL'ye göre gezmek her birimde MAX_PAGES isteğe gider)."""
-    rows, done, pending = [], {1}, {}
-    while url and len(done) <= max_pages:
-        r = await client.get(url)
-        if r.status_code != 200:
+async def uni_people(client, uni: dict) -> list[dict]:
+    """Üniversitenin bütün aktif akademisyenleri (7 gün önbellek); 500'lük sayfalarla."""
+    key = "unistaff-" + uni_id(uni["name"])
+    cached = _load(key)
+    if cached is not None:
+        return cached
+    rows, page = [], 1
+    while len(rows) < MAX_PEOPLE:
+        d = await api(client, "/akademisyen/list", page=page, length=PAGE, birimId=uni["birim_id"], birimId_matchMode="equals", **ACTIVE)
+        batch = (d or {}).get("data") or []
+        rows += batch
+        if not batch or page >= ((d or {}).get("totalPages") or 1):
             break
-        rows += _rows(r.text)
-        pager = re.search(r'class="pagination">(.*?)</ul>', r.text, re.S)
-        for h, n in re.findall(r'<a href="([^"]+)">(\d+)</a>', pager.group(1) if pager else ""):
-            if int(n) not in done:
-                pending[int(n)] = BASE + html.unescape(h)
-        if not pending:
-            break
-        page = min(pending)
-        url = pending[page]
-        pending.clear()
-        done.add(page)
-    uniq = {}
-    for p in rows:
+        page += 1
+    uniq: dict[str, dict] = {}
+    for r in rows:
+        p = _person(r)
         uniq.setdefault(p["yok_id"] or p["name"], p)
-    return list(uniq.values())
+    people = list(uniq.values())
+    if people:
+        _save(key, people)
+    return people
 
 
 async def faculty_staff(uni_names: list[str], faculty_name: str) -> dict | None:
-    """Fakültenin YÖK kadrosu: {"university", "faculty", "people"} ya da None (YÖK'e ulaşılamadı / eşleşme yok).
-
-    Fakülte adı kurum yolundaki adla eşleşmezse None döner (tüm üniversiteyi taramak yerine site ayrıştırmasına
-    düşülür).
-    """
+    """Fakültenin YÖK kadrosu: {"university", "faculty", "people"} ya da None (YÖK'e ulaşılamadı / eşleşme yok)."""
     want = _unit_tokens(faculty_name)
     if not want:
         return None
@@ -171,19 +178,18 @@ async def faculty_staff(uni_names: list[str], faculty_name: str) -> dict | None:
             uni = match_university(await universities(client), uni_names)
             if not uni:
                 return None
-            pkey = "people-" + hashlib.sha1(f"{uni['name']}|{' '.join(sorted(want))}".encode()).hexdigest()[:12]
+            pkey = people_key(uni["name"], faculty_name)
             people = _load(pkey)
             if people is None:
-                # birim bağlantıları oturuma bağlı olabilir: her seferinde üniversite sayfasından alınır
-                r = await client.get(uni["url"])
-                r.raise_for_status()
-                facs = _units(r.text)
-                fac = max(facs, key=lambda f: _jaccard(want, _unit_tokens(f["name"])), default=None)
-                if not fac or _jaccard(want, _unit_tokens(fac["name"])) < 0.6:
+                everyone = await uni_people(client, uni)
+                groups: dict[str, list] = {}
+                for p in everyone:
+                    groups.setdefault(p["faculty"], []).append(p)
+                fac = max(groups, key=lambda f: _jaccard(want, _unit_tokens(f)), default=None)
+                if not fac or _jaccard(want, _unit_tokens(fac)) < 0.6:
                     return None
-                people = await _listing(client, fac["url"])
-                if people:
-                    _save(pkey, people)
+                people = groups[fac]
+                _save(pkey, people)
         except httpx.HTTPError:
             return None
     if not people:
@@ -244,10 +250,10 @@ def display_uni(name: str) -> str:
 
 
 async def university_list() -> list[dict]:
-    """YÖK'teki tüm üniversiteler: {"id", "name" (okunur), "raw", "url"}."""
+    """YÖK'teki tüm üniversiteler: {"id", "name" (okunur), "raw", "url", "birim_id", il, tür, yıl, rektör}."""
     async with _client() as client:
         unis = await universities(client)
-    return sorted(({"id": uni_id(u["name"]), "name": display_uni(u["name"]), "raw": u["name"], "url": u["url"]} for u in unis),
+    return sorted(({**u, "id": uni_id(u["name"]), "name": display_uni(u["name"]), "raw": u["name"]} for u in unis),
                   key=lambda u: fold(u["name"]))
 
 
@@ -264,17 +270,38 @@ def site_domain(people: list[dict]) -> str:
     return ""
 
 
+async def _wikidata_site(name: str) -> str:
+    """Yeni YÖK API e-posta vermez; kurum sitesi Wikidata'daki resmî web sitesinden (P856) alınır."""
+    async with httpx.AsyncClient(timeout=15, headers={"User-Agent": WIKI_UA}) as w:
+        s = await w.get("https://www.wikidata.org/w/api.php", params={
+            "action": "wbsearchentities", "search": display_uni(name), "language": "tr", "uselang": "tr", "type": "item",
+            "limit": 5, "format": "json"})
+        for hit in s.json().get("search", []):
+            if _jaccard(_unit_tokens(hit.get("label", "")), _unit_tokens(name)) < 0.6:
+                continue
+            e = await w.get("https://www.wikidata.org/w/api.php", params={
+                "action": "wbgetentities", "ids": hit["id"], "props": "claims", "format": "json"})
+            claims = e.json().get("entities", {}).get(hit["id"], {}).get("claims", {}).get("P856") or []
+            for c in claims:
+                url = (c.get("mainsnak", {}).get("datavalue") or {}).get("value") or ""
+                host = registrable(re.sub(r"^https?://", "", url).split("/")[0])
+                if re.search(r"\.edu(\.[a-z]{2})?$|\.tr$", host):
+                    return f"https://www.{host}"
+    return ""
+
+
 async def _home_of(client, uni: dict) -> str:
-    """Üniversite sayfasındaki ilk akademisyenlerin e-postalarından kurum sitesi (site adresini kullanıcı girmez)."""
+    """Kurum sitesi (site adresini kullanıcı girmez): önbellek, yoksa Wikidata."""
     key = f"home-{uni['id']}"
     cached = _load(key, 30 * 24 * 3600)
-    if cached is not None:
+    if cached:
         return cached
-    r = await client.get(uni["url"])
-    r.raise_for_status()
-    domain = site_domain(_rows(r.text))
-    home = f"https://www.{domain}" if domain else ""
-    _save(key, home)
+    try:
+        home = await _wikidata_site(uni.get("raw") or uni["name"])
+    except (httpx.HTTPError, ValueError):
+        return ""
+    if home:
+        _save(key, home)
     return home
 
 
@@ -284,13 +311,12 @@ async def university_detail(uid: str) -> dict | None:
     if not uni:
         return None
     async with _client() as client:
-        items = _load(f"fac-{uid}")
+        items = _load(f"fac2-{uid}")
         if items is None:
-            r = await client.get(uni["url"])
-            r.raise_for_status()
-            items = [f["name"] for f in _units(r.text)]
+            units = await api(client, "/genel/birim-list", listVal=2, q=uni["birim_id"]) or []
+            items = [clean(u["label"]) for u in units if u.get("label")]
             if items:
-                _save(f"fac-{uid}", items)
+                _save(f"fac2-{uid}", items)
         home = await _home_of(client, uni)
     return {"id": uid, "name": uni["name"], "raw": uni["raw"], "home": home,
             "items": [{"name": display_uni(f), "raw": f} for f in items]}
@@ -318,65 +344,51 @@ async def faculty_detail(uid: str, faculty_raw: str) -> dict | None:
     people = by_rank([public_person(p, uni["raw"]) for p in fac["people"]])
     counts = Counter(p["department"] for p in people)
     deps = [{"name": name or "Bölümü belirtilmemiş", "key": name, "count": n} for name, n in sorted(counts.items(), key=lambda kv: (not kv[0], fold(kv[0])))]
+    domain = registrable(re.sub(r"^https?://", "", _load(f"home-{uid}", 30 * 24 * 3600) or "").split("/")[0])
     return {"university": uni["name"], "faculty": display_uni(faculty_raw), "people": people, "departments": deps,
-            "domain": site_domain(fac["people"])}
+            "domain": domain or site_domain(fac["people"])}
+
+
+def _upper_tr(text: str) -> str:
+    return text.replace("i", "İ").replace("ı", "I").upper()
 
 
 async def search_people(q: str, limit: int = 60) -> list[dict]:
-    """YÖK'te ad araması: tarayıcısız, REA'nın öğrendiği form isteğiyle. Aynı adlı kişiler seçim için listelenir."""
+    """YÖK'te ad araması (API, tarayıcısız). Aynı adlı kişiler seçim için listelenir."""
     query = clean(q)
-    key = "search-" + hashlib.sha1(fold(query).encode()).hexdigest()[:12]
+    key = "search2-" + hashlib.sha1(fold(query).encode()).hexdigest()[:12]
     people = _load(key, 24 * 3600)
     if people is None:
-        store = recipes.load("yok.gov.tr")
-        recipe = store["replay"].get("yok_search") or {}
-        form = {k: str(v).replace("{name}", query) for k, v in (recipe.get("form") or SEARCH_FORM)}
         async with _client() as client:
-            await client.get(UNIVERSITIES)  # oturum çerezi
-            r = await client.post(recipe.get("url") or SEARCH_URL, data=form)
-            r.raise_for_status()
-            link = re.search(r'<a[^>]*href="([^"]+)"[^>]*>(?:(?!</a>).){0,200}Akademisyenler', r.text, re.S)
-            people = await _listing(client, urljoin(str(r.url), html.unescape(link.group(1))), max_pages=3) if link else []
-        if recipe:
-            recipe["hits"] = recipe.get("hits", 0) + 1
-            recipes.save(store)
+            d = await api(client, "/akademisyen/list", page=1, length=max(limit, 60),
+                          personelAdiSoyadi=_upper_tr(query), personelAdiSoyadi_matchMode="contains")
+        people = [_person(r) for r in (d or {}).get("data") or []]
         _save(key, people)
     people = sorted(people, key=lambda p: (-name_score(query, p["name"]), TITLE_RANK.get(p.get("title"), 9), fold(p["name"])))
     return [public_person(p) for p in people[:limit]]
 
 
 async def person_site(university_raw: str, email: str = "") -> str:
-    """Seçilen akademisyenin kurum sitesi: kendi kurumsal e-postası, yoksa üniversitenin diğer e-postaları."""
+    """Seçilen akademisyenin kurum sitesi: kendi kurumsal e-postası, yoksa üniversitenin resmî sitesi."""
     domain = site_domain([{"email": email}])
     if domain:
         return f"https://www.{domain}"
     uni = await _university(uni_id(university_raw)) if university_raw else None
     if not uni:
         return ""
-    try:
-        async with _client() as client:
-            return await _home_of(client, uni)
-    except httpx.HTTPError:
-        return ""
+    async with _client() as client:
+        return await _home_of(client, uni)
 
 
 async def unit_summary(uid: str) -> dict | None:
-    """Üniversite özeti: fakülte ve birim sayısı; bölüm sayısı yalnız önbellekteki kadro listelerinden (YÖK'e ek istek yok)."""
+    """Üniversite özeti: fakülte ve birim sayısı; bölüm sayısı önbellekteki kadrodan (YÖK'e ek istek yok)."""
     d = await university_detail(uid)
     uni = await _university(uid)
     if not d or not uni:
         return None
     faculties = [x for x in d["items"] if "FAKÜLTE" in x["raw"].upper()]
-    deps, scanned = set(), 0
-    for f in faculties:
-        want = _unit_tokens(f["raw"])
-        people = None
-        for label in (uni["raw"], uni["name"]):  # kadro önbelleği YÖK listesindeki yazımla anahtarlanır
-            people = _load("people-" + hashlib.sha1(f"{label}|{' '.join(sorted(want))}".encode()).hexdigest()[:12])
-            if people:
-                break
-        if people:
-            scanned += 1
-            deps |= {(f["raw"], p["department"]) for p in people if p.get("department")}
+    everyone = _load("unistaff-" + uni_id(uni["raw"])) or []
+    deps = {(p["faculty"], p["department"]) for p in everyone if p.get("department") and "FAKÜLTE" in p.get("faculty", "").upper()}
+    scanned = len({p["faculty"] for p in everyone if "FAKÜLTE" in p.get("faculty", "").upper()})
     return {"id": uid, "name": d["name"], "home": d["home"], "faculties": len(faculties), "units": len(d["items"]),
             "departments": len(deps), "scanned": scanned}

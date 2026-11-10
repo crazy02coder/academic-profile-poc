@@ -42,7 +42,7 @@ STOP_LABEL = re.compile(
 
 ORCID_RE = re.compile(r"\b(\d{4}-\d{4}-\d{4}-\d{3}[\dX])\b")
 SCHOLAR_RE = re.compile(r"scholar\.google\.[a-z.]+/citations\?[^\"'\s<>]*user=([\w-]{12})")
-YOK_RE = re.compile(r"(https?://akademik\.yok\.gov\.tr/AkademikArama/[^\"'\s<>]*authorId=([0-9A-F]{16})[^\"'\s<>]*)")
+YOK_RE = re.compile(r"(https?://akademik\.yok\.gov\.tr/(?:AkademikArama/|academician-details)[^\"'\s<>]*author(?:Guid)?Id=([0-9A-F]{16})[^\"'\s<>]*)")
 
 
 def registrable(host: str) -> str:

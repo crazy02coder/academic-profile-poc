@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Literal
 
-from . import rea, recipes, org_assets, student_view, student_assistant, uni_facts
+from . import rea, recipes, org_assets, student_view, student_assistant, uni_facts, firm_facts, reading
 from .consensus import save_run, verify_papers, verify_profile
 from .net import fetch_static
 from .analysis import analyze
@@ -341,6 +341,12 @@ async def pipeline(job: dict, data: JobIn):
 @app.get("/")
 async def index():
     return FileResponse(ROOT / "static" / "index.html")
+
+
+@app.get("/kutuphane")
+async def library_page():
+    """3B kütüphane: incelenen makaleler, kaydedilenler, konular ve gündem; yeni sekmede açılır."""
+    return FileResponse(ROOT / "static" / "library.html", headers={"Cache-Control": "no-cache"})
 
 
 def _wos_activity() -> dict:
@@ -1189,6 +1195,30 @@ async def firm_detail(fid: str, refresh: bool = False, quick: bool = False):
     return d
 
 
+class FirmChatIn(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    messages: list[dict] = Field(default_factory=list, max_length=10)
+
+
+@app.get("/api/firms/{fid}/facts")
+async def firm_facts_route(fid: str, refresh: bool = False):
+    """Firma künyesi: kuruluş, çalışan, ciro, merkez, sektör (Vikipedi/Wikidata) ve resmî Ar-Ge listesi."""
+    if not re.fullmatch(r"[a-z0-9-]{1,80}", fid):
+        raise HTTPException(422, "Geçersiz firma kimliği.")
+    d = await firm_facts.facts(fid, refresh)
+    if not d:
+        raise HTTPException(404, "Firma resmi listede bulunamadı.")
+    return d
+
+
+@app.post("/api/firms/{fid}/chat")
+async def firm_chat(fid: str, body: FirmChatIn):
+    if not re.fullmatch(r"[a-z0-9-]{1,80}", fid):
+        raise HTTPException(422, "Geçersiz firma kimliği.")
+    msgs = [{"role": str(m.get("role", ""))[:12], "content": str(m.get("content", ""))[:1500]} for m in body.messages]
+    return await firm_facts.answer(fid, _llm, body.question.strip(), msgs)
+
+
 @app.get("/api/firms/{fid}/patents")
 async def firm_patents(fid: str, refresh: bool = False):
     """Firmanın başvuru sahibi olduğu patentler (EPO Open Patent Services)."""
@@ -1272,6 +1302,84 @@ async def tubitak_teydeb(q: str = ""):
     return await firms.tubitak_teydeb(q.strip()[:120])
 
 
+@app.get("/api/topics/trending")
+async def topics_trending():
+    """Türkiye gündemi: son 12 ayda en hızlı büyüyen konular (OpenAlex)."""
+    try:
+        return {"items": await reading.trending(llm=await LLM().probe())}
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"OpenAlex'e ulaşılamadı ({type(exc).__name__}).") from None
+
+
+@app.get("/api/topic-works")
+async def topic_works(id: str = "", q: str = ""):
+    """Raftaki bir konu kitabının içi: gündem konusu (OpenAlex kimliği) ya da aranmış konu (metin)."""
+    q = q.strip()[:160]
+    en = ""
+    if q and not id and not q.isascii():
+        try:
+            en = await asyncio.wait_for(library._translate(q, await LLM().probe()), 25)
+        except Exception:  # noqa: BLE001  çeviri yoksa Türkçe metinle aranır
+            en = ""
+    try:
+        return await reading.topic_works(id, q, en)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"OpenAlex'e ulaşılamadı ({type(exc).__name__}).") from None
+
+
+@app.get("/api/reading")
+async def reading_categories():
+    return {"items": reading.categories()}
+
+
+@app.get("/api/reading/{cat}")
+async def reading_shelf(cat: str):
+    """Okuma köşesi rafı: alanda Türkiye adresli, açık erişimli, çok atıf alan güncel yayınlar."""
+    try:
+        d = await reading.shelf(cat)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"OpenAlex'e ulaşılamadı ({type(exc).__name__}).") from None
+    if not d:
+        raise HTTPException(404, "Raf bulunamadı.")
+    return d
+
+
+@app.get("/api/paper/brief")
+async def paper_brief(doi: str = ""):
+    """Kütüphane okuma sayfası: özet ve yazar–kurum listesi (Türk üniversiteleri eşlenmiş)."""
+    if not doi or len(doi) > 300:
+        raise HTTPException(422, "DOI gerekli.")
+    try:
+        abstract, items = await asyncio.gather(reading.abstract_of(doi), reading.authorships(doi))
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"OpenAlex'e ulaşılamadı ({type(exc).__name__}).") from None
+    return {"abstract": abstract, "items": items}
+
+
+@app.get("/api/paper/authors")
+async def paper_authors(doi: str = ""):
+    """Makalenin yazarları ve kurumları; Türk üniversiteleri üniversite sayfasına bağlanır."""
+    if not doi or len(doi) > 300:
+        raise HTTPException(422, "DOI gerekli.")
+    try:
+        return {"items": await reading.authorships(doi)}
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"OpenAlex'e ulaşılamadı ({type(exc).__name__}).") from None
+
+
+@app.get("/api/pdf")
+async def pdf_reader(url: str = "", doi: str = ""):
+    """Uygulama içi okuyucu için PDF: yalnız herkese açık adres; kapalıysa aynı DOI'nin açık erişim kopyası."""
+    if len(url) > 2000 or len(doi) > 300 or not (url or doi):
+        raise HTTPException(422, "Geçersiz istek.")
+    try:
+        raw, final = await reading.pdf(url, doi)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return Response(raw, media_type="application/pdf", headers={
+        "Content-Disposition": "inline", "X-Source-Url": final[:500], "Cache-Control": "private, max-age=3600"})
+
+
 @app.get("/api/universities")
 async def universities():
     """YÖK'teki tüm üniversiteler; incelenen akademisyenler kurum adına göre yanlarında."""
@@ -1323,6 +1431,17 @@ async def university_student_preview(uid: str, url: str):
         return await student_view.preview(uid, url)
     except (ValueError, httpx.HTTPError, OSError, asyncio.TimeoutError) as exc:
         raise HTTPException(422, str(exc)[:200] or "Bağlantı okunamadı.") from None
+
+
+@app.get("/api/universities/{uid}/student/program")
+async def university_student_program(uid: str, url: str):
+    """OIBS Bologna program profili, mezun iş alanları ve üst kademe bilgisi (yalnız kurum alan adı)."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or len(url) > 2000:
+        raise HTTPException(422, "Geçersiz istek.")
+    try:
+        return await student_view.program(uid, url)
+    except (ValueError, httpx.HTTPError, OSError, asyncio.TimeoutError) as exc:
+        raise HTTPException(422, str(exc)[:200] or "Program bilgisi okunamadı.") from None
 
 
 @app.post("/api/universities/{uid}/student/chat")

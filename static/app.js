@@ -53,6 +53,12 @@ const ICONS = {
   menu: '<line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+  heart: '<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8z"/>',
+  code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/><line x1="14" y1="4" x2="10" y2="20"/>',
+  atom: '<circle cx="12" cy="12" r="1.6"/><ellipse cx="12" cy="12" rx="10" ry="4"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)"/>',
+  leaf: '<path d="M11 20A7 7 0 0 1 4 13c0-6 6-10 16-10 0 10-4 16-10 16z"/><path d="M4 21c4-5 7-8 12-11"/>',
+  scale: '<path d="M12 3v18"/><path d="M5 21h14"/><path d="M3 7h18"/><path d="M6 7l-3 7a3 3 0 0 0 6 0z"/><path d="M18 7l-3 7a3 3 0 0 0 6 0z"/>',
+  flame: '<path d="M12 22c4 0 7-3 7-7 0-5-4-7-5-11-2 2-3 4-3 6-1-1-2-2-2-4-2 2-4 5-4 9 0 4 3 7 7 7z"/>',
   sparkle: '<path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"/>',
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
   calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
@@ -97,6 +103,50 @@ function setView(html, cls = "") {
 // ------------------------------------------------------------------- hareket
 const calmMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 const EASE = "cubic-bezier(.2,.7,.2,1)";
+// Geçiş grameri: her etkileşim türünün kendi ekran geçişi var, karışmaz.
+//   cube        → sayfalama (akademisyen/üniversite listeleri)
+//   box         → menüler arası sayfa geçişi (CSS: html.tx-box)
+//   perspective → listeden detaya gidiş, geri dönüşte ters (CSS: html.tx-perspective)
+//   windmill    → firma önizleme modalı
+//   squeeze     → yana açılan detay paneli (yayın özeti)
+//   flip        → okuma köşesi: raftaki kitap/dergi kapağı
+const TX = {
+  cubeFrame(angle, r) { return `translateZ(${-r}px) rotateY(${angle}deg) translateZ(${r}px)`; },
+  cube(el, dir, phase) {
+    const r = Math.max(160, el.offsetWidth || 600) / 2, [a, b] = phase === "in" ? [dir * 90, 0] : [0, -dir * 90];
+    return el.animate([
+      { transform: TX.cubeFrame(a, r), filter: `brightness(${phase === "in" ? .72 : 1})` },
+      { transform: TX.cubeFrame(b, r), filter: `brightness(${phase === "in" ? 1 : .72})` },
+    ], { duration: 620, easing: "cubic-bezier(.65,0,.35,1)" });
+  },
+  windmill(el) {
+    const o = "50% 240%";
+    return el.animate([
+      { transformOrigin: o, transform: "rotate(-26deg)", opacity: 0 },
+      { transformOrigin: o, transform: "rotate(2.5deg)", opacity: 1, offset: .7 },
+      { transformOrigin: o, transform: "rotate(-.6deg)", opacity: 1, offset: .88 },
+      { transformOrigin: o, transform: "none", opacity: 1 },
+    ], { duration: 680, easing: "cubic-bezier(.2,.8,.25,1)" });
+  },
+  windmillOut(el) {
+    return el.animate([{ transformOrigin: "50% 240%", transform: "none", opacity: 1 }, { transformOrigin: "50% 240%", transform: "rotate(20deg)", opacity: 0 }],
+      { duration: 320, easing: "cubic-bezier(.5,0,.9,.4)", fill: "forwards" });
+  },
+  // Yeni panel kenarından genişler; yanındaki alan aynı anda sıkışır (FLIP genişlik oranıyla)
+  squeeze(el, { origin = "100% 50%", delay = 0, from = .08 } = {}) {
+    return el.animate([{ transformOrigin: origin, transform: `scaleX(${from})`, opacity: 0, filter: "blur(2px)" },
+      { transformOrigin: origin, transform: "scaleX(1.02)", opacity: 1, filter: "none", offset: .8 }, { transformOrigin: origin, transform: "none", opacity: 1 }],
+      { duration: 520, delay, easing: "cubic-bezier(.3,.9,.3,1)", fill: "backwards" });
+  },
+  squeezeFrom(el, ratio, origin = "0% 50%") {
+    return el.animate([{ transformOrigin: origin, transform: `scaleX(${ratio})` }, { transformOrigin: origin, transform: "none" }], { duration: 520, easing: "cubic-bezier(.3,.9,.3,1)" });
+  },
+  // Okuma köşesi için: kapak sol kenarından menteşe gibi açılır
+  flip(el, { delay = 0 } = {}) {
+    return el.animate([{ transformOrigin: "0% 50%", transform: "perspective(1400px) rotateY(0deg)" }, { transformOrigin: "0% 50%", transform: "perspective(1400px) rotateY(-165deg)" }],
+      { duration: 900, delay, easing: "cubic-bezier(.6,.05,.3,1)", fill: "forwards" });
+  },
+};
 // Sayılar sıfırdan yukarı sayar: count(n) ile yazılan her öğe için.
 const count = (n) => `<span data-count="${Number(n) || 0}">${fmtNum(n)}</span>`;
 function animateCounts(root = document) {
@@ -1439,9 +1489,35 @@ function exportModal(listKey) {
 
 // ------------------------------------------------------------------- yayın ayrıntısı (modal)
 let modalPreviousFocus = null;
+// Bütün modallar klasör gibi açılır: tıklanan öğenin kutusundan büyür, kapanırken oraya geri küçülür.
+let modalTap = null, modalTapAt = 0, modalOrigin = null;
+document.addEventListener("pointerdown", (e) => {
+  if (e.target.closest("#modal")) return;
+  modalTap = e.target.closest("button, a, [role=button], .card, article, li, tr, .bubble") || null; modalTapAt = performance.now();
+}, true);
+const FOLDER_EASE = "cubic-bezier(.22,.9,.24,1)";
+function folderTransform(from, to) {
+  const sx = Math.max(.04, from.width / to.width), sy = Math.max(.04, from.height / to.height);
+  return `translate(${from.left + from.width / 2 - (to.left + to.width / 2)}px, ${from.top + from.height / 2 - (to.top + to.height / 2)}px) scale(${sx}, ${sy})`;
+}
+function modalGrow(box) {
+  box.style.animation = "none";
+  if (calmMotion()) return;
+  const src = modalTap?.isConnected && performance.now() - modalTapAt < 2500 ? modalTap : null;
+  const rect = src?.getBoundingClientRect();
+  modalOrigin = rect && rect.width > 4 && rect.height > 4 ? src : null;
+  if (!modalOrigin) {
+    box.animate([{ opacity: 0, transform: "translateY(14px) scale(.97)" }, { opacity: 1, transform: "none" }], { duration: 320, easing: FOLDER_EASE });
+    return;
+  }
+  modalOrigin.classList.add("opening");
+  box.animate([{ transform: folderTransform(rect, box.getBoundingClientRect()), borderRadius: "28px", opacity: .6 }, { transform: "none", borderRadius: "20px", opacity: 1 }],
+    { duration: 620, easing: FOLDER_EASE });
+  $("#modalBody").animate([{ opacity: 0, transform: "scale(.96)" }, { opacity: 1, transform: "none" }], { duration: 420, delay: 260, easing: FOLDER_EASE, fill: "backwards" });
+}
 function openModal(html) {
   $(".welcome-toast")?.remove();
-  const modal = $("#modal"), box = $(".modal-box", modal);
+  const modal = $("#modal"), box = $(".modal-box", modal), wasHidden = modal.hidden;
   if (modal.hidden) modalPreviousFocus = document.activeElement;
   $("#modalBody").innerHTML = html; hydrateIcons($("#modalBody"));
   box.removeAttribute("aria-labelledby");
@@ -1449,6 +1525,7 @@ function openModal(html) {
   if (title) { title.id ||= "modalTitle"; box.setAttribute("aria-labelledby", title.id); }
   modal.classList.remove("closing"); modal.hidden = false;
   $("#app").inert = true;
+  if (wasHidden) modalGrow(box);
   requestAnimationFrame(() => { if (!modal.hidden) $("input:not([disabled]), button", box)?.focus({ preventScroll: true }); });
 }
 function closeModal() {
@@ -1460,9 +1537,21 @@ function closeModal() {
     if (modalPreviousFocus?.isConnected) modalPreviousFocus.focus({ preventScroll: true });
     modalPreviousFocus = null;
   };
-  if (calmMotion()) { finish(); return; }
+  const origin = modalOrigin; modalOrigin = null;
+  const done = () => { origin?.classList.remove("opening"); finish(); };
+  if (calmMotion()) { done(); return; }
+  const box = $(".modal-box", modal);
+  if (origin?.isConnected && origin.getBoundingClientRect().width > 4) {
+    // Klasör kapanışı: kutu açıldığı öğeye geri küçülür
+    modal.classList.add("closing-folder");
+    modal.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 440, easing: "ease-in", fill: "forwards" });
+    box.animate([{ transform: "none", opacity: 1 }, { transform: folderTransform(origin.getBoundingClientRect(), box.getBoundingClientRect()), borderRadius: "28px", opacity: .3 }],
+      { duration: 460, easing: FOLDER_EASE, fill: "forwards" }).finished
+      .then(() => { modal.getAnimations().forEach((a) => a.cancel()); box.getAnimations().forEach((a) => a.cancel()); modal.classList.remove("closing-folder"); done(); }, done);
+    return;
+  }
   modal.classList.add("closing");
-  setTimeout(() => { if (modal.classList.contains("closing")) finish(); }, 170);
+  setTimeout(() => { if (modal.classList.contains("closing")) done(); }, 170);
 }
 
 function formatAnswer(text) {
@@ -1492,18 +1581,20 @@ async function openPaper(regId) {
   const entry = S.registry.get(regId);
   if (!entry) return;
   const p = entry.paper, src = entry.source || {};
+  rememberPaper(p);
   S.paperRequest?.abort();
   const controller = new AbortController(); S.paperRequest = controller;
   openModal(`<div class="m-kicker">${sourceBadges(p)}
       <span>${esc(p.year || "")}</span>${p.citations != null ? `<span>· ${fmtNum(p.citations)} atıf</span>` : ""}</div>
     <h2 class="m-title">${esc(p.title)}</h2>
-    <div id="mMeta" class="muted">${esc(p.venue || "")}</div>
+    <div id="mMeta" class="muted">${esc(p.venue || "")}</div><div id="mAuthors"></div>
     <div class="m-publication-status">${publicationStatusHtml(p)}</div>
     <div class="m-h">Türkçe özet</div><div id="mSum" class="m-sum typing"></div>
     <div class="m-h">Özet (abstract)</div><div id="mAbs" class="m-abs muted"><div class="loading-line"><span class="spinner"></span>Kaynak okunuyor…</div></div>
     <div id="mLinks" class="chips" style="margin-top:16px"></div>
     <div id="mStages" class="stages"></div>`);
   const sumEl = $("#mSum"), absEl = $("#mAbs"), stages = $("#mStages"), meta = $("#mMeta"), links = $("#mLinks");
+  loadPaperAuthors(p);
   let text = "", failure = "";
   const timer = setTimeout(() => controller.abort(), 210000);
   try {
@@ -1523,7 +1614,7 @@ async function openPaper(regId) {
         absEl.innerHTML = `${d.tldr ? `<div class="notice" style="margin-bottom:10px">${icon("sparkle")}<div><b>TL;DR:</b> ${esc(d.tldr)}</div></div>` : ""}${esc(d.abstract || "Bu kayıtta özet metni alınamadı.")}
           <div class="faint" style="margin-top:8px">${esc(d.source_note || "")}</div>`;
         links.innerHTML = [safeUrl(d.final_url) && `<a class="btn sm" href="${esc(safeUrl(d.final_url))}" target="_blank" rel="noopener">${icon("external")}${esc(d.source_label || "Kaynağa git")}</a>`,
-          safeUrl(d.pdf) && `<a class="btn sm" href="${esc(safeUrl(d.pdf))}" target="_blank" rel="noopener">${icon("file")}PDF</a>`].filter(Boolean).join("");
+          (safeUrl(d.pdf) || p.doi || d.doi) && `<button class="btn sm primary" type="button" data-pdf="${esc(safeUrl(d.pdf) || "")}" data-doi="${esc(p.doi || d.doi || "")}" data-title="${esc(p.title)}">${icon("book")}PDF oku</button>`].filter(Boolean).join("");
         hydrateIcons($("#modalBody"));
       }
       if (m.delta) { text += m.delta; sumEl.innerHTML = formatAnswer(text); }
@@ -1706,20 +1797,14 @@ function mountPager(host, { per, render, pageClass = "", empty = "" }) {
     page = n;
     const next = sheet(page); stage.replaceChildren(next); ui();
     if (!calmMotion()) {
-      const timing = { duration: 380, easing: "cubic-bezier(.22,.61,.36,1)" };
-      next.animate([
-        { transform: `rotateY(${direction * 78}deg)`, transformOrigin: direction > 0 ? "100% 50%" : "0% 50%", opacity: 0 },
-        { transform: "rotateY(0deg)", transformOrigin: direction > 0 ? "100% 50%" : "0% 50%", opacity: 1 },
-      ], timing);
+      // Küp: iki yüz ortak merkez etrafında birlikte döner, yön gidilen sayfaya göre
+      TX.cube(next, direction, "in");
       if (previous) {
         previous.dataset.pagerLeaving = "";
         previous.inert = true;
         previous.setAttribute("aria-hidden", "true");
         stage.append(previous);
-        const animation = previous.animate([
-          { transform: "rotateY(0deg)", transformOrigin: direction > 0 ? "0% 50%" : "100% 50%", opacity: 1 },
-          { transform: `rotateY(${-direction * 78}deg)`, transformOrigin: direction > 0 ? "0% 50%" : "100% 50%", opacity: 0 },
-        ], timing);
+        const animation = TX.cube(previous, direction, "out");
         animation.onfinish = animation.oncancel = () => previous.remove();
       }
     }
@@ -1753,8 +1838,9 @@ function mountPager(host, { per, render, pageClass = "", empty = "" }) {
       const atEdge = (page === 0 && dx > 0) || (page === pages() - 1 && dx < 0);
       const offset = Math.max(-stage.clientWidth * .35, Math.min(stage.clientWidth * .35, dx * (atEdge ? .15 : .7)));
       if (stage.firstElementChild && !calmMotion()) {
-        stage.firstElementChild.style.transformOrigin = dx < 0 ? "0% 50%" : "100% 50%";
-        stage.firstElementChild.style.transform = `rotateY(${offset / Math.max(1, stage.clientWidth) * 110}deg)`;
+        const face = stage.firstElementChild;
+        face.style.transformOrigin = "50% 50%";
+        face.style.transform = TX.cubeFrame(offset / Math.max(1, stage.clientWidth) * 90, Math.max(160, face.offsetWidth) / 2);
       }
     }, { ...options, passive: false });
     window.addEventListener("pointerup", event => end(event, true), options);
@@ -2050,7 +2136,8 @@ function openPeek(src, P, ctx = {}) {
   const h = Math.min(peek.scrollHeight, innerHeight - 32);
   Object.assign(peek.style, { left: `${to.left}px`, top: `${Math.max(16, (innerHeight - h) / 2)}px`, maxHeight: `${innerHeight - 32}px` });
   if (!calmMotion()) {
-    peek.animate([{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: ease });
+    if (P.enter) P.enter(peek);
+    else peek.animate([{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: ease });
   }
   const onKey = (e) => { if (e.key === "Escape" && own) api_.close(); };
   document.addEventListener("keydown", onKey);
@@ -2061,7 +2148,7 @@ function openPeek(src, P, ctx = {}) {
       const done = () => { peek.remove(); if (own) layer.remove(); };
       if (instant || calmMotion()) { done(); return; }
       if (own) $(".folder-scrim", layer).animate([{ opacity: 1 }, { opacity: 0 }], { duration: 420, fill: "forwards" });
-      peek.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 160, fill: "forwards" }).finished.then(done, done);
+      (P.leave ? P.leave(peek) : peek.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 160, fill: "forwards" })).finished.then(done, done);
     },
     go(hash) {
       // Kapanış sade: kart ve katman solar, sayfa küp geçişiyle gelir
@@ -2735,7 +2822,8 @@ function studentItems(group, section) {
       periods.get(key).push(item);
     });
     const source = (item) => `<a class="source-link" href="${esc(safeUrl(item.source_url))}" target="_blank" rel="noopener">${icon("external")}Kaynağı aç</a>`;
-    return `<div class="student-catalog"><p class="student-hint">${items.length} ders kaydı · İçeriği görmek için bir dönem ve ders seçin.</p>${[...periods].map(([period, courses]) => `<details class="student-term"><summary><b>${esc(period)}</b><span>${courses.length} kayıt</span>${icon("chevron")}</summary><div class="student-term-courses">${courses.map((item) => `<details class="student-course" ${safeUrl(item.detail_url) ? `data-course-url="${esc(safeUrl(item.detail_url))}"` : ""}><summary><span>${esc(item.title)}</span>${icon("chevron")}</summary><div>${item.detail ? `<p>${esc(item.detail)}</p>` : ""}${item.detail_url ? `<div class="course-description"></div>` : ""}${source(item)}</div></details>`).join("")}</div></details>`).join("")}</div>`;
+    const progUrl = items.map((x) => x.source_url || "").find((u) => /\/oibs\/bologna\/.*curSunit=\d+/i.test(u));
+    return `<div class="student-catalog">${progUrl && safeUrl(progUrl) ? `<div class="program-profile" data-program-url="${esc(safeUrl(progUrl))}"></div>` : ""}<p class="student-hint">${items.length} ders kaydı · İçeriği görmek için bir dönem ve ders seçin.</p>${[...periods].map(([period, courses]) => `<details class="student-term"><summary><b>${esc(period)}</b><span>${courses.length} kayıt</span>${icon("chevron")}</summary><div class="student-term-courses">${courses.map((item) => `<details class="student-course" ${safeUrl(item.detail_url) ? `data-course-url="${esc(safeUrl(item.detail_url))}"` : ""}><summary><span>${esc(item.title)}</span>${icon("chevron")}</summary><div>${item.detail ? `<p>${esc(item.detail)}</p>` : ""}${item.detail_url ? `<div class="course-description"></div>` : ""}${source(item)}</div></details>`).join("")}</div></details>`).join("")}</div>`;
   }
   // Tablo satırları (ör. anlaşmalı kurum listeleri) ayrı, aranabilir bir listede; metin bilgileri kart olarak
   const rows = items.filter((x) => x.evidence_kind === "table"), facts = items.filter((x) => x.evidence_kind !== "table");
@@ -2824,6 +2912,7 @@ async function loadStudentSection(details, d, refresh = false) {
     $("[data-student-refresh]", box).onclick = () => loadStudentSection(details, d, true);
     mountLinkPreviews(box, d);
     bindCourseDetails(box, d);
+    loadProgramProfile(box, d);
     $$("[data-sv-rows-q]", box).forEach((input) => input.oninput = () => {
       const q = fold(input.value);
       $$(".sv-rows li", input.closest(".sv-group")).forEach((li) => { li.hidden = Boolean(q) && !li.dataset.q.includes(q); });
@@ -3712,7 +3801,7 @@ function thesisList(items, advised) {
   return items.map((x) => `<div class="thesis"><b>${esc(x.title)}</b>${x.alt_title ? `<div class="alt">${esc(x.alt_title)}</div>` : ""}
     <div class="chips"><span class="chip">${esc(x.year)}</span><span class="chip ${x.type === "Doktora" ? "gold" : "blue"}">${esc(x.type)}</span>
       ${advised ? `<span class="chip">${icon("user")}${esc(x.author)}</span>` : ""}<span class="chip">${esc(x.university)}</span>
-      ${safeUrl(x.pdf) ? `<a class="chip teal" href="${esc(safeUrl(x.pdf))}" target="_blank" rel="noopener">${icon("file")}PDF</a>` : ""}</div>
+      ${safeUrl(x.pdf) ? `<button class="chip teal" type="button" data-pdf="${esc(safeUrl(x.pdf))}" data-title="${esc(x.title)}">${icon("book")}PDF oku</button>` : ""}</div>
     ${x.abstract_tr ? `<details><summary>Türkçe özet</summary><div class="abs">${esc(x.abstract_tr)}</div></details>` : ""}
     ${x.abstract_en ? `<details><summary>English abstract</summary><div class="abs">${esc(x.abstract_en)}</div></details>` : ""}</div>`).join("");
 }
@@ -3804,13 +3893,308 @@ function topicProgress(wos) {
   const reason = { record_limit: `Tarama ilk ${wos.limit || 20} kayıtla sınırlı.`, time_budget: "Tarama süresi doldu.", queue_timeout: "Tarama sırası için bekleme süresi doldu.", results_not_fully_loaded: "WoS sonuçlarının bir bölümü yüklenemedi.", access_unavailable: "Diğer kaynaklardan alınan yayınlar gösteriliyor." }[wos.reason] || "";
   return `${["pending", "running"].includes(wos.status) ? '<span class="spinner"></span>' : ""}${esc(state)} · ${esc(count)}${reason ? ` · ${esc(reason)}` : ""}`;
 }
+// =================================================================== KONULAR: raflar, okuma köşesi, PDF okuyucu
+const RECENT_PAPERS_KEY = "academic-recent-papers";
+function readRecentPapers() {
+  try { const v = JSON.parse(localStorage.getItem(RECENT_PAPERS_KEY) || "[]"); return Array.isArray(v) ? v.filter((x) => x && typeof x.title === "string" && x.title) : []; } catch { return []; }
+}
+function rememberPaper(p) {
+  if (!p?.title) return;
+  const keep = { title: p.title, year: p.year || "", venue: p.venue || "", doi: p.doi || "", url: p.url || "", authors: (p.authors || []).slice(0, 6),
+    source: p.source || "", sources: p.sources || [], citations: p.citations ?? null, id: p.id || "", at: Date.now() };
+  const list = [keep, ...readRecentPapers().filter((x) => fold(x.title) !== fold(p.title))].slice(0, 24);
+  try { localStorage.setItem(RECENT_PAPERS_KEY, JSON.stringify(list)); } catch { /* tarayıcı depolaması kapalı olabilir */ }
+}
+// Kitaplık: dört raflı, ayaklı bir dolap. Kitaplar sırtı dışarıda duran gerçek 3B kutulardır (sırt, kapak, arka
+// kapak, sayfa yüzü). Üzerine gelince raftan çekilir; tıklanınca dolaptan çıkıp kapağını göstererek ortaya gelir ve
+// modal kitabın kapağından büyüyerek açılır. Kapanınca modal raftaki boş yerine geri küçülür, kitap yerine döner.
+const TOME_COLORS = ["#1f3a5f", "#6b2232", "#2f4f3e", "#3b3f47", "#7a5a2b", "#2b5d6b", "#4f3a66", "#8a3b2a", "#24414d", "#5c4a3a"];
+const tomeSeed = (text) => { let h = 0; for (const ch of String(text)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h; };
+const SHELF = { papers: [], topics: [], trending: [], reading: [] };
+const SHELF_META = {
+  papers: ["clock", "Son okuduklarım", "Açtığın makaleler; tıkla, kaldığın yerden oku."],
+  topics: ["search", "Son konularım", "Araştırdığın konular; tıkla, konunun öne çıkan yayınları açılsın."],
+  trending: ["flame", "Türkiye gündemi", "Türkiye adresli yayınlarda son 12 ayda en hızlı büyüyen konular (OpenAlex)."],
+  reading: ["book", "Okuma köşesi", "Alan seç: Türkiye'den, açık erişimli, son iki yılın en çok atıf alan yayınları."],
+};
+
+function tomeHtml({ title, kicker = "", sub = "", badge = "", ic = "", data = "", kind = "", thick = 0 }) {
+  const seed = tomeSeed(title);
+  const t = thick || Math.round(Math.min(54, Math.max(kind === "trend" ? 42 : 30, 24 + title.length * .42)));
+  const tip = [kicker, sub].filter(Boolean).join(" · ");
+  return `<button type="button" class="tome ${kind}" style="--t:${t}px;--hh:${80 + (seed % 17)};--c:${TOME_COLORS[seed % TOME_COLORS.length]}" data-band="${seed % 3}" ${data} data-tip="${esc(title)}" data-tip-sub="${esc(tip)}" aria-label="${esc(title + (tip ? ` — ${tip}` : ""))}">
+    <span class="tome-3d">
+      <span class="tome-spine">${ic ? `<span class="tome-ic">${icon(ic)}</span>` : ""}<span class="tome-title">${esc(title)}</span>${badge ? `<i class="tome-badge">${esc(badge)}</i>` : ""}</span>
+      <span class="tome-cover">${ic ? `<span class="tome-cover-ic">${icon(ic)}</span>` : ""}${kicker ? `<small>${esc(kicker)}</small>` : ""}<b>${esc(title)}</b>${sub ? `<em>${esc(sub)}</em>` : ""}</span>
+      <span class="tome-back" aria-hidden="true"></span><span class="tome-top" aria-hidden="true"></span>
+    </span></button>`;
+}
+function ghostTomes(text) {
+  const w = [34, 46, 30, 40, 52, 36];
+  return w.map((t, i) => `<span class="tome ghost" style="--t:${t}px;--hh:${82 + (i * 5) % 14}" aria-hidden="true"></span>`).join("") + `<p class="bc-empty">${esc(text)}</p>`;
+}
+function caseShelfHtml(id) {
+  const [ic, title, hint] = SHELF_META[id];
+  return `<section class="bc-shelf" data-shelf="${id}" aria-label="${esc(title)}">
+    <div class="bc-row"><div class="bc-loading"><span class="spinner"></span></div></div>
+    <div class="bc-board"><button type="button" class="bc-plate" data-shelf-all="${id}" title="${esc(hint)}">${icon(ic)}<span>${esc(title)}</span><b class="bc-count"></b></button></div></section>`;
+}
+function bookcaseHtml() {
+  return `<div class="bookcase" id="bookcase">
+    <div class="bc-crown" aria-hidden="true"></div>
+    <div class="bc-body">${Object.keys(SHELF_META).map(caseShelfHtml).join("")}</div>
+    <div class="bc-plinth" aria-hidden="true"><i></i><i></i></div>
+    <div class="bc-tip" role="tooltip" hidden><b></b><span></span></div></div>`;
+}
+// Rafa sığmayan kitaplar gizlenir (yatay kaydırma yok); levhada toplam ve sığmayan sayısı yazar, levha tüm rafı açar.
+function fitShelf(row) {
+  const tomes = $$(".tome:not(.ghost)", row), count = $(".bc-count", row.closest(".bc-shelf"));
+  let over = false, hidden = 0;
+  tomes.forEach((t) => { t.hidden = false; });
+  const limit = row.clientWidth - 12;
+  tomes.forEach((t) => { if (over || t.offsetLeft + t.offsetWidth > limit) { t.hidden = true; over = true; hidden++; } });
+  if (count) count.textContent = tomes.length ? (hidden ? `${tomes.length} · tümü` : `${tomes.length}`) : "";
+}
+function fillShelf(host, id, items, emptyText) {
+  const row = $(`[data-shelf="${id}"] .bc-row`, host);
+  if (!row) return;
+  row.innerHTML = items.length ? items.join("") : ghostTomes(emptyText);
+  hydrateIcons(row);
+  fitShelf(row);
+  if (!calmMotion()) $$(".tome:not([hidden])", row).forEach((b, j) => b.animate([{ opacity: 0, transform: "translate3d(48px, 0, 0) rotate(5deg)" }, { opacity: 1, transform: "none" }],
+    { duration: 520, delay: 60 + j * 32, easing: "cubic-bezier(.2,.8,.2,1)", fill: "backwards" }));
+}
+function bindBookcase(bc) {
+  const tip = $(".bc-tip", bc);
+  const hide = () => { tip.hidden = true; };
+  const show = (t) => {
+    if (!t || t.classList.contains("ghost") || t.classList.contains("opening")) { hide(); return; }
+    $("b", tip).textContent = t.dataset.tip;
+    $("span", tip).textContent = t.dataset.tipSub || ""; $("span", tip).hidden = !t.dataset.tipSub;
+    tip.hidden = false;
+    const c = bc.getBoundingClientRect(), r = t.getBoundingClientRect(), half = Math.min(140, c.width / 2);
+    tip.style.left = `${Math.min(Math.max(r.left + r.width / 2 - c.left, half), c.width - half)}px`;
+    tip.style.top = `${r.top - c.top - 12}px`;
+  };
+  bc.addEventListener("pointerover", (e) => show(e.target.closest(".tome")));
+  bc.addEventListener("pointerleave", hide);
+  bc.addEventListener("focusin", (e) => show(e.target.closest(".tome")));
+  bc.addEventListener("focusout", hide);
+  let frame = 0;
+  const ro = new ResizeObserver(() => {
+    if (!bc.isConnected) { ro.disconnect(); return; }
+    cancelAnimationFrame(frame); frame = requestAnimationFrame(() => $$(".bc-row", bc).forEach(fitShelf));
+  });
+  ro.observe(bc);
+}
+async function renderShelves(host) {
+  host.innerHTML = bookcaseHtml(); hydrateIcons(host);
+  const bc = $("#bookcase", host);
+  bindBookcase(bc);
+  if (!calmMotion()) {
+    // Dolap yandan dönerek gelir, raflar yukarıdan aşağı sırayla dolar
+    bc.animate([{ opacity: 0, transform: "perspective(1800px) rotateY(-26deg) translateX(-5%)" }, { opacity: 1, transform: "perspective(1800px) rotateY(0deg) translateX(0)" }],
+      { duration: 900, easing: "cubic-bezier(.16,.84,.24,1)" });
+    $$(".bc-shelf", bc).forEach((s, i) => s.animate([{ opacity: 0, transform: "translateY(12px)" }, { opacity: 1, transform: "none" }], { duration: 440, delay: 240 + i * 120, easing: EASE, fill: "backwards" }));
+  }
+  SHELF.papers = readRecentPapers();
+  SHELF.topics = readRecentVisits().filter((v) => v.kind === "topic").slice(0, 24);
+  fillShelf(bc, "papers", SHELF.papers.map((p, i) => tomeHtml({ title: p.title, kicker: [p.year, p.venue].filter(Boolean).join(" · "), sub: (p.authors || []).slice(0, 2).join(", "), data: `data-book-paper="${i}"`, kind: "paper" })),
+    "Henüz makale açmadın. Bir konu kitabını aç; okuduğun makaleler bu rafa dizilir.");
+  fillShelf(bc, "topics", SHELF.topics.map((t, i) => tomeHtml({ title: t.name, kicker: "Aradığın konu", data: `data-book-topic="${i}"`, kind: "topic" })),
+    "Konu bulucuda aradığın konular bu rafa dizilir.");
+  api("/api/topics/trending", { quiet: true }).then((d) => {
+    SHELF.trending = d.items || [];
+    fillShelf(bc, "trending", SHELF.trending.map((t, i) => tomeHtml({ title: t.name_tr || t.name, kicker: `${fmtNum(t.count)} yayın · geçen yıl ${fmtNum(t.prev)}`, badge: `+%${t.growth}`, data: `data-book-trend="${i}"`, kind: "trend" })),
+      "Gündem şu an hesaplanamadı.");
+  }).catch((e) => fillShelf(bc, "trending", [], e.message));
+  api("/api/reading", { quiet: true }).then((d) => {
+    SHELF.reading = d.items || [];
+    fillShelf(bc, "reading", SHELF.reading.map((c) => tomeHtml({ title: c.label, ic: c.icon, kicker: "Okuma köşesi", sub: "Açık erişimli, çok atıf alan yayınlar", data: `data-book-cat="${esc(c.id)}"`, kind: "cat", thick: 58 })), "Okuma köşesi yüklenemedi.");
+  }).catch((e) => fillShelf(bc, "reading", [], e.message));
+}
+// Kitap dolaptan çıkar: önce raftan çekilir, sonra dönerek kapağını gösterir ve ekranın ortasına gelir
+async function pullTome(tome) {
+  if (calmMotion() || !tome.isConnected) return null;
+  const r = tome.getBoundingClientRect(), row = tome.closest(".bc-row");
+  const fly = document.createElement("div");
+  fly.className = "tome-fly";
+  fly.dataset.band = tome.dataset.band;
+  fly.innerHTML = tome.innerHTML;
+  fly.style.cssText = `${tome.style.cssText};--sh:${row?.clientHeight || r.height}px;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px`;
+  document.body.appendChild(fly);
+  tome.classList.add("opening");
+  $(".bc-tip")?.setAttribute("hidden", "");
+  const scale = Math.min(2.8, Math.max(1.4, innerHeight * .44 / r.height));
+  const dx = innerWidth / 2 - (r.left + r.width / 2), dy = innerHeight / 2 - (r.top + r.height / 2);
+  const ease = "cubic-bezier(.3,.7,.2,1)", duration = 680;
+  const move = fly.animate([{ transform: "none" }, { transform: "translate3d(0, -12px, 0) scale(1.05)", offset: .28 }, { transform: `translate3d(${dx}px, ${dy}px, 0) scale(${scale})` }], { duration, easing: ease, fill: "forwards" });
+  $(".tome-3d", fly).animate([{ transform: "translateZ(calc(var(--d) / -2))" }, { transform: "translateZ(calc(var(--d) / -2 + 70px)) rotateY(-22deg)", offset: .28 },
+    { transform: "translateZ(calc(var(--t) / -2)) rotateY(-90deg)" }], { duration, easing: ease, fill: "forwards" });
+  await move.finished.catch(() => {});
+  return fly;
+}
+async function fromShelf(tome, open) {
+  const fly = await pullTome(tome);
+  const cover = fly && $(".tome-cover", fly);
+  if (cover) { modalTap = cover; modalTapAt = performance.now(); }
+  try { open(); } catch (err) { console.error(err); }
+  if (!fly) return;
+  if (modalOrigin === cover) { cover.classList.remove("opening"); modalOrigin = tome; }  // kapanınca raftaki yerine küçülür
+  if ($("#modal").hidden) tome.classList.remove("opening");
+  fly.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 280, delay: 140, fill: "forwards" }).finished.then(() => fly.remove(), () => fly.remove());
+}
+function swapModal() {
+  if (!calmMotion()) $("#modalBody").animate([{ opacity: 0, transform: "translateX(18px)" }, { opacity: 1, transform: "none" }], { duration: 320, easing: EASE });
+}
+function readingItemHtml(x) {
+  const id = reg({ title: x.title, year: x.year, venue: x.venue, doi: x.doi, url: x.url, authors: x.authors, citations: x.citations, source: "openalex", sources: ["openalex"] }, {});
+  return `<article class="read-item"><div><b class="read-title" data-open="${id}">${esc(x.title)}</b>
+      <p>${esc(x.authors.join(", "))}${x.institutions.length ? ` · <span class="faint">${esc(x.institutions.join(", "))}</span>` : ""}</p>
+      <div class="chips"><span class="chip">${esc(x.year || "")}</span>${x.venue ? `<span class="chip">${esc(x.venue)}</span>` : ""}<span class="chip teal">${fmtNum(x.citations)} atıf</span>${x.topic ? `<span class="chip blue">${esc(x.topic)}</span>` : ""}</div></div>
+    <div class="read-actions">${x.pdf || x.doi ? `<button class="btn sm primary" type="button" data-pdf="${esc(safeUrl(x.pdf) || "")}" data-doi="${esc(x.doi)}" data-title="${esc(x.title)}">${icon("book")}Oku</button>` : ""}
+      ${safeUrl(x.url) ? `<a class="btn sm" href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">${icon("external")}Kaynak</a>` : ""}</div></article>`;
+}
+function readingModalHtml(ic, title, sub, foot = "") {
+  return `<div class="reading-modal"><header class="reading-head"><span class="reading-ic">${icon(ic)}</span><div><h2>${esc(title)}</h2><p class="muted">${sub}</p></div></header>
+    <div class="reading-list"><div class="loading-line"><span class="spinner"></span>Kitap açılıyor…</div></div>${foot}</div>`;
+}
+async function fillReadingList(url, emptyTitle, note = (d) => "") {
+  const list = $(".reading-list");
+  try {
+    const d = await api(url, { quiet: true });
+    if (!list?.isConnected) return null;
+    list.innerHTML = (note(d) ? `<p class="notice">${icon("info")}<span>${esc(note(d))}</span></p>` : "")
+      + (d.items.map(readingItemHtml).join("") || emptyState("book", emptyTitle, "Konu bulucuda bütün kaynaklarda aramayı dene."));
+    hydrateIcons(list);
+    if (!calmMotion()) $$(".read-item", list).slice(0, 10).forEach((el, i) => el.animate([{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "none" }], { duration: 340, delay: 160 + i * 45, easing: EASE, fill: "backwards" }));
+    return d;
+  } catch (e) { if (list?.isConnected) list.innerHTML = `<p class="notice warn">${esc(e.message)}</p>`; return null; }
+}
+async function openReadingShelf(cat, label) {
+  openModal(readingModalHtml("book", label || "Okuma köşesi", "Türkiye adresli, açık erişimli, son iki yılın en çok atıf alan yayınları · OpenAlex"));
+  const d = await fillReadingList(`/api/reading/${encodeURIComponent(cat)}`, "Bu rafta yayın yok");
+  if (d?.icon && $(".reading-ic")) $(".reading-ic").innerHTML = icon(d.icon);
+}
+// Konu kitabı: konu bulucuya gitmeden konunun öne çıkan yayınları modalda listelenir
+async function openTopicShelf(t) {
+  const sub = t.trend ? `Son 12 ayda ${fmtNum(t.trend.count)} yayın (geçen yıl ${fmtNum(t.trend.prev)}, +%${t.trend.growth})${t.name && t.name !== t.label ? ` · ${esc(t.name)}` : ""} · OpenAlex`
+    : "Konunun en çok atıf alan güncel yayınları · OpenAlex";
+  openModal(readingModalHtml(t.trend ? "flame" : "search", t.label, sub,
+    `<footer class="reading-foot"><span class="muted">Daha geniş tarama için Crossref, TR Dizin, OpenAIRE ve diğer kaynaklar da aranabilir.</span><button class="btn" type="button" data-finder="${esc(t.q || t.label)}">${icon("search")}Bütün kaynaklarda ara</button></footer>`));
+  await fillReadingList(t.id ? `/api/topic-works?id=${encodeURIComponent(t.id)}` : `/api/topic-works?q=${encodeURIComponent(t.q)}`, "Bu konuda yayın bulunamadı",
+    (d) => d.scope === "world" ? "Türkiye adresli yayın az olduğu için dünya genelinden en çok atıf alanlar gösteriliyor." : "");
+}
+// Raf levhası: o raftaki bütün kitaplar
+function openShelfAll(id) {
+  const [ic, title] = SHELF_META[id], items = SHELF[id] || [];
+  const row = (i, main, sub, extra = "") => `<button class="sa-item" type="button" data-sa="${id}" data-i="${i}"><span class="sa-spine" style="--c:${TOME_COLORS[tomeSeed(main) % TOME_COLORS.length]}"></span><span class="sa-text"><b>${esc(main)}</b>${sub ? `<span>${esc(sub)}</span>` : ""}</span>${extra}</button>`;
+  const max = Math.max(1, ...items.map((t) => t.count || 0));
+  const body = {
+    papers: () => items.map((p, i) => row(i, p.title, [p.year, p.venue, (p.authors || []).slice(0, 2).join(", ")].filter(Boolean).join(" · "))),
+    topics: () => items.map((t, i) => row(i, t.name, new Date(t.at).toLocaleDateString("tr-TR"))),
+    trending: () => items.map((t, i) => row(i, t.name_tr || t.name, `${fmtNum(t.count)} yayın · geçen yıl ${fmtNum(t.prev)}`, `<span class="sa-bar"><i style="width:${Math.round((t.count || 0) / max * 100)}%"></i></span><em class="sa-growth">+%${t.growth}</em>`)),
+    reading: () => items.map((c, i) => row(i, c.label, "Açık erişimli, çok atıf alan yayınlar", `<span class="sa-ic">${icon(c.icon)}</span>`)),
+  }[id]().join("");
+  openModal(`<div class="reading-modal"><header class="reading-head"><span class="reading-ic">${icon(ic)}</span><div><h2>${esc(title)}</h2><p class="muted">${items.length} kitap · ${esc(SHELF_META[id][2])}</p></div></header>
+    <div class="sa-list">${body || emptyState("book", "Bu raf boş", "")}</div></div>`);
+  if (!calmMotion()) $$(".sa-item").slice(0, 14).forEach((el, i) => el.animate([{ opacity: 0, transform: "translateX(-12px)" }, { opacity: 1, transform: "none" }], { duration: 300, delay: 180 + i * 35, easing: EASE, fill: "backwards" }));
+}
+function openShelfItem(kind, x) {
+  if (kind === "papers") openPaper(reg(x, {}));
+  else if (kind === "topics") openTopicShelf({ q: x.name, label: x.name });
+  else if (kind === "trending") openTopicShelf({ id: x.id, name: x.name, label: x.name_tr || x.name, trend: x });
+  else if (kind === "reading") openReadingShelf(x.id, x.label);
+}
+document.addEventListener("click", (e) => {
+  const tome = e.target.closest(".tome:not(.ghost)");
+  if (tome) {
+    e.preventDefault();
+    const d = tome.dataset;
+    const [kind, i] = d.bookPaper != null ? ["papers", d.bookPaper] : d.bookTopic != null ? ["topics", d.bookTopic] : d.bookTrend != null ? ["trending", d.bookTrend] : ["reading", null];
+    const x = kind === "reading" ? SHELF.reading.find((c) => c.id === d.bookCat) : SHELF[kind][+i];
+    if (x) fromShelf(tome, () => openShelfItem(kind, x));
+    return;
+  }
+  const plate = e.target.closest("[data-shelf-all]");
+  if (plate) { e.preventDefault(); openShelfAll(plate.dataset.shelfAll); return; }
+  const sa = e.target.closest("[data-sa]");
+  if (sa) { const x = SHELF[sa.dataset.sa]?.[+sa.dataset.i]; if (x) { openShelfItem(sa.dataset.sa, x); swapModal(); } return; }
+  const finder = e.target.closest("[data-finder]");
+  if (finder) { const q = finder.dataset.finder; closeModal(); location.hash = `#/ara?q=${encodeURIComponent(q)}`; return; }
+  const pdfBtn = e.target.closest("[data-pdf]");
+  if (pdfBtn) { e.preventDefault(); openPdfReader(pdfBtn.dataset.pdf || "", pdfBtn.dataset.doi || "", pdfBtn.dataset.title || "PDF"); }
+});
+// Uygulama içi PDF okuyucu: kitap gibi soldan açılır; kapalı PDF'te açık erişim kopyası aranır
+async function openPdfReader(url, doi, title) {
+  const layer = document.createElement("div");
+  layer.className = "pdf-layer";
+  layer.innerHTML = `<div class="pdf-scrim"></div><section class="pdf-reader" role="dialog" aria-modal="true" aria-label="PDF okuyucu">
+    <header><span class="pdf-ic">${icon("book")}</span><b>${esc(title)}</b><span class="spacer"></span><a class="btn sm" target="_blank" rel="noopener" data-pdf-ext hidden>${icon("external")}Yeni sekmede aç</a>
+      <button class="icon-btn" type="button" data-pdf-close aria-label="Kapat">${icon("x")}</button></header>
+    <div class="pdf-body"><div class="loading-line"><span class="spinner"></span>PDF açılıyor; yayıncı kapattıysa açık erişim kopyası aranıyor…</div></div></section>`;
+  document.body.appendChild(layer); hydrateIcons(layer);
+  const reader = $(".pdf-reader", layer), body = $(".pdf-body", layer);
+  let objectUrl = "";
+  if (!calmMotion()) {
+    $(".pdf-scrim", layer).animate([{ opacity: 0 }, { opacity: 1 }], { duration: 360, easing: "ease-out" });
+    reader.animate([{ transformOrigin: "0% 50%", transform: "perspective(1800px) rotateY(-80deg)", opacity: 0 }, { transformOrigin: "0% 50%", transform: "perspective(1800px) rotateY(6deg)", opacity: 1, offset: .75 }, { transformOrigin: "0% 50%", transform: "none", opacity: 1 }], { duration: 760, easing: "cubic-bezier(.2,.8,.2,1)" });
+  }
+  const close = () => {
+    document.removeEventListener("keydown", onKey, true);
+    const done = () => { if (objectUrl) URL.revokeObjectURL(objectUrl); layer.remove(); };
+    if (calmMotion()) { done(); return; }
+    $(".pdf-scrim", layer).animate([{ opacity: 1 }, { opacity: 0 }], { duration: 320, fill: "forwards" });
+    reader.animate([{ transformOrigin: "0% 50%", transform: "none", opacity: 1 }, { transformOrigin: "0% 50%", transform: "perspective(1800px) rotateY(-80deg)", opacity: 0 }], { duration: 420, easing: "cubic-bezier(.5,0,.8,.4)", fill: "forwards" }).finished.then(done, done);
+  };
+  // Esc yalnız okuyucuyu kapatır; arkadaki modal açık kalır
+  const onKey = (e) => { if (e.key === "Escape") { e.stopImmediatePropagation(); e.preventDefault(); close(); } };
+  document.addEventListener("keydown", onKey, true);
+  layer.addEventListener("click", (e) => { if (e.target.closest("[data-pdf-close]") || e.target.classList.contains("pdf-scrim")) close(); });
+  try {
+    const res = await fetch(`/api/pdf?url=${encodeURIComponent(url)}&doi=${encodeURIComponent(doi)}`);
+    if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || `HTTP ${res.status}`); }
+    const source = res.headers.get("X-Source-Url") || url;
+    objectUrl = URL.createObjectURL(await res.blob());
+    if (!layer.isConnected) { URL.revokeObjectURL(objectUrl); return; }
+    body.innerHTML = `<iframe class="pdf-frame" src="${objectUrl}" title="${esc(title)}"></iframe>`;
+    const ext = $("[data-pdf-ext]", layer); if (safeUrl(source)) { ext.href = safeUrl(source); ext.hidden = false; }
+  } catch (e) {
+    if (!layer.isConnected) return;
+    const landing = safeUrl(url) || (doi ? `https://doi.org/${doi}` : "");
+    body.innerHTML = `<div class="pdf-fail">${icon("info")}<h3>PDF açılamadı</h3><p>${esc(e.message)}</p>${landing ? `<a class="btn primary" href="${esc(landing)}" target="_blank" rel="noopener">${icon("external")}Yayıncı sayfasına git</a>` : ""}</div>`;
+    hydrateIcons(body);
+  }
+}
+// Makale modalı: yazarlar ve kurumları tıklanabilir (profil / üniversite sayfası)
+async function loadPaperAuthors(p) {
+  const host = $("#mAuthors");
+  if (!host || !p.doi) return;
+  try {
+    const d = await api(`/api/paper/authors?doi=${encodeURIComponent(p.doi)}`, { quiet: true });
+    if (!host.isConnected || !d.items.length) return;
+    const tr = (a) => a.institutions.some((i) => i.country === "TR") ? 0 : 1;
+    const items = d.items.map((a, i) => ({ ...a, i })).sort((x, y) => tr(x) - tr(y) || x.i - y.i), more = Math.max(0, items.length - 8);
+    host.innerHTML = `<div class="m-h">Yazarlar ve kurumları <small class="faint">${items.length} yazar${items.some((x) => !tr(x)) ? " · Türkiye adresliler önde" : ""}</small></div><div class="m-authors">${items.map((a, n) => {
+      const c = chatByName(a.name);
+      const href = c ? `#/profil/${encodeURIComponent(c.id)}` : `#/akademisyenler?q=${encodeURIComponent(a.name)}`;
+      const insts = a.institutions.map((i) => i.uni_id ? `<a class="m-inst tr" href="#/universite/${esc(i.uni_id)}" data-close-modal>${organizationLogo("universities", i.uni_id, i.name, "m-inst-logo")}${esc(i.name)}</a>`
+        : `<span class="m-inst">${esc(i.name)}${i.country ? ` <small>${esc(i.country)}</small>` : ""}</span>`).join("");
+      return `<div class="m-author"${n >= 8 ? " hidden" : ""}><a class="m-author-name" href="${esc(href)}" data-close-modal title="${c ? "Profili aç" : "YÖK'te ara"}">${avatar(a.name, c ? profilePhoto(c) : "", "av m-av")}<span>${esc(a.name)}</span>${c ? `<i class="chip teal">profil</i>` : ""}</a>${insts ? `<div class="m-insts">${insts}</div>` : ""}</div>`; }).join("")}${more ? `<button class="link m-more" type="button">+${more} yazarın tümünü göster</button>` : ""}</div>`;
+    hydrateIcons(host);
+    $(".m-more", host)?.addEventListener("click", (e) => { $$(".m-author[hidden]", host).forEach((x) => { x.hidden = false; }); e.currentTarget.remove(); });
+    $$("[data-close-modal]", host).forEach((a) => a.addEventListener("click", () => closeModal()));
+  } catch { /* yazar bilgisi isteğe bağlı */ }
+}
+
 async function viewSearch(q, requestedSources = "") {
   let selected = requestedSources ? requestedSources.split(",").filter((key) => TOPIC_SOURCES.includes(key)) : null;
   if (!selected?.length) { try { selected = JSON.parse(localStorage.getItem("topic-sources")); } catch { /* tercih */ } }
   if (!Array.isArray(selected) || !selected.filter((key) => TOPIC_SOURCES.includes(key)).length) selected = [...TOPIC_SOURCES];
   selected = selected.filter((key) => TOPIC_SOURCES.includes(key));
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Konular" }]);
-  setView(`<div class="section-head"><div><h1>Konular</h1><p>OpenAlex, Crossref, Semantic Scholar, TR Dizin, OpenAIRE ve WoS kayıtları kaynaklarıyla birleştirilir.</p></div></div>
+  setView(`<div class="section-head"><div><h1>Konular</h1><p>${q ? "OpenAlex, Crossref, Semantic Scholar, TR Dizin, OpenAIRE ve WoS kayıtları kaynaklarıyla birleştirilir." : "Kitaplığın: son okuduğun makaleler, konuların, Türkiye gündemi ve okuma köşesi. Bir kitaba dokun, raftan çıksın. En altta konu bulucu."}</p></div>${q ? `<a class="btn sm" href="#/ara">${icon("book")}Kitaplığa dön</a>` : ""}</div>
+    ${q ? "" : `<div id="shelves"></div><div class="finder-head"><h2>${icon("search")}Konu bulucu</h2><p>Türkçe yazdığın konu İngilizceye de çevrilerek bütün kaynaklarda aranır.</p></div>`}
     <form class="card quick-search" id="searchForm" style="margin-top:0">
       <div class="input">${icon("search")}<input id="sInput" value="${esc(q)}" placeholder="ör. göğüs hastalıkları, makine öğrenmesi, deprem mühendisliği"></div>
       ${sourcePicker("topicSourcePicker", TOPIC_SOURCES, selected)}<button class="btn primary" type="submit">Ara</button></form>
@@ -3828,10 +4212,7 @@ async function viewSearch(q, requestedSources = "") {
   });
   $("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); search(); });
   const box = $("#sResults"), routeHash = location.hash;
-  if (!q) {
-    box.innerHTML = emptyState("search", "Bir konu yazın", "Türkçe yazdığınız konu İngilizceye de çevrilerek aranır.");
-    hydrateIcons(box); $("#sInput").focus(); return;
-  }
+  if (!q) { renderShelves($("#shelves")); return; }
   box.innerHTML = `<div id="topicSources" class="src-status"></div><div id="topicProgress" class="loading-line" role="status" aria-live="polite"><span class="spinner"></span>Akademik kaynaklar taranıyor…</div><div id="topicError"></div><div id="topicTable"></div>`;
   const active = () => box.isConnected && location.hash === routeHash;
   S.listMeta.search = { file: `arama ${q}` };
@@ -3971,6 +4352,115 @@ async function aiSettingsCard() {
 
 // =================================================================== FİRMALAR
 // Sanayi ve Teknoloji Bakanlığı Ar-Ge / Tasarım Merkezi listesindeki firmalar ve onlarla çalışan akademisyenler.
+// ------------------------------------------------------------ firma künyesi (önizleme modalı + Genel bakış sekmesi)
+function firmMoney(r) {
+  if (!r) return "";
+  if (r.text) return r.text;
+  const v = r.value, unit = r.currency || "";
+  const s = v >= 1e9 ? `${(v / 1e9).toLocaleString("tr-TR", { maximumFractionDigits: 1 })} milyar` : v >= 1e6 ? `${(v / 1e6).toLocaleString("tr-TR", { maximumFractionDigits: 1 })} milyon` : fmtNum(v);
+  return `${s} ${unit}${r.year ? ` (${r.year})` : ""}`.trim();
+}
+function firmFactsHtml(f, { compact = false } = {}) {
+  const id = f.identity || {}, l = f.local || {};
+  const stat = (v, label, extra = "") => `<div><b>${v == null || v === "" ? "—" : typeof v === "number" ? count(v) : esc(v)}</b><span>${esc(label)}${extra}</span></div>`;
+  const row = (ic, label, value) => value ? `<div class="uf-row"><span class="uf-ic">${icon(ic)}</span><div><small>${esc(label)}</small><p>${value}</p></div></div>` : "";
+  const link = (url, text) => safeUrl(url) ? `<a href="${esc(safeUrl(url))}" target="_blank" rel="noopener">${esc(text)} ${icon("external")}</a>` : "";
+  const site = (id.website || "").replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "");
+  const line = [id.founded && `Kuruluş ${id.founded}`, id.hq || l.cities?.join(", "), l.sectors?.[0]].filter(Boolean);
+  return `${line.length ? `<p class="uf-line ff-line">${line.map(esc).join(" · ")}</p>` : ""}
+    <div class="uf-stats">${stat(id.employees?.value, "çalışan", id.employees?.year ? ` · ${esc(id.employees.year)}` : "")}${stat(id.founded || null, "kuruluş")}
+      ${stat(l.academics, "akademisyen")}${stat(l.papers, "ortak yayın")}${stat(l.universities, "üniversite")}${stat(l.centers, "Ar-Ge / tasarım merkezi")}</div>
+    ${id.revenue ? `<div class="ff-revenue"><small>Ciro / gelir</small><b>${esc(firmMoney(id.revenue))}</b></div>` : ""}
+    <div class="ff-rows">
+      ${row("briefcase", "Sektör", esc([id.industry, ...(l.sectors || [])].filter(Boolean).filter((v, i, a) => a.findIndex((x) => fold(x) === fold(v)) === i).join(" · ")))}
+      ${l.areas?.length ? row("layers", "Çalışma alanları", l.areas.map((a) => `<span class="chip">${esc(a)}</span>`).join(" ")) : ""}
+      ${row("map", "Merkez", esc(id.hq || ""))}
+      ${row("globe", "Şehirler", esc((l.cities || []).join(", ")))}
+      ${compact ? "" : row("user", "Kilit kişiler", esc(id.people || ""))}
+      ${compact ? "" : row("user", "Kurucu", esc(id.founder || ""))}
+      ${compact ? "" : row("bookmark", "Sahibi / ortaklık", esc(id.owner || ""))}
+      ${compact ? "" : row("grid", "Ürünler", esc(id.products || ""))}
+      ${row("external", "Bağlantılar", [link(id.website, site), link(id.wikipedia, "Vikipedi")].filter(Boolean).join(" · "))}
+    </div>
+    ${!Object.keys(id).length ? `<p class="uf-empty">Bu firmanın Vikipedi/Wikidata kaydı bulunamadı; bilgiler resmî Ar-Ge merkezi listesinden ve ortak yayınlardan.</p>` : ""}
+    <p class="uf-src">Kaynak: ${esc([...(f.sources || []), "Sanayi ve Teknoloji Bakanlığı Ar-Ge listesi", "OpenAlex / TR Dizin"].join(" · "))}</p>`;
+}
+function openFirmPeek(card, id, name) {
+  const html = `<div class="peek-cover uni">${organizationLogo("firms", id, name, "peek-logo xl")}</div>
+    <div class="peek-head center"><div class="peek-id"><h3>${esc(name)}</h3></div></div>
+    <div class="uf-host ff-host"><div class="uf-stats">${["çalışan", "kuruluş", "akademisyen", "ortak yayın", "üniversite", "merkez"].map((l) => `<div><b class="sk-num"></b><span>${l}</span></div>`).join("")}</div>
+      <div class="loading-line"><span class="spinner"></span>Firma künyesi derleniyor…</div></div>
+    <div class="peek-actions"><button class="btn primary peek-go" type="button" data-peek-go="#/firma/${esc(id)}">Firma detayı ${icon("arrow")}</button></div>`;
+  openPeek(card, { kind: "university", name, html, enter: TX.windmill, leave: TX.windmillOut, load: async (peek) => {
+    const host = $(".ff-host", peek);
+    try {
+      const f = await api(`/api/firms/${encodeURIComponent(id)}/facts`, { quiet: true });
+      if (!peek.isConnected) return;
+      host.innerHTML = firmFactsHtml(f, { compact: true }); hydrateIcons(host);
+      if (!calmMotion()) host.animate([{ opacity: .3 }, { opacity: 1 }], { duration: 300, easing: "ease-out" });
+      animateCounts(host);
+    } catch (e) { if (peek.isConnected) host.innerHTML = `<p class="uf-empty">Künye alınamadı: ${esc(e.message)}</p>`; }
+  } });
+}
+document.addEventListener("click", (e) => {
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+  const b = e.target.closest(".firm-bubble[href^='#/firma/']");
+  if (!b) return;
+  e.preventDefault();
+  openFirmPeek(b, b.getAttribute("href").slice(8), $(".bubble-name", b)?.textContent || b.title.split(" · ")[0]);
+});
+// Firma asistanı: künye, ortak yayınlar ve TÜBİTAK verisiyle yanıt verir
+function firmAssistantHtml(f) {
+  return `<aside class="student-assistant firm-assistant"><header class="student-assistant-head"><span class="student-assistant-symbol">${icon("sparkle")}</span><div><h3>Firma asistanı</h3><p>${esc(f.name)}</p></div></header>
+    <p class="student-assistant-intro">Firmanın akademik iş birlikleri, çalıştığı üniversiteler ve projeleri hakkında sor.</p>
+    <div class="student-chat-suggestions">${["En çok hangi üniversitelerle çalışıyor?", "Hangi alanlarda ortak yayın var?", "TÜBİTAK projeleri neler?"].map((q) => `<button type="button" data-fa-q="${esc(q)}">${esc(q)}</button>`).join("")}</div>
+    <div class="student-chat-thread" role="log" aria-live="polite"></div>
+    <form class="student-chat-form"><textarea rows="3" maxlength="1000" placeholder="Örneğin: Aselsan ile en çok kim yayın yapmış?" required></textarea><div class="student-chat-toolbar"><span>Enter gönderir</span><button class="btn primary" type="submit">${icon("send")}Gönder</button></div></form></aside>`;
+}
+function bindFirmAssistant(host, fid) {
+  const thread = $(".student-chat-thread", host), form = $("form", host), input = $("textarea", form), messages = [];
+  const add = (role, text) => {
+    const el = document.createElement("article"); el.className = `student-chat-message ${role}`;
+    el.innerHTML = `<div class="student-chat-bubble"><p></p></div>`; thread.appendChild(el);
+    const p = $("p", el);
+    if (role === "user" || calmMotion()) p.textContent = text;
+    else { let i = 0; const t = setInterval(() => { p.textContent = text.slice(0, i += 3); thread.scrollTop = thread.scrollHeight; if (i >= text.length) clearInterval(t); }, 16); }
+    thread.scrollTop = thread.scrollHeight; return el;
+  };
+  const ask = async (q) => {
+    q = q.trim(); if (!q || form.dataset.busy) return;
+    form.dataset.busy = "1"; $(".student-chat-suggestions", host).hidden = true; input.value = "";
+    add("user", q);
+    const wait = document.createElement("article"); wait.className = "student-chat-message assistant";
+    wait.innerHTML = `<div class="student-chat-bubble"><span class="typing-dots"><i></i><i></i><i></i></span></div>`; thread.appendChild(wait);
+    try {
+      const r = await post(`/api/firms/${encodeURIComponent(fid)}/chat`, { question: q, messages });
+      wait.remove(); add("assistant", r.answer || "Yanıt alınamadı.");
+      messages.push({ role: "user", content: q }, { role: "assistant", content: r.answer || "" });
+    } catch (e) { wait.remove(); add("assistant", e.message); }
+    finally { delete form.dataset.busy; }
+  };
+  form.onsubmit = (e) => { e.preventDefault(); ask(input.value); };
+  input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(input.value); } };
+  $$("[data-fa-q]", host).forEach((b) => b.onclick = () => ask(b.dataset.faQ));
+}
+async function renderFirmOverview(fid, name, refresh = false) {
+  const host = $("#firmOverview"); if (!host) return;
+  if (!$(".overview-facts", host)) {
+    host.innerHTML = `<div class="university-overview-layout"><section class="card card-pad"><div class="section-head"><h2>Firma künyesi</h2><button class="btn sm" data-firm-refresh-facts type="button">${icon("refresh")}Eksik bilgileri yenile</button></div><div class="overview-facts"></div></section>${firmAssistantHtml({ name })}</div>`;
+    hydrateIcons(host); bindFirmAssistant(host, fid);
+    $("[data-firm-refresh-facts]", host).onclick = () => renderFirmOverview(fid, name, true);
+  }
+  const box = $(".overview-facts", host), button = $("[data-firm-refresh-facts]", host);
+  button.disabled = true; box.innerHTML = '<div class="loading-line"><span class="spinner"></span>Firma künyesi alınıyor…</div>';
+  try {
+    const f = await api(`/api/firms/${encodeURIComponent(fid)}/facts${refresh ? "?refresh=1" : ""}`, { quiet: true });
+    if (!box.isConnected) return;
+    box.innerHTML = firmFactsHtml(f); hydrateIcons(box); animateCounts(box);
+  } catch (e) { box.innerHTML = `<p class="notice warn">${esc(e.message)}</p>`; }
+  finally { button.disabled = false; }
+}
+
 async function viewFirms(q = "", sector = "", city = "", area = "") {
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Firmalar" }]);
   setView(`<div class="section-head"><div><h1>Firmalar</h1><p>Resmi Ar-Ge ve Tasarım Merkezi olan firmalar. Bir firma seçin, onunla çalışan akademisyenleri görün.</p></div></div>
@@ -4041,9 +4531,10 @@ async function viewFirm(fid, refresh = false, supplied = null) {
     <div class="stat-row"><div class="stat"><b>${fmtNum(people.length)}</b><span>akademisyen</span></div>
       <div class="stat"><b>${fmtNum(d.papers)}</b><span>ortak yayın ve proje</span></div>
       <div class="stat src"><b>${Object.entries(d.by_source).map(([k, v]) => `${esc(k)} ${v}`).join(" · ") || "—"}</b><span>kaynak · ${esc(d.updated)}</span></div></div>
-    <div class="tabs" role="tablist"><button class="tab active" data-tab="people" type="button">Akademisyenler<span class="n">${fmtNum(people.length)}</span></button>
+    <div class="tabs" role="tablist"><button class="tab active" data-tab="overview" type="button">Genel bakış</button><button class="tab" data-tab="people" type="button">Akademisyenler<span class="n">${fmtNum(people.length)}</span></button>
       <button class="tab" data-tab="tubitak" type="button">TÜBİTAK<span class="n" id="tubitakN">${fmtNum(d.ardeb.length)}</span></button>
       <button class="tab" data-tab="patents" type="button" hidden>Patentler<span class="n" id="patentsN">0</span></button></div>
+    <div class="panel active" data-panel="overview" id="firmOverview"></div>
     <div class="panel" data-panel="patents"><div class="card card-pad" id="firmPatentsBox"></div></div>
     <div class="panel" data-panel="tubitak"><div class="stack">
       <div class="card card-pad" id="teydebBox"><div class="card-title">${icon("briefcase")}TÜBİTAK TEYDEB projeleri</div>
@@ -4055,13 +4546,14 @@ async function viewFirm(fid, refresh = false, supplied = null) {
           ${safeUrl(x.url) ? `<a class="chip" href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">TR Dizin ${icon("external")}</a>` : ""}</div>
           <div class="faint" style="font-style:italic;margin-top:6px">“${esc(x.quote)}”</div></div>`).join("") || `<p class="faint" style="margin:0">Özetinde bu firmanın iş birliği olarak geçtiği ARDEB projesi bulunamadı.</p>`}</div>
     </div></div>
-    <div class="panel active" data-panel="people">
+    <div class="panel" data-panel="people">
     ${people.length ? `<div class="toolbar"><div class="input">${icon("search")}<input id="firmPeopleQ" placeholder="Akademisyen ya da üniversite ara"></div></div>
       <div class="firm-person-grid" id="firmPeople">${people.map((p, i) => { const c = p.chat_id && S.chats.find((x) => x.id === p.chat_id);
         return `<button type="button" class="firm-person-card" data-peek-person="${i}" data-fold="${esc(fold(p.name + " " + p.institution))}"><span class="firm-person-uni">${p.institution ? organizationLogo("universities", orgId(p.institution), p.institution, "firm-person-logo") : ""}<span>${esc(p.institution || "Kurum belirtilmemiş")}</span></span>${avatar(p.name, c ? profilePhoto(c) : p.photo || "", "av fb-av")}<span class="fb-name">${esc(p.name)}</span><span class="fb-sub">${esc(p.title || "")}${p.title ? " · " : ""}${c ? `${fmtNum(c.papers)} yayın` : `${p.papers.length} ortak yayın`}</span></button>`; }).join("")}</div>`
       : `<div class="card">${emptyState("users", d.pending ? "Akademisyenler alınıyor…" : "Akademisyen bulunamadı",
         d.pending ? "Firma bilgilerini inceleyebilirsiniz; yayın kaynakları hazır olduğunda kartlar burada görünecek." : "Açık kaynaklarda bu firmayla ortak yayını olan akademisyen yok ya da firma yayınlarda farklı adla geçiyor. Gizli sözleşmeler ve yayına dönüşmeyen işler görünmez.")}</div>`}</div>`);
   S.firmPeople = people;
+  renderFirmOverview(fid, f.name);
   typeText($(".identity-org h1"), f.name);
   $("#firmRefresh").onclick = () => viewFirm(fid, true);
   if (!d.pending) {
@@ -4270,14 +4762,22 @@ $("#menuBtn").addEventListener("click", toggleSidebar);
 $("#scrim").addEventListener("click", () => { $("#app").classList.remove("menu-open"); syncSidebar(); });
 $("#themeBtn").addEventListener("click", toggleTheme);
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => { if (!storedTheme()) applyTheme(e.matches ? "dark" : "light"); });
+let lastRouteHash = location.hash;
+const NAV_ORDER = ["", "akademisyenler", "universiteler", "firmalar", "ara", "kutuphane", "sistem"];
+const routeInfo = (hash) => {
+  const parts = (hash || "#/").slice(1).split("?")[0].split("/").filter(Boolean);
+  return { key: parts[0] || "", path: parts.join("/"), detail: ["profil", "is", "universite", "kurum", "firma"].includes(parts[0]) };
+};
 window.addEventListener("hashchange", () => {
-  const detail = /^#\/(profil|universite|firma|kurum)\//.test(location.hash) || location.hash.startsWith("#/kurum?");
-  // Detay sayfasına giriş: sayfa çevirme; menü/liste sayfaları arası: küp dönüşü
-  if (!document.startViewTransition || calmMotion() || document.documentElement.classList.contains("page-vt")) { route(); return; }
-  const root = document.documentElement, kind = "page-cube"; void detail;
-  root.classList.add("page-vt", kind);
+  const a = routeInfo(lastRouteHash), b = routeInfo(location.hash), root = document.documentElement;
+  lastRouteHash = location.hash;
+  if (!document.startViewTransition || calmMotion() || root.classList.contains("page-vt") || a.path === b.path) { route(); return; }
+  const kind = !a.detail && !b.detail ? "tx-box" : "tx-perspective";
+  const back = kind === "tx-box" ? NAV_ORDER.indexOf(b.key) < NAV_ORDER.indexOf(a.key) : a.detail && !b.detail;
+  const cls = ["page-vt", kind, ...(back ? ["tx-back"] : [])];
+  root.classList.add(...cls);
   const vt = document.startViewTransition(() => { route(); });
-  vt.finished.finally(() => root.classList.remove("page-vt", kind));
+  vt.finished.finally(() => root.classList.remove(...cls));
 });
 
 (async () => {
@@ -4336,12 +4836,24 @@ async function openFirmPerson(person, chat) {
       if (data.result?.publications?.length) papers = data.result.publications;
     } catch { if (!loading?.isConnected || $("#modal").hidden) return; }
   }
+  const wasOpen = !$("#modal").hidden;
   openModal(`<div class="firm-publications"><div><h2>${esc(person.name)}</h2><p class="muted">${esc(person.institution || "")} · ${papers.length} ${chat ? "yayın" : "ortak yayın"}</p><div class="firm-publication-list">${papers.map((p, i) => `<button class="firm-publication" type="button" data-firm-paper="${i}"><span>${esc(p.year || "")}</span><b>${esc(p.title)}</b>${icon("chevron")}</button>`).join("") || "Ortak yayın kaydı bulunamadı."}</div>${chat ? `<a class="btn sm" href="#/profil/${esc(chat.id)}" data-firm-profile>Tüm profil yayınları</a>` : ""}</div><aside class="firm-paper-detail" hidden></aside></div>`);
-  const root = $(".firm-publications"), detail = $(".firm-paper-detail", root);
+  const root = $(".firm-publications"), detail = $(".firm-paper-detail", root), box = root.closest(".modal-box");
+  void wasOpen; // açılış: openModal'ın klasör büyümesi
   $("[data-firm-profile]", root)?.addEventListener("click", closeModal);
   $$("[data-firm-paper]", root).forEach(button => button.onclick = async () => {
     const p = papers[+button.dataset.firmPaper];
+    const first = !root.classList.contains("expanded"), from = box.getBoundingClientRect().width, listFrom = root.firstElementChild?.getBoundingClientRect().width;
     root.classList.add("expanded"); detail.hidden = false;
+    if (!calmMotion()) {
+      if (first) {
+        // Squeeze: modal genişler, liste sıkışarak yer açar, özet sağ kenardan genişleyerek gelir
+        const to = box.getBoundingClientRect().width, list = root.firstElementChild;
+        box.animate([{ width: `${from}px` }, { width: `${to}px` }], { duration: 460, easing: EASE });
+        if (list && listFrom) TX.squeezeFrom(list, listFrom / Math.max(1, list.getBoundingClientRect().width));
+        TX.squeeze(detail, { delay: 90 });
+      } else TX.squeeze(detail, { from: .86 });
+    }
     $$("[data-firm-paper]", root).forEach(b => b.classList.toggle("selected", b === button));
     detail.innerHTML = `<h3>${esc(p.title)}</h3><p class="muted">${esc(p.year || "")} · ${esc(p.source || "")}</p><h4>Özet</h4><div class="abs">${esc(p.abstract || p.summary || p.quote || "Kaynak kaydında özet bulunmuyor.")}</div>${safeUrl(p.url) ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(safeUrl(p.url))}">Kaynağı aç ${icon("external")}</a>` : ""}`;
     hydrateIcons(detail);
@@ -4364,6 +4876,46 @@ async function openFirmPerson(person, chat) {
   });
 }
 
+// Ders izlencesi: değerlendirme yüzdeleri, haftalık konular, iş yükü, öğrenme çıktıları
+const SYL_COLORS = ["#2563eb", "#14b8a6", "#f59e0b", "#a855f7", "#ef4444", "#64748b", "#0ea5e9", "#84cc16"];
+function syllabusHtml(sy) {
+  const info = sy.info?.length ? `<div class="syl-info">${sy.info.map((x) => `<span><small>${esc(x.label.replace(/^Dersin\s+/i, ""))}</small><b>${esc(x.value)}</b></span>`).join("")}</div>` : "";
+  const total = (sy.assessment || []).reduce((a, x) => a + x.percent, 0) || 100;
+  const assess = sy.assessment?.length ? `<section class="syl-block"><h4>Değerlendirme</h4>
+    <div class="syl-bar" role="img" aria-label="${esc(sy.assessment.map((x) => `${x.name} yüzde ${x.percent}`).join(", "))}">${sy.assessment.map((x, i) => `<i style="--w:${x.percent / total * 100}%;--c:${SYL_COLORS[i % SYL_COLORS.length]}" title="${esc(x.name)} %${x.percent}"></i>`).join("")}</div>
+    <ul class="syl-legend">${sy.assessment.map((x, i) => `<li><span style="--c:${SYL_COLORS[i % SYL_COLORS.length]}"></span>${esc(x.name)}${x.count && x.count !== "1" ? ` <small>×${esc(x.count)}</small>` : ""}<b>%${x.percent}</b></li>`).join("")}</ul></section>` : "";
+  const wl = sy.workload || {};
+  const work = wl.hours || wl.items?.length ? `<section class="syl-block"><h4>İş yükü</h4><p class="syl-work"><b>${esc(wl.hours || "—")}</b> saat${wl.ects ? ` · <b>${esc(wl.ects)}</b> AKTS` : ""}</p>
+    ${wl.items?.length ? `<ul class="syl-work-items">${wl.items.map((x) => `<li><span>${esc(x.name)}</span><b>${esc(x.hours)} sa</b></li>`).join("")}</ul>` : ""}</section>` : "";
+  const weeks = sy.weeks?.length ? `<section class="syl-block syl-wide"><h4>Haftalık konular <small>${sy.weeks.length} hafta</small></h4>
+    <ol class="syl-weeks">${sy.weeks.map((w) => `<li class="${/vize|final|sınav|midterm|exam/.test(w.topic.toLocaleLowerCase("tr")) ? "exam" : ""}"><span>${esc(w.week)}</span><p>${esc(w.topic)}${w.prep ? `<small>Hazırlık: ${esc(w.prep)}</small>` : ""}</p></li>`).join("")}</ol></section>` : "";
+  const outs = sy.outcomes?.length ? `<section class="syl-block syl-wide"><h4>Öğrenme çıktıları</h4><ul class="syl-outcomes">${sy.outcomes.map((o) => `<li>${esc(o)}</li>`).join("")}</ul></section>` : "";
+  return `<div class="syllabus">${info}<div class="syl-grid">${assess}${work}${weeks}${outs}</div></div>`;
+}
+// Program profili (OIBS): mezun iş alanları, profil, üst kademe, derece, amaçlar
+function programChips(text) {
+  const parts = text.replace(/\s+vb\.?\s*(gibi)?.*$/i, "").split(/\s*[,;•\n]\s*/).map((x) => x.trim()).filter((x) => x.length > 2 && x.length < 60);
+  return parts.length >= 3 && parts.length <= 40 ? parts : null;
+}
+async function loadProgramProfile(box, d) {
+  const host = $("[data-program-url]", box);
+  if (!host) return;
+  host.innerHTML = '<div class="loading-line"><span class="spinner"></span>Program profili ve mezun iş alanları alınıyor…</div>';
+  try {
+    const p = await api(`/api/universities/${encodeURIComponent(d.id)}/student/program?url=${encodeURIComponent(host.dataset.programUrl)}`, { quiet: true });
+    if (!host.isConnected) return;
+    if (!p.sections?.length) { host.hidden = true; return; }
+    const order = ["employment", "profile", "further", "degree", "goals"], secs = [...p.sections].sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+    host.innerHTML = `<div class="prog-head">${icon("cap")}<div><h4>Program profili</h4><p>Bölüm seçerken: mezunlar nerede çalışıyor, program ne kazandırıyor?</p></div></div>
+      <div class="prog-secs">${secs.map((s, i) => { const chips = s.key === "employment" && programChips(s.text);
+        return `<section class="prog-sec ${s.key}${i === 0 ? " lead" : ""}"><h5>${esc(s.heading)}</h5>${chips ? `<div class="chips">${chips.map((c) => `<span class="chip teal">${esc(c)}</span>`).join("")}</div>` : `<p class="${s.text.length > 420 ? "clamp" : ""}">${esc(s.text)}</p>${s.text.length > 420 ? '<button class="link" type="button" data-prog-more>Devamını göster</button>' : ""}`}
+          <a class="source-link" href="${esc(safeUrl(s.url))}" target="_blank" rel="noopener">${icon("external")}Kaynak</a></section>`; }).join("")}</div>`;
+    hydrateIcons(host);
+    $$("[data-prog-more]", host).forEach((b) => b.onclick = () => { const t = b.previousElementSibling; const shut = t.classList.toggle("clamp"); b.textContent = shut ? "Devamını göster" : "Daralt"; });
+    if (!calmMotion()) $$(".prog-sec", host).forEach((el, i) => el.animate([{ opacity: 0, transform: "translateY(8px)" }, { opacity: 1, transform: "none" }], { duration: 300, delay: i * 50, easing: EASE, fill: "backwards" }));
+  } catch { host.hidden = true; }
+}
+
 function bindCourseDetails(root, d) {
   $$("[data-course-url]", root).forEach(course => {
     course.addEventListener("toggle", async () => {
@@ -4374,7 +4926,10 @@ function bindCourseDetails(root, d) {
       try {
         const content = await api(`/api/universities/${encodeURIComponent(d.id)}/student/preview?url=${encodeURIComponent(course.dataset.courseUrl)}`, { quiet: true });
         if (!course.isConnected) return;
-        target.innerHTML = content.course_content?.length ? content.course_content.map(part => `<section><h4>${esc(part.heading)}</h4><p>${esc(part.text)}</p></section>`).join("") : linkPreviewBody(content);
+        const sy = content.syllabus && Object.keys(content.syllabus).length ? content.syllabus : null;
+        const parts = (content.course_content || []).filter(part => !sy || !/haftal|weekly|öğrenme çıktı|ogrenme cikti|learning outcome/i.test(part.heading));
+        target.innerHTML = (sy ? syllabusHtml(sy) : "") + (parts.length ? parts.map(part => `<section><h4>${esc(part.heading)}</h4><p>${esc(part.text)}</p></section>`).join("") : sy ? "" : linkPreviewBody(content));
+        if (sy && !calmMotion()) $$(".syl-bar i", target).forEach((el, i) => el.animate([{ transform: "scaleX(0)" }, { transform: "none" }], { duration: 520, delay: i * 90, easing: EASE, fill: "backwards" }));
         target.insertAdjacentHTML("beforeend", `<a class="source-link" target="_blank" rel="noopener" href="${esc(safeUrl(course.dataset.courseUrl))}">Dersin kaynak sayfası ${icon("external")}</a>`);
         course.dataset.loaded = "done"; hydrateIcons(target);
       } catch (e) { delete course.dataset.loaded; target.innerHTML = `<p class="notice warn">${esc(e.message)} · Dersi kapatıp yeniden açarak tekrar deneyebilirsin.</p>`; }

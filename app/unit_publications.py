@@ -55,8 +55,9 @@ def _hash(value) -> str:
 def person_key(person: dict, institution: str, domain: str) -> str:
     links = person.get('links') or {}
     urls = [person.get(k) or '' for k in ('yok_url', 'url', 'profile_url')] + [links.get('yok') or '']
-    yok = person.get('yok_id') or next((parse_qs(urlparse(u).query).get('authorId', [''])[0]
-                                     for u in urls if 'authorId=' in u), '')
+    yok = person.get('yok_id') or next((q.get('authorId', q.get('authorGuidId', ['']))[0]
+                                     for q in (parse_qs(urlparse(u).query) for u in urls)
+                                     if 'authorId' in q or 'authorGuidId' in q), '')
     orcid = re.search(r'\d{4}-\d{4}-\d{4}-\d{3}[\dXx]', str(person.get('orcid') or links.get('orcid') or ''))
     if yok:
         return 'yok:' + str(yok).upper()

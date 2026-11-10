@@ -360,7 +360,7 @@ async def detail(paper: dict, llm, cache: dict, profile: dict | None = None) -> 
             emit({"stage": f"{name}: erişilemedi ({type(exc).__name__})"})
 
     tasks = []
-    if is_yok:
+    if is_yok and "AkademikArama" in profile_url:  # yalnız eski kayıtlar; yeni API kayıtları künyeyi zaten taşır
         from .sources import yok_detail_sync
 
         loop = asyncio.get_running_loop()
