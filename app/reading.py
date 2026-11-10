@@ -18,6 +18,9 @@ import httpx
 from .config import ROOT
 from .org_assets import public_client, read_public
 from .text import clean
+from .library_common import clean_title
+
+cleanTitle = clean_title
 
 OPENALEX = "https://api.openalex.org"
 UA = "AkademikIz/2.0 (https://github.com/akademik-iz; academic research PoC) httpx"
@@ -125,11 +128,12 @@ def _abstract(inverted: dict | None) -> str:
 def _work(w: dict) -> dict:
     oa = w.get("best_oa_location") or {}
     src = ((w.get("primary_location") or {}).get("source") or {})
-    return {"id": (w.get("id") or "").rsplit("/", 1)[-1], "title": clean(w.get("title") or ""), "year": w.get("publication_year"),
+    return {"id": (w.get("id") or "").rsplit("/", 1)[-1], "title": clean_title(w.get("title") or ""), "year": w.get("publication_year"),
             "doi": (w.get("doi") or "").replace("https://doi.org/", ""), "venue": src.get("display_name") or "",
             "authors": [clean((a.get("author") or {}).get("display_name") or "") for a in (w.get("authorships") or [])[:4]],
             "institutions": sorted({clean(i.get("display_name") or "") for a in (w.get("authorships") or [])
                                     for i in a.get("institutions") or [] if i.get("country_code") == "TR"})[:3],
+            "is_oa": bool(oa), "topic_id": ((w.get("primary_topic") or {}).get("id") or "").rsplit("/", 1)[-1], "field_id": (((w.get("primary_topic") or {}).get("field") or {}).get("id") or "").rsplit("/", 1)[-1],
             "pdf": oa.get("pdf_url") or "", "url": oa.get("landing_page_url") or w.get("doi") or "",
             "citations": w.get("cited_by_count") or 0, "topic": ((w.get("primary_topic") or {}).get("display_name") or ""),
             "abstract": _abstract(w.get("abstract_inverted_index"))}
@@ -140,7 +144,7 @@ async def shelf(cat: str) -> dict | None:
     if cat not in CATEGORIES:
         return None
     label, icon, filt = CATEGORIES[cat]
-    cached = _load(f"shelf2-{cat}", DAY)
+    cached = _load(f"shelf3-{cat}", DAY)
     if cached is not None:
         return cached
     since = date.today() - timedelta(days=730)
@@ -152,7 +156,7 @@ async def shelf(cat: str) -> dict | None:
     items = [x for x in (_work(w) for w in r.json().get("results", [])) if x["title"]]
     out = {"id": cat, "label": label, "icon": icon, "items": items}
     if items:
-        _save(f"shelf2-{cat}", out)
+        _save(f"shelf3-{cat}", out)
     return out
 
 
@@ -165,7 +169,7 @@ async def topic_works(topic_id: str = "", q: str = "", en: str = "") -> dict:
     text = clean(en or q)[:160]
     if not topic_id and len(text) < 3:
         return {"items": [], "scope": ""}
-    key = "topic2-" + hashlib.sha1(f"{topic_id}|{fold_key(text)}".encode()).hexdigest()[:16]
+    key = "topic3-" + hashlib.sha1(f"{topic_id}|{fold_key(text)}".encode()).hexdigest()[:16]
     cached = _load(key, DAY)
     if cached is not None:
         return cached

@@ -64,7 +64,7 @@ def favorites() -> dict:
     return _load()
 
 
-PAPER_FIELDS = ("title", "year", "venue", "doi", "url", "authors", "type", "citations", "abstract", "sources",
+PAPER_FIELDS = ("pdf", "topic", "reason", "is_oa", "title", "year", "venue", "doi", "url", "authors", "type", "citations", "abstract", "sources",
                 "source", "wos", "jcr", "quartile", "citations_by_source", "abstract_source", "abstract_url",
                 "publication_kind", "publication_status", "job_id", "pid", "person")
 PERSON_FIELDS = ("name", "title", "institution", "department", "photo", "chat_id", "job_id", "papers", "email")

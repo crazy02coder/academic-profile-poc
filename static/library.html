@@ -5,99 +5,67 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Akademik İz Kütüphanesi</title>
   <link rel="icon" href="/static/brand-mark.svg" type="image/svg+xml">
+  <script>
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem("theme"); } catch (e) { /* depolama kapalı olabilir */ }
+      if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/library.css?v=20261110-tablet-1">
-  <script type="module" src="/static/library3d.js?v=20261110-tablet-1"></script>
+  <link rel="stylesheet" href="/static/style.css?v=20261110-lib5">
+  <link rel="stylesheet" href="/static/library.css?v=20261110-lib5">
+  <script type="module" src="/static/library3d.js?v=20261110-lib5"></script>
 </head>
-<body>
+<body class="library-page">
   <div id="stage" aria-hidden="true"></div>
 
-  <!-- Giriş -->
-  <section id="splash" class="splash" aria-labelledby="splashTitle">
-    <div class="splash-card">
-      <img src="/static/brand-mark.svg" alt="" class="splash-mark">
-      <p class="eyebrow">Akademik İz</p>
+  <section id="splash" class="lib-splash" aria-labelledby="splashTitle">
+    <div class="card lib-splash-card">
+      <img src="/static/brand-mark.svg" alt="" class="lib-splash-mark">
+      <span class="eyebrow">AKADEMİK İZ</span>
       <h1 id="splashTitle">Kütüphane</h1>
-      <p class="lead">İncelediğin makaleler, kaydettiklerin, araştırdığın konular ve akademisyen dosyaların raflarda.
-        Gez, bir tableti raftan al, elinde çevir ve okumaya başla. Panoda Türkiye'nin gündemi, masadaki bilgisayarda konu bulucu var.</p>
-      <ul class="splash-keys">
+      <p class="muted">Üst katta incelediğin ve kaydettiğin yayınlar, sana göre seçilenler, dönen okuma standları, Türkiye gündemi ve akademisyen rehberi var.
+        Arşiv katında bağışlanan ve açık erişimli kitaplar kategori kategori raflarda.</p>
+      <ul class="lib-keys">
         <li><kbd>W A S D</kbd><span>yürü</span></li>
-        <li><kbd>Sürükle</kbd><span>etrafa bak</span></li>
-        <li><kbd>Tıkla</kbd><span>al · kullan · oraya yürü</span></li>
-        <li><kbd>M</kbd><span>bölümler</span></li>
+        <li><kbd>Sürükle</kbd><span>etrafa bak · standı çevir</span></li>
+        <li><kbd>Tıkla</kbd><span>aç · kullan · oraya yürü</span></li>
+        <li><kbd>Q / E</kbd><span>yakındaki standı çevir</span></li>
       </ul>
-      <div class="splash-actions">
-        <button id="enterBtn" class="btn primary lg" type="button" disabled>Kütüphaneye gir</button>
-        <button id="listEntry" class="btn lg" type="button">Liste görünümü</button>
-        <button id="continueBtn" class="btn lg" type="button" hidden></button>
+      <div class="lib-splash-actions">
+        <button id="enterBtn" class="btn primary" type="button" disabled>Kütüphaneye gir</button>
+        <button id="listEntry" class="btn" type="button">Liste görünümü</button>
       </div>
-      <p id="splashStatus" class="status">Raflar hazırlanıyor…</p>
+      <button id="continueBtn" class="btn ghost sm lib-continue" type="button" hidden></button>
+      <p id="splashStatus" class="faint">Salon hazırlanıyor…</p>
     </div>
   </section>
 
-  <!-- Üst çubuk -->
-  <header class="hud-top" id="hudTop" hidden>
-    <a class="pill brand" href="/" title="Akademik İz'e dön"><img src="/static/brand-mark.svg" alt=""><b>Akademik İz</b><span>Kütüphane</span></a>
-    <div class="hud-right">
-      <button class="pill" id="mapBtn" type="button" title="Bölümler (M)"><i data-i="map"></i>Bölümler</button>
-      <a class="pill" href="/" title="Uygulamaya dön"><i data-i="exit"></i>Uygulama</a>
+  <header id="hud" class="lib-hud" hidden>
+    <a class="lib-pill lib-brand" href="/" title="Akademik İz'e dön"><img src="/static/brand-mark.svg" alt=""><b>Akademik İz</b><span id="floorName">Üst kat · Okuma salonu</span></a>
+    <div class="lib-hud-right">
+      <button id="floorBtn" class="lib-pill" type="button"></button>
+      <button id="listBtn" class="lib-pill" type="button" title="Rafları liste olarak aç">Liste</button>
+      <a class="lib-pill" href="/">Uygulamaya dön</a>
     </div>
   </header>
-  <div id="rotateHint" class="pill center-top" hidden>Sürükle: çevir · Tekerlek: yakınlaştır · Esc: yerine koy</div>
-  <div id="hint" class="hint" hidden></div>
-  <div id="help" class="help" hidden>W A S D · oklar: yürü &nbsp;·&nbsp; sürükle: bak &nbsp;·&nbsp; tıkla: al / kullan / yürü &nbsp;·&nbsp; M: bölümler</div>
-  <nav id="actions" class="actions" hidden aria-label="Elindeki tablet"></nav>
+  <div id="help" class="lib-help" hidden>W A S D · yürü &nbsp;·&nbsp; sürükle · bak &nbsp;·&nbsp; tıkla · aç / yürü &nbsp;·&nbsp; Esc · kapat</div>
+  <div id="standPad" class="lib-standpad" hidden><button id="standLeft" class="icon-btn" type="button" aria-label="Standı sola çevir">‹</button><span><b id="standName"></b><small>Q / E · sürükle</small></span><button id="standRight" class="icon-btn" type="button" aria-label="Standı sağa çevir">›</button></div>
+  <div id="climbHint" class="lib-help lib-climb" hidden>Merdivendesin · inmek için yere tıkla ya da yürü</div>
+  <aside id="hoverCard" class="lib-hover" hidden></aside>
+  <div id="floorFade" class="lib-fade" hidden><div id="floorStatus" class="lib-fade-status" hidden><span class="spinner"></span>Arşiv katına iniliyor…</div></div>
 
-  <!-- Yatay tablet okuyucu -->
-  <div id="reader" class="layer" hidden>
-    <div class="scrim" data-close></div>
-    <article class="reader-tablet" role="dialog" aria-modal="true" aria-labelledby="readerTitle" tabindex="-1">
-      <div class="tablet-camera" aria-hidden="true"></div>
-      <div class="reader-screen">
-        <header class="reader-bar">
-          <button id="readerBack" class="btn sm" type="button" hidden>← İçindekiler</button>
-          <b id="readerTitle">Okuyucu</b>
-          <div class="reader-tabs" role="tablist" aria-label="Okuma biçimi">
-            <button id="summaryTab" type="button" role="tab" aria-selected="true" aria-controls="readerSummary">Özet</button>
-            <button id="pdfTab" type="button" role="tab" aria-selected="false" aria-controls="readerPdf">PDF</button>
-          </div>
-          <button class="icon-btn" type="button" data-close aria-label="Okuyucuyu kapat">✕</button>
-        </header>
-        <div id="readerSummary" class="reader-summary" role="tabpanel" aria-labelledby="summaryTab">
-          <div class="page left" id="pageLeft"></div>
-          <div class="page right" id="pageRight"></div>
-        </div>
-        <div id="readerPdf" class="pdf-body" role="tabpanel" aria-labelledby="pdfTab" hidden></div>
-      </div>
-    </article>
+  <div id="modal" class="modal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true">
+      <button id="modalClose" class="icon-btn modal-x" type="button" aria-label="Kapat"><i data-icon="x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></i></button>
+      <div id="modalBody"></div>
+    </div>
   </div>
-
-  <!-- Bilgisayar: konu bulucu -->
-  <div id="pc" class="layer" hidden>
-    <section class="monitor" role="dialog" aria-modal="true" aria-labelledby="pcTitle">
-      <div class="os-bar"><span></span><span></span><span></span><b>Akademik İz · Konu bulucu</b><button class="icon-btn" type="button" data-pc-close aria-label="Bilgisayardan kalk"><i data-i="x"></i></button></div>
-      <div class="os-body">
-        <h2 id="pcTitle">Ne okumak istiyorsun?</h2>
-        <p class="muted">Türkçe yazabilirsin; konu İngilizceye çevrilip OpenAlex'te aranır, en çok atıf alanlar önde gelir. Seçtiğin yayın tablet olarak masaya gelir.</p>
-        <form id="pcForm" class="search"><i data-i="search"></i><input id="pcInput" autocomplete="off" placeholder="ör. deprem mühendisliği, makine öğrenmesi, göğüs hastalıkları"><button class="btn primary" type="submit">Ara</button></form>
-        <div id="pcRecent" class="chips"></div>
-        <div id="pcResults" class="results" aria-live="polite"></div>
-      </div>
-    </section>
-  </div>
-
-  <!-- Bölümler ve raf listeleri -->
-  <div id="panel" class="layer" hidden>
-    <div class="scrim" data-close></div>
-    <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="panelTitle">
-      <button class="icon-btn close" type="button" data-close aria-label="Kapat"><i data-i="x"></i></button>
-      <div id="panelBody"></div>
-    </section>
-  </div>
-
-  <div id="toast" class="toast" role="status" hidden></div>
-  <noscript><p class="nojs">Kütüphane için JavaScript ve WebGL gerekir. <a href="/#/ara">Konu aramasına dön</a></p></noscript>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <noscript><p class="lib-nojs">Kütüphane için JavaScript gerekir. <a href="/#/ara">Konu aramasına dön</a></p></noscript>
 </body>
 </html>

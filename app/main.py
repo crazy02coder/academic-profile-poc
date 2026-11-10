@@ -38,7 +38,10 @@ import httpx
 
 from . import directory, firms, industry, library, patents, profile_refresh, publication_status, quartiles, trsources, unit_publications, wos, wos_enrichment, wos_verification, yokdir
 
+from .library_routes import router as library_router
+
 app = FastAPI(title="Akademik İz")
+app.include_router(library_router)
 logger = logging.getLogger(__name__)
 app.add_middleware(CORSMiddleware, allow_origin_regex=r"http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?",
                    allow_methods=["*"], allow_headers=["*"])
