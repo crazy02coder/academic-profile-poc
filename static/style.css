@@ -2100,9 +2100,10 @@ html.page-cube::view-transition-new(page) { z-index: auto; animation: cubeIn .7s
 .watch-body::-webkit-scrollbar-thumb { background: #a1a1aa; border-radius: 8px; border: 2px solid var(--surface-2); }
 .watch-body .bubble { will-change: auto; }
 
-/* Sayfalayıcıda perspektif veya kalıcı dönüş yok. */
-.pager-stage, .book .pager-stage { perspective: none; overflow-x: clip; }
-.pager-page { transform-origin: center; backface-visibility: visible; min-width: 0; }
+/* Sayfa dönüşleri yalnızca sayfalayıcı içinde; modal açılışından bağımsız. */
+.pager-stage, .book .pager-stage { perspective: 2200px; overflow-x: clip; }
+.pager-page { transform-origin: center; backface-visibility: hidden; min-width: 0; }
+.pager-page[data-pager-leaving] { pointer-events: none; }
 .pager.dragging .pager-page { pointer-events: none; }
 
 /* Portrait and fallback occupy the same slot; never participate in a flex row. */
@@ -2147,3 +2148,16 @@ html.page-cube::view-transition-new(page) { z-index: auto; animation: cubeIn .7s
 .extra-info-value { font-size: 16px; line-height: 1.9; white-space: normal; overflow-wrap: anywhere; margin: 18px 0; }
 .profile-hero .ph-band:has(.ph-institution):not(:has(.ph-slider)) { min-height: 140px; padding-bottom: 24px; }
 @media (max-width: 680px) { .extra-info-grid { grid-template-columns: 1fr; } .modal-box:has(.pat-modal) { padding: 16px 12px; } .pat-toolbar .spacer { display: none; } }
+
+/* Petek: sabit hücreler, yalnızca görünür balonlarda kare başına dönüşüm. */
+.watch-shell .watch-body { overflow: auto; perspective: none; contain: layout paint; overscroll-behavior: contain; border-radius: 24px; background: radial-gradient(ellipse at center, var(--surface), var(--bg)); }
+.watch-grid { transition: none; transform-style: flat; }
+.watch-grid .bubble { transition: none; transform-origin: center; will-change: auto; }
+.watch-grid .bubble-logo, .watch-grid .bubble-av { filter: none; }
+.watch-grid .bubble-name { opacity: 1; text-shadow: 0 1px 4px var(--surface); }
+.watch-grid .bubble:hover, .watch-grid .bubble:focus-visible { z-index: 200; }
+.watch-grid .bubble:focus-visible { outline: 2px solid var(--blue); outline-offset: 8px; border-radius: 18px; }
+.watch-grid .bubble:hover .bubble-logo, .watch-grid .bubble:focus-visible .bubble-logo { transform: scale(1.16); }
+.watch-body::-webkit-scrollbar { width: 9px; height: 9px; }
+.watch-grid .bubble-logo::after { background: radial-gradient(circle at 32% 20%, rgba(255,255,255,.35), transparent 42%), radial-gradient(circle at 50% 40%, transparent 60%, rgba(0,0,0,.12)); }
+@media (prefers-reduced-motion: reduce) { .watch-grid .bubble-logo { transition: none; } }

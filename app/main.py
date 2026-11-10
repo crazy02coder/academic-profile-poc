@@ -1563,7 +1563,7 @@ async def favorites_del_org(kind: str, key: str):
 async def organization_logo(kind: str, oid: str):
     entry = await org_assets.logo(kind, oid)
     if not entry.get("data"):
-        return Response(status_code=404, headers={"Cache-Control": "no-store"})
+        return Response(status_code=404, headers={"Cache-Control": "private, max-age=600"})
     return Response(base64.b64decode(entry["data"]), media_type=entry["type"], headers={
         "Cache-Control": "public, max-age=604800", "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox"})

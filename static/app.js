@@ -1689,6 +1689,7 @@ function mountPager(host, { per, render, pageClass = "", empty = "" }) {
       child.style.removeProperty("transform"); child.style.removeProperty("transform-origin");
       child.style.removeProperty("opacity"); child.style.removeProperty("filter");
     }
+    stage.querySelectorAll("[data-pager-leaving]").forEach(child => child.remove());
   };
   const ui = () => {
     const n = pages();
@@ -1701,9 +1702,27 @@ function mountPager(host, { per, render, pageClass = "", empty = "" }) {
     n = Math.max(0, Math.min(pages() - 1, n));
     reset();
     if (n === page) return;
+    const direction = n > page ? 1 : -1, previous = stage.firstElementChild;
     page = n;
     const next = sheet(page); stage.replaceChildren(next); ui();
-    if (!calmMotion()) next.animate([{ opacity: .5 }, { opacity: 1 }], { duration: 140, easing: "ease-out" });
+    if (!calmMotion()) {
+      const timing = { duration: 380, easing: "cubic-bezier(.22,.61,.36,1)" };
+      next.animate([
+        { transform: `rotateY(${direction * 78}deg)`, transformOrigin: direction > 0 ? "100% 50%" : "0% 50%", opacity: 0 },
+        { transform: "rotateY(0deg)", transformOrigin: direction > 0 ? "100% 50%" : "0% 50%", opacity: 1 },
+      ], timing);
+      if (previous) {
+        previous.dataset.pagerLeaving = "";
+        previous.inert = true;
+        previous.setAttribute("aria-hidden", "true");
+        stage.append(previous);
+        const animation = previous.animate([
+          { transform: "rotateY(0deg)", transformOrigin: direction > 0 ? "0% 50%" : "100% 50%", opacity: 1 },
+          { transform: `rotateY(${-direction * 78}deg)`, transformOrigin: direction > 0 ? "0% 50%" : "100% 50%", opacity: 0 },
+        ], timing);
+        animation.onfinish = animation.oncancel = () => previous.remove();
+      }
+    }
   };
   const end = (event, commit = false) => {
     if (!gesture || (event.pointerId != null && event.pointerId !== gesture.id)) return;
@@ -1733,7 +1752,10 @@ function mountPager(host, { per, render, pageClass = "", empty = "" }) {
       if (move.cancelable) move.preventDefault();
       const atEdge = (page === 0 && dx > 0) || (page === pages() - 1 && dx < 0);
       const offset = Math.max(-stage.clientWidth * .35, Math.min(stage.clientWidth * .35, dx * (atEdge ? .15 : .7)));
-      if (stage.firstElementChild) stage.firstElementChild.style.transform = `translateX(${offset}px)`;
+      if (stage.firstElementChild && !calmMotion()) {
+        stage.firstElementChild.style.transformOrigin = dx < 0 ? "0% 50%" : "100% 50%";
+        stage.firstElementChild.style.transform = `rotateY(${offset / Math.max(1, stage.clientWidth) * 110}deg)`;
+      }
     }, { ...options, passive: false });
     window.addEventListener("pointerup", event => end(event, true), options);
     window.addEventListener("pointercancel", event => end(event), options);
@@ -1775,7 +1797,8 @@ document.addEventListener("click", (e) => {
 // Apple Watch ızgarası: petek dizilim; merkeze yakın balon büyük ve öne, kenardakiler küçülüp geriye eğilir
 function mountWatch(body) {
   const grid = $(".watch-grid", body), baseSize = body.classList.contains("firm-watch") ? 108 : 96;
-  let zoom = 1, raf = 0, items = [], positions = [];
+  let zoom = 1, raf = 0, inertia = 0, items = [], positions = [], columns = 1, visible = new Set();
+  body.tabIndex = 0; body.setAttribute("aria-label", "Firma peteği; ok tuşlarıyla gezin, artı ve eksiyle yakınlaştırın");
   const shell = document.createElement("div"); shell.className = "watch-shell"; body.before(shell); shell.appendChild(body);
   const scrollbar = document.createElement("input"); scrollbar.type = "range"; scrollbar.className = "watch-scrollbar";
   scrollbar.min = "0"; scrollbar.max = "1"; scrollbar.step = "1"; scrollbar.value = "0"; scrollbar.setAttribute("aria-label", "Firmalarda aşağı yukarı gezin");
@@ -1790,14 +1813,27 @@ function mountWatch(body) {
     if (previous.moved) suppressUntil = performance.now() + 300;
     if (body.hasPointerCapture(previous.id)) body.releasePointerCapture(previous.id);
     syncScroll();
+    if (event?.type === "pointerup" && previous.moved && !calmMotion()) {
+      let vx = previous.vx, vy = previous.vy, last = performance.now();
+      if (last - previous.time > 90) return;
+      const coast = now => {
+        if (!body.isConnected) return;
+        const dt = Math.min(32, now - last); last = now;
+        const left = body.scrollLeft, top = body.scrollTop;
+        body.scrollLeft -= vx * dt; body.scrollTop -= vy * dt;
+        vx *= Math.exp(-dt / 180); vy *= Math.exp(-dt / 180);
+        if (Math.hypot(vx, vy) > .02 && (body.scrollLeft !== left || body.scrollTop !== top)) inertia = requestAnimationFrame(coast);
+      };
+      inertia = requestAnimationFrame(coast);
+    }
   };
   body.addEventListener("dragstart", event => event.preventDefault());
   body.addEventListener("pointerdown", event => {
     if (event.button !== 0 || event.isPrimary === false || event.target.closest("input, button, textarea, select")
         || event.clientX - body.getBoundingClientRect().left >= body.clientWidth) return;
-    endDrag(); suppressUntil = 0;
+    cancelAnimationFrame(inertia); endDrag(); suppressUntil = 0;
     const events = new AbortController(), options = { signal: events.signal, capture: true };
-    drag = { id: event.pointerId, x: event.clientX, y: event.clientY, top: body.scrollTop, left: body.scrollLeft, moved: false, events };
+    drag = { id: event.pointerId, x: event.clientX, y: event.clientY, top: body.scrollTop, left: body.scrollLeft, moved: false, events, vx: 0, vy: 0, lastX: event.clientX, lastY: event.clientY, time: performance.now() };
     window.addEventListener("pointermove", move => {
       if (!drag || drag.id !== move.pointerId) return;
       if (!body.isConnected || (move.pointerType === "mouse" && move.buttons === 0)) { endDrag(move); return; }
@@ -1808,6 +1844,10 @@ function mountWatch(body) {
         body.setPointerCapture(move.pointerId);
       }
       if (move.cancelable) move.preventDefault();
+      const now = performance.now(), dt = Math.max(1, now - drag.time);
+      drag.vx = .6 * drag.vx + .4 * (move.clientX - drag.lastX) / dt;
+      drag.vy = .6 * drag.vy + .4 * (move.clientY - drag.lastY) / dt;
+      drag.lastX = move.clientX; drag.lastY = move.clientY; drag.time = now;
       body.scrollTop = drag.top - dy; body.scrollLeft = drag.left - dx;
     }, { ...options, passive: false });
     window.addEventListener("pointerup", endDrag, options);
@@ -1827,38 +1867,69 @@ function mountWatch(body) {
     raf = requestAnimationFrame(() => {
       raf = 0;
       if (!body.isConnected) return;
-      const width = body.clientWidth, height = body.clientHeight, cy = body.scrollTop + height / 2;
-      items.forEach((b, i) => {
-        const [x, y] = positions[i], dx = x + baseSize / 2 - width / 2, dy = y + baseSize / 2 - cy;
-        const d = Math.min(1.25, Math.hypot(dx / (width / 2), dy / (height / 2))), k = Math.max(0, 1 - d * d * .62);
-        b.style.transform = `translate(${-dx * .12 * d * d}px, ${-dy * .12 * d * d}px) scale(${zoom * (.46 + k * .58)})`;
-        b.style.setProperty("--shade", (1 - k).toFixed(2));
-        b.style.zIndex = Math.round(k * 100);
-      });
+      const width = body.clientWidth, height = body.clientHeight;
+      const cx = body.scrollLeft + width / 2, cy = body.scrollTop + height / 2;
+      const stepY = (baseSize + 30) * .866 * zoom;
+      const firstRow = Math.max(0, Math.floor((body.scrollTop - 180) / stepY));
+      const lastRow = Math.ceil((body.scrollTop + height + 180) / stepY);
+      const nextVisible = new Set();
+      for (let i = firstRow * columns; i < Math.min(items.length, (lastRow + 1) * columns); i++) {
+        const b = items[i], [x, y] = positions[i];
+        const px = x * zoom, py = y * zoom;
+        if (px < body.scrollLeft - 180 || px > body.scrollLeft + width + 180) continue;
+        nextVisible.add(i);
+        if (!visible.has(i)) b.style.visibility = "visible";
+        const dx = px + baseSize / 2 - cx, dy = py + baseSize / 2 - cy;
+        const d = Math.min(1.4, Math.hypot(dx / Math.max(1, width / 2), dy / Math.max(1, height / 2)));
+        const depth = Math.max(.48, 1 - .28 * d * d);
+        const bend = calmMotion() ? "" : ` perspective(900px) rotateX(${-dy / height * 12}deg) rotateY(${dx / width * 12}deg)`;
+        b.style.transform = `translate3d(${px}px, ${py}px, 0)${bend} scale(${zoom * depth})`;
+        b.style.setProperty("--shade", String(Math.min(.65, d * .38)));
+      }
+      for (const i of visible) if (!nextVisible.has(i) && items[i]) items[i].style.visibility = "hidden";
+      visible = nextVisible;
     });
+  };
+  const sizeCanvas = () => {
+    grid.style.width = `${Math.max(body.clientWidth, (columns + .5) * (baseSize + 30) * zoom + 40)}px`;
+    grid.style.height = `${Math.max(body.clientHeight, (Math.ceil(items.length / columns) * (baseSize + 30) * .866 + 80) * zoom)}px`;
   };
   const layout = () => {
     items = $$(".bubble:not([hidden])", grid);
-    const w = body.clientWidth - 24, stepX = (baseSize + 24) * zoom, stepY = (baseSize + 20) * zoom;
-    const cols = Math.max(1, Math.floor((w - stepX / 2) / stepX));
+    columns = Math.max(3, Math.floor((body.clientWidth - 40) / (baseSize + 30)));
+    visible = new Set();
     positions = items.map((b, i) => {
-      const row = Math.floor(i / cols), col = i % cols;
-      const x = 12 + (w - cols * stepX) / 2 + col * stepX + (row % 2 ? stepX / 2 : 0), y = 30 + row * stepY;
-      b.style.left = `${x}px`; b.style.top = `${y}px`; return [x, y];
+      const row = Math.floor(i / columns), col = i % columns;
+      b.style.left = "0"; b.style.top = "0"; b.style.visibility = "hidden";
+      b.querySelectorAll("img").forEach(img => { img.loading = "lazy"; img.decoding = "async"; });
+      return [20 + (col + (row % 2) * .5) * (baseSize + 30), 30 + row * (baseSize + 30) * .866];
     });
-    grid.style.height = `${80 + Math.ceil(items.length / cols) * stepY}px`; syncScroll(); paint();
+    sizeCanvas(); syncScroll(); paint();
   };
-  const zoomTo = value => {
-    endDrag();
-    const ratio = body.scrollTop / Math.max(1, grid.offsetHeight);
-    zoom = Math.max(.65, Math.min(1.8, value)); layout(); body.scrollTop = ratio * grid.offsetHeight; paint();
+  const zoomTo = (value, anchorX = body.clientWidth / 2, anchorY = body.clientHeight / 2) => {
+    cancelAnimationFrame(inertia); endDrag();
+    const oldZoom = zoom;
+    zoom = Math.max(.55, Math.min(2.2, value));
+    const x = (body.scrollLeft + anchorX) / oldZoom, y = (body.scrollTop + anchorY) / oldZoom;
+    sizeCanvas(); body.scrollLeft = x * zoom - anchorX; body.scrollTop = y * zoom - anchorY;
+    syncScroll(); paint();
   };
   const controls = document.createElement("div"); controls.className = "watch-zoom";
   controls.innerHTML = '<button type="button" aria-label="Uzaklaştır">−</button><button type="button" aria-label="Yakınlaştır">+</button><button type="button">Sıfırla</button><small>Tekerlek: yakınlaştır · basılı tutup sürükle: gezin</small>';
   shell.before(controls);
-  const buttons = $$("button", controls); buttons[0].onclick = () => zoomTo(zoom - .15); buttons[1].onclick = () => zoomTo(zoom + .15); buttons[2].onclick = () => zoomTo(1);
-  body.addEventListener("wheel", e => { e.preventDefault(); zoomTo(zoom * Math.exp(-e.deltaY * (e.deltaMode === 1 ? .03 : .002))); }, { passive: false });
+  const buttons = $$("button", controls); buttons[0].onclick = () => zoomTo(zoom - .15); buttons[1].onclick = () => zoomTo(zoom + .15); buttons[2].onclick = () => { zoomTo(1); body.scrollTo(0, 0); };
+  body.addEventListener("wheel", e => { e.preventDefault(); const rect = body.getBoundingClientRect(); zoomTo(zoom * Math.exp(-e.deltaY * (e.deltaMode === 1 ? .03 : .002)), e.clientX - rect.left, e.clientY - rect.top); }, { passive: false });
   body.addEventListener("scroll", () => { syncScroll(); paint(); }, { passive: true });
+  body.addEventListener("keydown", event => {
+    if (event.key === "+" || event.key === "=") { event.preventDefault(); zoomTo(zoom * 1.15); }
+    if (event.key === "-") { event.preventDefault(); zoomTo(zoom / 1.15); }
+  });
+  body.addEventListener("focusin", event => {
+    const index = items.indexOf(event.target.closest(".bubble"));
+    if (index < 0) return;
+    const [x, y] = positions[index];
+    body.scrollTo({ left: x * zoom - body.clientWidth / 2 + baseSize / 2, top: y * zoom - body.clientHeight / 2 + baseSize / 2 });
+  });
   const observer = new ResizeObserver(() => { endDrag(); if (!body.isConnected) observer.disconnect(); else layout(); }); observer.observe(body);
   requestAnimationFrame(layout);
   return { layout };

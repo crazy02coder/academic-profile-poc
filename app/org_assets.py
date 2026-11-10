@@ -32,7 +32,7 @@ MAX_BYTES = 2_000_000
 MAX_HTML_BYTES = 6_000_000
 LOGO_VERSION = 6
 POSITIVE_TTL = 30 * 86400
-NEGATIVE_TTL = 10 * 60
+NEGATIVE_TTL = 7 * 24 * 3600  # bulunamayan logo bir hafta yeniden aranmaz (her 10 dk yüzlerce web araması kuyruğu tıkıyordu)
 VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 _TLS_REPAIR = asyncio.Lock()
 _YOK_LOGOS: dict[str, str] | None = None
@@ -681,4 +681,10 @@ async def logo(kind: str, oid: str) -> dict:
     if task is None:
         task = _INFLIGHT[key] = asyncio.create_task(_collect(kind, oid, path, cached))
         task.add_done_callback(lambda _: _INFLIGHT.pop(key, None))
-    return await asyncio.shield(task)
+    # Tarayıcı beklemez: arama kısa sürede bitmezse eldeki (varsa eski) logo ya da boş yanıt döner,
+    # arama arka planda sürer ve sonraki açılışta önbellekten gelir. Aksi halde yüzlerce bekleyen logo
+    # isteği tarayıcının bağlantılarını doldurup sayfanın asıl API isteklerini kuyruğa sokuyordu.
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), 1.5)
+    except asyncio.TimeoutError:
+        return cached if cached and cached.get("data") else {}
