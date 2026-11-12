@@ -3448,7 +3448,7 @@ function renderProfile(r, chat) {
     ["more", "Projeler ve diğer", ["projects", "awards", "patents", "memberships", "art"].reduce((s, k) => s + (sec[k] || []).length, 0)],
     ["collab", "İş birlikleri", (y.collaborators || []).length + (r.industry || []).length],
     ...(trProjects.length ? [["tubitak", "TÜBİTAK", trProjects.length]] : []), ["patents", "Patentler", patentCount(r.patents)],
-    ["interests", "Ekstra bilgi", ""], ["chat", "Asistan", ""],
+    ["score", "Doçentlik ve teşvik puanı", ""], ["interests", "Ekstra bilgi", ""], ["chat", "Asistan", ""],
   ];
   const otherSections = [["projects", "Projeler", "briefcase"], ["awards", "Ödüller", "award"], ["patents", "Patentler", "file"],
     ["memberships", "Üyelikler", "users"], ["art", "Sanatsal faaliyetler", "sparkle"]];
@@ -3528,6 +3528,7 @@ function renderProfile(r, chat) {
     <div class="panel" data-panel="tubitak"><div class="card card-pad" id="tubitakBox">${tubitakHtml(trProjects, r.industry)}</div></div>
     <div class="panel" data-panel="patents"><div class="card card-pad" id="patentsBox">${r.patents ? personPatentsHtml(r.patents) : ""}</div></div>
 
+    <div class="panel" data-panel="score"><div id="scoreBox" class="t-score" data-job-id="${esc(r.job_id || "")}"></div></div>
     <div class="panel" data-panel="chat"><div class="card chat-wrap">
       <div class="chat-head"><span class="chat-orb">${icon("sparkle")}</span><div><b>Profil asistanı</b><span>${esc(p.name)} · yalnız toplanan kaynaklardan, kimlikli yanıt</span></div></div>
       <div class="thread" id="thread"><div class="msg bot"><span class="chat-orb sm">${icon("sparkle")}</span><div class="bubble">Merhaba! <b>${esc(p.name)}</b> hakkında yayınlar, dersler, tezler, iş birlikleri ya da araştırma alanları üzerine soru sorabilirsiniz.
@@ -4192,13 +4193,13 @@ async function viewSearch(q, requestedSources = "") {
   if (!selected?.length) { try { selected = JSON.parse(localStorage.getItem("topic-sources")); } catch { /* tercih */ } }
   if (!Array.isArray(selected) || !selected.filter((key) => TOPIC_SOURCES.includes(key)).length) selected = [...TOPIC_SOURCES];
   selected = selected.filter((key) => TOPIC_SOURCES.includes(key));
-  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Konular" }]);
-  setView(`<div class="section-head"><div><h1>Konular</h1><p>${q ? "OpenAlex, Crossref, Semantic Scholar, TR Dizin, OpenAIRE ve WoS kayıtları kaynaklarıyla birleştirilir." : "Kitaplığın: son okuduğun makaleler, konuların, Türkiye gündemi ve okuma köşesi. Bir kitaba dokun, raftan çıksın. En altta konu bulucu."}</p></div>${q ? `<a class="btn sm" href="#/ara">${icon("book")}Kitaplığa dön</a>` : ""}</div>
-    ${q ? "" : `<div id="shelves"></div><div class="finder-head"><h2>${icon("search")}Konu bulucu</h2><p>Türkçe yazdığın konu İngilizceye de çevrilerek bütün kaynaklarda aranır.</p></div>`}
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Konu bul" }]);
+  setView(`<div class="section-head"><div><h1>Konu bul</h1><p>${q ? "OpenAlex, Crossref, Semantic Scholar, TR Dizin, OpenAIRE ve WoS kayıtları kaynaklarıyla birleştirilir." : "Bir konu yaz; Türkçe yazdığın konu İngilizceye de çevrilerek bütün kaynaklarda aranır, yayınlar tek listede gelir."}</p></div>${q ? `<a class="btn sm" href="#/ara">${icon("arrow")}Yeni arama</a>` : ""}</div>
     <form class="card quick-search" id="searchForm" style="margin-top:0">
       <div class="input">${icon("search")}<input id="sInput" value="${esc(q)}" placeholder="ör. göğüs hastalıkları, makine öğrenmesi, deprem mühendisliği"></div>
       ${sourcePicker("topicSourcePicker", TOPIC_SOURCES, selected)}<button class="btn primary" type="submit">Ara</button></form>
-    <div id="sResults" style="margin-top:18px"></div>`);
+    <div id="sResults" style="margin-top:18px"></div>
+    ${q ? "" : `<div id="shelves"></div>`}`);
   const search = () => {
     const value = $("#sInput").value.trim();
     if (value.length < 3) return;
@@ -4212,7 +4213,7 @@ async function viewSearch(q, requestedSources = "") {
   });
   $("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); search(); });
   const box = $("#sResults"), routeHash = location.hash;
-  if (!q) { renderShelves($("#shelves")); return; }
+  if (!q) { renderAgenda($("#shelves")); return; }
   box.innerHTML = `<div id="topicSources" class="src-status"></div><div id="topicProgress" class="loading-line" role="status" aria-live="polite"><span class="spinner"></span>Akademik kaynaklar taranıyor…</div><div id="topicError"></div><div id="topicTable"></div>`;
   const active = () => box.isConnected && location.hash === routeHash;
   S.listMeta.search = { file: `arama ${q}` };
@@ -4621,7 +4622,7 @@ function route() {
     location.replace(`#/kutuphane?tab=${parts[0] === "favori-makaleler" ? "papers" : "people"}`); return undefined;
   }
   setNav({ akademisyenler: "akademisyenler", profil: "akademisyenler", is: "akademisyenler", universiteler: "universiteler", universite: "universiteler", kurum: "universiteler",
-    firmalar: "firmalar", firma: "firmalar", ara: "ara", kutuphane: "kutuphane", sistem: "sistem" }[parts[0]] || (parts.length ? "" : "home"));
+    firmalar: "firmalar", firma: "firmalar", ara: "ara", kutuphane: "kutuphane", sistem: "sistem", danisman: "danisman" }[parts[0]] || (parts.length ? "" : "home"));
   switch (parts[0]) {
     case "ara": return viewSearch(params.get("q") || "", params.get("sources") || "");
     case "kurum": return viewDirectory(params.get("u") || "");
@@ -4634,6 +4635,8 @@ function route() {
     case "universite": return viewUni(parts[1]);
     case "firmalar": return viewFirms(params.get("q") || "", params.get("sector") || "", params.get("city") || "", params.get("area") || "");
     case "firma": return viewFirm(parts[1]);
+    case "puan": location.replace(parts[1] ? `#/profil/${parts[1]}` : "#/akademisyenler"); return undefined;
+    case "danisman": return viewAdvisor(params);
     default: return viewHome();
   }
 }

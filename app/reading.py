@@ -81,22 +81,25 @@ async def _turkish(rows: list[dict], llm) -> list[dict]:
     return rows
 
 
-async def trending(limit: int = 14, llm=None) -> list[dict]:
-    """Son 12 ayda Türkiye adresli yayınlarda en hızlı büyüyen konular (önceki 12 aya göre)."""
-    cached = _load("trending", DAY)
+async def trending(limit: int = 14, llm=None, cat: str = "") -> list[dict]:
+    """Son 12 ayda Türkiye adresli yayınlarda en hızlı büyüyen konular (önceki 12 aya göre). cat: okuma köşesi alanı."""
+    name_ = f"trending-{cat}" if cat in CATEGORIES else "trending"
+    scope = f"{TR},{CATEGORIES[cat][2]}" if cat in CATEGORIES else TR
+    floor = 20 if cat in CATEGORIES else 60
+    cached = _load(name_, DAY)
     if cached is not None:
         if llm is not None and any(not r.get("name_tr") for r in cached):
             cached = await _turkish(cached, llm)
             if all(r.get("name_tr") for r in cached):
-                _save("trending", cached)
+                _save(name_, cached)
         return cached
-    async with _LOCKS.setdefault("trending", asyncio.Lock()):
+    async with _LOCKS.setdefault(name_, asyncio.Lock()):
         today = date.today()
         cur_from, prev_from = today - timedelta(days=365), today - timedelta(days=730)
 
         async def groups(start, end):
             r = await client.get(f"{OPENALEX}/works", params={
-                "filter": f"{TR},from_publication_date:{start},to_publication_date:{end}", "group_by": "primary_topic.id", "per_page": 200})
+                "filter": f"{scope},from_publication_date:{start},to_publication_date:{end}", "group_by": "primary_topic.id", "per_page": 200})
             r.raise_for_status()
             return {g["key"]: (g["key_display_name"], g["count"]) for g in r.json().get("group_by", [])}
         async with _client() as client:
@@ -106,13 +109,13 @@ async def trending(limit: int = 14, llm=None) -> list[dict]:
             if key not in prev:  # önceki dönemin ilk 200'ünde yoksa sayısı bilinmiyor: büyüme hesaplanmaz
                 continue
             before = prev[key][1]
-            if n >= 60:
+            if n >= floor:
                 rows.append({"id": key.rsplit("/", 1)[-1], "name": name, "count": n, "prev": before,
                              "growth": round((n - before) / max(before, 1) * 100)})
         rows.sort(key=lambda r: -(r["count"] - r["prev"]) / (r["prev"] + 40))
         out = await _turkish(rows[:limit], llm)
         if out:
-            _save("trending", out)
+            _save(name_, out)
         return out
 
 

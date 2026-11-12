@@ -1,0 +1,26 @@
+{
+  "_not": "TASLAK. Puanlar ÜAK'ın yaygın bilinen tablo yapısına göre girildi; resmî tabloyla (uak.gov.tr, temel alan tablon) karşılaştırıp bu dosyada düzelt. Alanlara göre puan ve asgari koşullar değişir.",
+  "dogrulandi": false,
+  "yazar_payi": {"1": 1.0, "2": 0.8, "3": 0.6, "4": 0.5},
+  "docentlik": {
+    "toplam_asgari": 100,
+    "doktora_sonrasi_asgari": 90,
+    "kalemler": {
+      "makale_intl": {"ad": "Uluslararası makale", "puan": {"q1": 30, "q2": 20, "q3": 15, "q4": 10, "sci_noq": 10, "intl_other": 8, "intl_hakemli": 5}, "asgari": 40},
+      "makale_ulusal": {"ad": "Ulusal makale", "puan": {"trdizin": 8, "ulusal_other": 4}, "asgari": 8},
+      "kitap": {"ad": "Kitap ve kitap bölümü", "puan": {"book_intl": 20, "book_nat": 15, "chapter_intl": 10, "chapter_nat": 8}},
+      "atif": {"ad": "Atıflar", "atif_basina": 1, "tavan": 20, "asgari": 4},
+      "tez": {"ad": "Lisansüstü tez danışmanlığı", "puan": {"doktora": 4, "yuksek_lisans": 2}, "tavan": 10},
+      "toplanti": {"ad": "Bilimsel toplantı", "puan": {"conf_intl": 3, "conf_nat": 2}, "tavan": 10, "asgari": 5},
+      "egitim": {"ad": "Eğitim-öğretim", "ders_basina": 2, "tavan": 6, "asgari": 2}
+    }
+  },
+  "tesvik": {
+    "asgari": 30, "tavan": 100,
+    "q_katsayi": {"q1": 1.0, "q2": 0.8, "q3": 0.5, "q4": 0.25, "sci_noq": 0.25},
+    "kalemler": {
+      "yayin": {"ad": "Yayın", "tavan": 30, "puan": {"sci": 30, "intl_other": 15, "intl_hakemli": 10, "trdizin": 10, "ulusal_other": 5, "book_intl": 30, "book_nat": 15, "chapter_intl": 10, "chapter_nat": 5}},
+      "teblig": {"ad": "Tebliğ", "tavan": 20, "puan": {"conf_intl": 6, "conf_nat": 3}}
+    }
+  }
+}

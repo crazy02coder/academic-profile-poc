@@ -42,6 +42,8 @@ from .library_routes import router as library_router
 
 app = FastAPI(title="Akademik İz")
 app.include_router(library_router)
+from .tools_routes import router as tools_router  # noqa: E402
+app.include_router(tools_router)
 logger = logging.getLogger(__name__)
 app.add_middleware(CORSMiddleware, allow_origin_regex=r"http://127\.0\.0\.1(:\d+)?|http://localhost(:\d+)?",
                    allow_methods=["*"], allow_headers=["*"])
@@ -1306,10 +1308,12 @@ async def tubitak_teydeb(q: str = ""):
 
 
 @app.get("/api/topics/trending")
-async def topics_trending():
-    """Türkiye gündemi: son 12 ayda en hızlı büyüyen konular (OpenAlex)."""
+async def topics_trending(cat: str = ""):
+    """Türkiye gündemi: son 12 ayda en hızlı büyüyen konular (OpenAlex). cat verilirse o alanın gündemi."""
+    if cat and cat not in reading.CATEGORIES:
+        raise HTTPException(404, "Kategori bulunamadı.")
     try:
-        return {"items": await reading.trending(llm=await LLM().probe())}
+        return {"items": await reading.trending(12 if cat else 14, llm=await LLM().probe(), cat=cat)}
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"OpenAlex'e ulaşılamadı ({type(exc).__name__}).") from None
 
