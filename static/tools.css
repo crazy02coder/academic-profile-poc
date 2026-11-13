@@ -94,3 +94,11 @@
 .t-jury-form { display: grid; gap: 10px; margin: 6px 0 14px; } .t-jury-row { display: flex; gap: 8px; } .t-jury-row .input { flex: 1; }
 #juryOut .t-advisors { margin-top: 8px; } #juryOut .m-h { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
 .t-jury-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+
+/* sayfalama ve sıralı YÖK bilgisi */
+.t-advisors > [hidden], .t-adv-thesis[hidden] { display: none !important; }
+.t-pager { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin: 16px 0 4px; }
+.t-yok-wait .t-adv-title { opacity: .6; }
+.t-yok-wait .t-adv-title::after { content: ""; display: inline-block; width: 10px; height: 10px; margin-left: 6px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; vertical-align: -1px; animation: t-spin .8s linear infinite; }
+@keyframes t-spin { to { transform: rotate(360deg); } }
+[data-yok-note]:not(:empty) { margin-left: 4px; font-size: 12.5px; }

@@ -99,33 +99,112 @@ async function viewAdvisor(params) {
   }).catch(() => {});
   const box = $("#aResults");
   if (q.length < 3) {
-    box.innerHTML = `<div class="t-steps">${[["search", "Konunu yaz", "Türkçe yazabilirsin; İngilizce karşılığıyla birlikte aranır."], ["users", "Adaylar sıralanır", "Son 5 yıldaki konu yayınları, atıflar ve güncellik birlikte puanlanır."], ["cap", "Tez deneyimi eklenir", "İlk adayların unvanı ve yönettiği tezler YÖK Akademik'ten gelir."]].map(([ic, t, d], i) => `<div class="card t-step"><span>${i + 1}</span>${icon(ic)}<b>${t}</b><small>${d}</small></div>`).join("")}</div>`;
+    box.innerHTML = `<div class="t-steps">${[["search", "Konunu yaz", "Türkçe yazabilirsin; İngilizce karşılığıyla birlikte aranır."], ["users", "Adaylar sıralanır", "Son 5 yıldaki konu yayınları, atıflar ve güncellik birlikte puanlanır."], ["cap", "YÖK bilgisi eklenir", "Ekrandaki adayların unvanı tek tek gelir; tez geçmişi karttan istenir."]].map(([ic, t, d], i) => `<div class="card t-step"><span>${i + 1}</span>${icon(ic)}<b>${t}</b><small>${d}</small></div>`).join("")}</div>`;
     hydrateIcons(box); return;
   }
-  box.innerHTML = `<div class="loading-line" role="status"><span class="spinner"></span>Yayınlar taranıyor, adayların tez geçmişi YÖK'ten alınıyor…</div>${skeleton(4)}`;
+  box.innerHTML = `<div class="loading-line" role="status"><span class="spinner"></span>Konudaki yayınlar taranıyor…</div>${skeleton(4)}`;
   let r;
   try { r = await api(`/api/tools/advisors?q=${encodeURIComponent(q)}&uni=${encodeURIComponent(uni)}&mode=${mode}`); }
   catch (e) { if (location.hash === hash) { box.innerHTML = `<div class="notice err"><div>${esc(e.message)}</div></div>`; } return; }
   if (location.hash !== hash) return;
   const items = r.items || [];
-  box.innerHTML = `<div class="src-status"><span class="chip teal">${fmtNum(r.works)} yayın tarandı</span>${r.english ? `<span class="chip blue">EN: ${esc(r.english)}</span>` : ""}${r.university ? `<span class="chip">${esc(r.university)}</span>` : ""}<span class="chip">son ${r.years || 5} yıl</span></div>`
-    + (items.length ? `<div class="t-advisors">${items.map((a, i) => `<article class="card t-adv">
+  box.innerHTML = `<div class="src-status"><span class="chip teal">${fmtNum(r.works)} yayın tarandı</span>${r.english ? `<span class="chip blue">EN: ${esc(r.english)}</span>` : ""}${r.university ? `<span class="chip">${esc(r.university)}</span>` : ""}<span class="chip">son ${r.years || 5} yıl</span><span class="faint" data-yok-note></span></div>`
+    + (items.length ? `<div class="t-advisors">${items.map((a, i) => `<article class="card t-adv" ${yokAttrs(a)}>
         <div class="t-adv-rank">${i + 1}</div>${avatar(a.name, a.job_id ? `/api/jobs/${encodeURIComponent(a.job_id)}/photo?v=2` : "")}
-        <div class="t-adv-main"><div class="t-adv-head"><div><span class="t-adv-title">${esc(a.title || "Unvan YÖK'te eşleşmedi")}</span><h3>${esc(a.name)}</h3>
-              <p>${esc([a.institution, a.department].filter(Boolean).join(" · "))}</p></div>
+        <div class="t-adv-main"><div class="t-adv-head"><div>${yokTitle(a)}<h3>${esc(a.name)}</h3>
+              <p class="t-adv-unit">${esc([a.institution, a.department].filter(Boolean).join(" · "))}</p></div>
             <div class="t-match"><b>%${a.match}</b><span>uyum</span>${tBar(a.match, 100)}</div></div>
-          <div class="chips">${a.active ? `<span class="chip teal">Aktif · son yayın ${a.last_year}</span>` : `<span class="chip gold">Son yayın ${a.last_year}</span>`}
+          <div class="chips t-adv-chips">${a.active ? `<span class="chip teal">Aktif · son yayın ${a.last_year}</span>` : `<span class="chip gold">Son yayın ${a.last_year}</span>`}
             <span class="chip">${fmtNum(a.works)} konu yayını</span><span class="chip">${fmtNum(a.citations)} atıf</span>
-            ${a.theses != null ? `<span class="chip blue">${fmtNum(a.theses)} tez yönetti${a.theses_recent ? ` · ${a.theses_recent} son 5 yılda` : ""}${a.theses_phd ? ` · ${a.theses_phd} doktora` : ""}</span>` : ""}
+            ${thesisChip(a)}
             ${mode === "2209" && a.eligible ? `<span class="chip teal">2209-A danışmanı olabilir</span>` : ""}</div>
           ${a.samples?.length ? `<ul class="t-adv-works">${a.samples.map((w) => `<li>${w.doi ? `<a href="https://doi.org/${esc(w.doi)}" target="_blank" rel="noopener">${esc(w.title)}</a>` : esc(w.title)}<small>${w.year}${w.citations ? ` · ${fmtNum(w.citations)} atıf` : ""}</small></li>`).join("")}</ul>` : ""}
-          ${a.thesis_titles?.length ? `<p class="t-adv-thesis"><b>Yönettiği son tezler:</b> ${a.thesis_titles.map(esc).join(" · ")}</p>` : ""}
+          <p class="t-adv-thesis" ${a.thesis_titles?.length ? "" : "hidden"}>${a.thesis_titles?.length ? `<b>Yönettiği son tezler:</b> ${a.thesis_titles.map(esc).join(" · ")}` : ""}</p>
           <div class="t-adv-actions"><a class="btn sm primary" href="${a.chat_id ? `#/profil/${encodeURIComponent(a.chat_id)}` : `#/akademisyenler?q=${encodeURIComponent(a.name)}`}">${icon("user")}${a.chat_id ? "Profili aç" : "Profili incele"}</a>
-            ${a.yok_url ? `<a class="btn sm" href="${esc(a.yok_url)}" target="_blank" rel="noopener">${icon("external")}YÖK Akademik</a>` : ""}
+            ${yokButtons(a)}
             ${a.orcid ? `<a class="btn sm ghost" href="https://orcid.org/${esc(a.orcid)}" target="_blank" rel="noopener">ORCID</a>` : ""}</div></div></article>`).join("")}</div>`
       : `<div class="card">${emptyState("users", "Aday bulunamadı", esc(r.message || "Konuyu daha genel yaz ya da üniversite filtresini kaldır."))}</div>`);
   hydrateIcons(box);
+  const list = $(".t-advisors", box);
+  if (list) tPager(list, 10, () => enrichYok(box));
 }
+
+// ------------------------------------------------------------------ YÖK bilgisi: yalnız ekrandaki kartlar, tek tek; YÖK yanıt vermezse durur
+const YOK_SEEN = new Map();
+const yokAttrs = (a) => `data-yok-name="${esc(a.name)}" data-yok-inst="${esc(a.lookup_institution || a.institution || "")}"${a.yok_checked || a.title ? ` data-yok-done="1"` : ""}`;
+const yokTitle = (a) => `<span class="t-adv-title">${esc(a.title || (a.yok_checked ? "Unvan YÖK'te eşleşmedi" : "YÖK bilgisi sırada…"))}</span>`;
+const thesisChip = (a) => a.theses != null ? `<span class="chip blue" data-yok-thesis-chip>${fmtNum(a.theses)} tez yönetti${a.theses_recent ? ` · ${a.theses_recent} son 5 yılda` : ""}${a.theses_phd ? ` · ${a.theses_phd} doktora` : ""}</span>` : "";
+const yokButtons = (a) => `${a.yok_url ? `<a class="btn sm" href="${esc(a.yok_url)}" target="_blank" rel="noopener" data-yok-link>${icon("external")}YÖK Akademik</a>` : ""}
+  ${a.theses == null && (a.yok_url || !a.yok_checked) ? `<button class="btn sm ghost" type="button" data-yok-theses>${icon("cap")}Tez geçmişi</button>` : ""}`;
+
+function tPager(list, size, onPage) {
+  const cards = [...list.children];
+  if (cards.length <= size) { onPage?.(); return; }
+  const pages = Math.ceil(cards.length / size), bar = document.createElement("nav");
+  bar.className = "t-pager"; bar.setAttribute("aria-label", "Sayfalar");
+  const show = (p) => {
+    cards.forEach((c, i) => { c.hidden = Math.floor(i / size) !== p; });
+    bar.innerHTML = Array.from({ length: pages }, (_, i) => `<button type="button" class="btn sm${i === p ? " primary" : ""}" data-pg="${i}" ${i === p ? `aria-current="page"` : ""}>${i * size + 1}–${Math.min(cards.length, (i + 1) * size)}</button>`).join("");
+    onPage?.();
+  };
+  bar.onclick = (e) => { const b = e.target.closest("[data-pg]"); if (!b) return; show(+b.dataset.pg); list.scrollIntoView({ block: "start", behavior: calmMotion() ? "auto" : "smooth" }); };
+  list.after(bar); show(0);
+}
+
+function applyYok(card, d) {
+  const title = $(".t-adv-title", card), unit = $(".t-adv-unit", card);
+  if (title) title.textContent = d.title || (d.error ? "YÖK bilgisi alınamadı" : "Unvan YÖK'te eşleşmedi");
+  if (unit && d.university) unit.textContent = [d.university, d.department].filter(Boolean).join(" · ");
+  const actions = $(".t-adv-actions", card);
+  if (actions && d.url && !$("[data-yok-link]", card)) $("a", actions)?.insertAdjacentHTML("afterend", `<a class="btn sm" href="${esc(d.url)}" target="_blank" rel="noopener" data-yok-link>${icon("external")}YÖK Akademik</a>`);
+  if (!d.error && !d.yok_id) $("[data-yok-theses]", card)?.remove();
+  if (d.theses != null) {
+    $("[data-yok-theses]", card)?.remove();
+    $("[data-yok-thesis-chip]", card)?.remove();
+    $(".t-adv-chips", card)?.insertAdjacentHTML("beforeend", thesisChip(d));
+    const p = $(".t-adv-thesis", card);
+    if (p && d.thesis_titles?.length) { p.hidden = false; p.innerHTML = `<b>Yönettiği son tezler:</b> ${d.thesis_titles.map(esc).join(" · ")}`; }
+  }
+  hydrateIcons(card);
+}
+
+const yokPausedNote = (host) => { const n = $("[data-yok-note]", host) || $("[data-yok-note]"); if (n) n.textContent = "YÖK Akademik şu an yanıt vermiyor; unvan bilgisi daha sonra eklenecek."; };
+
+async function yokFetch(card, theses = false) {
+  const name = card.dataset.yokName, inst = card.dataset.yokInst || "", key = `${name}|${inst}|${theses ? 1 : 0}`;
+  if (YOK_SEEN.has(key)) return YOK_SEEN.get(key);
+  let d;
+  try { d = await api(`/api/tools/yok-person?name=${encodeURIComponent(name)}&institution=${encodeURIComponent(inst)}${theses ? "&theses=true" : ""}`, { quiet: true }); }
+  catch { d = { error: true }; }
+  if (!d.error && !d.paused) YOK_SEEN.set(key, d);
+  return d;
+}
+
+let yokRun = 0;
+async function enrichYok(host) {
+  const run = ++yokRun;  // sayfa değişince önceki sıra durur
+  for (const card of $$("[data-yok-name]:not([data-yok-done])", host)) {
+    if (run !== yokRun || !card.isConnected) return;
+    if (card.hidden) continue;
+    card.classList.add("t-yok-wait");
+    const d = await yokFetch(card);
+    card.classList.remove("t-yok-wait");
+    if (d.paused) { yokPausedNote(host); $$(".t-adv-title", host).forEach((t) => { if (t.textContent === "YÖK bilgisi sırada…") t.textContent = "Unvan sonra eklenecek"; }); return; }
+    card.dataset.yokDone = "1";
+    applyYok(card, d);
+  }
+}
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-yok-theses]"); if (!btn) return;
+  const card = btn.closest("[data-yok-name]"); if (!card) return;
+  btn.disabled = true; btn.textContent = "Tezler alınıyor…";
+  const d = await yokFetch(card, true);
+  if (d.paused || d.error) { btn.disabled = false; btn.textContent = d.paused ? "YÖK yanıt vermiyor" : "Tekrar dene"; if (d.paused) yokPausedNote(card.closest(".t-advisors")?.parentElement || document); return; }
+  card.dataset.yokDone = "1";
+  if (d.theses == null) { btn.remove(); }
+  applyYok(card, d);
+});
 
 // ------------------------------------------------------------------ konu bul: Türkiye gündemi ve kategori gündemi
 function renderAgenda(host) {
@@ -187,13 +266,14 @@ function renderAgenda(host) {
 }
 
 // ------------------------------------------------------------------ jüri ve hakem önerici
-const expertCard = (a, i, extra = "") => `<article class="card t-adv"><div class="t-adv-rank">${i + 1}</div>${avatar(a.name, a.job_id ? `/api/jobs/${encodeURIComponent(a.job_id)}/photo?v=2` : "")}
-    <div class="t-adv-main"><div class="t-adv-head"><div><span class="t-adv-title">${esc(a.title || "Unvan YÖK'te eşleşmedi")}</span><h3>${esc(a.name)}</h3><p>${esc([a.institution, a.department].filter(Boolean).join(" · "))}</p></div>
+const expertCard = (a, i, extra = "") => `<article class="card t-adv" ${yokAttrs(a)}><div class="t-adv-rank">${i + 1}</div>${avatar(a.name, a.job_id ? `/api/jobs/${encodeURIComponent(a.job_id)}/photo?v=2` : "")}
+    <div class="t-adv-main"><div class="t-adv-head"><div>${yokTitle(a)}<h3>${esc(a.name)}</h3><p class="t-adv-unit">${esc([a.institution, a.department].filter(Boolean).join(" · "))}</p></div>
         <div class="t-match"><b>%${a.match}</b><span>uyum</span>${tBar(a.match, 100)}</div></div>
-      <div class="chips">${extra}<span class="chip">${fmtNum(a.works)} konu yayını</span>${a.active ? `<span class="chip teal">Aktif · ${a.last_year}</span>` : `<span class="chip">son yayın ${a.last_year}</span>`}${a.theses != null ? `<span class="chip blue">${fmtNum(a.theses)} tez yönetti</span>` : ""}</div>
+      <div class="chips t-adv-chips">${extra}<span class="chip">${fmtNum(a.works)} konu yayını</span>${a.active ? `<span class="chip teal">Aktif · ${a.last_year}</span>` : `<span class="chip">son yayın ${a.last_year}</span>`}${thesisChip(a)}</div>
       ${a.samples?.length ? `<ul class="t-adv-works">${a.samples.slice(0, 2).map((w) => `<li>${w.doi ? `<a href="https://doi.org/${esc(w.doi)}" target="_blank" rel="noopener">${esc(w.title)}</a>` : esc(w.title)}<small>${w.year}</small></li>`).join("")}</ul>` : ""}
+      <p class="t-adv-thesis" hidden></p>
       <div class="t-adv-actions"><a class="btn sm primary" href="${a.chat_id ? `#/profil/${encodeURIComponent(a.chat_id)}` : `#/akademisyenler?q=${encodeURIComponent(a.name)}`}" data-close-modal>${icon("user")}${a.chat_id ? "Profili aç" : "Profili incele"}</a>
-        ${a.yok_url ? `<a class="btn sm" href="${esc(a.yok_url)}" target="_blank" rel="noopener">${icon("external")}YÖK Akademik</a>` : ""}</div></div></article>`;
+        ${yokButtons(a)}</div></div></article>`;
 
 // Akademisyen profili → Tezler sekmesi: "Jüri öner"
 function openJury() {
@@ -214,10 +294,11 @@ function openJury() {
       if (!out.isConnected) return;
       const flag = (a) => a.coauthor ? `<span class="chip gold">Danışmanla ortak yayını var</span>` : "";
       const group = (title, items, empty) => `<div class="m-h">${title} <span class="count">${items.length}</span></div>${items.length ? `<div class="t-advisors">${items.map((a, i) => expertCard(a, i, flag(a))).join("")}</div>` : `<p class="faint">${empty}</p>`}`;
-      out.innerHTML = `<div class="src-status"><span class="chip teal">${fmtNum(d.works)} yayın tarandı</span>${d.english ? `<span class="chip blue">EN: ${esc(d.english)}</span>` : ""}</div>
+      out.innerHTML = `<div class="src-status"><span class="chip teal">${fmtNum(d.works)} yayın tarandı</span>${d.english ? `<span class="chip blue">EN: ${esc(d.english)}</span>` : ""}<span class="faint" data-yok-note></span></div>
         ${group(`Kurum içi · ${esc(d.institution || "")}`, d.inside, "Bu konuda aynı üniversiteden aday bulunamadı.")}${group("Kurum dışı", d.outside, "Kurum dışından aday bulunamadı; konuyu daha genel yaz.")}
         <p class="faint">Öneriler yayın geçmişine dayanır; jüri koşulları (unvan, kurum dışı üye sayısı) için enstitü yönetmeliğine bak.</p>`;
       hydrateIcons(out);
+      enrichYok(out);
     } catch (err) { if (out.isConnected) out.innerHTML = `<div class="notice err"><div>${esc(err.message)}</div></div>`; }
   };
 }
@@ -248,9 +329,11 @@ async function viewReviewer(params) {
   try { d = await api(`/api/tools/reviewers?q=${encodeURIComponent(q)}&exclude=${encodeURIComponent(exclude)}&institution=${encodeURIComponent(inst)}`); }
   catch (e) { if (location.hash === hash) out.innerHTML = `<div class="notice err"><div>${esc(e.message)}</div></div>`; return; }
   if (location.hash !== hash) return;
-  out.innerHTML = `<div class="src-status"><span class="chip teal">${fmtNum(d.works)} yayın tarandı</span>${d.english ? `<span class="chip blue">EN: ${esc(d.english)}</span>` : ""}${d.excluded.map((n) => `<span class="chip">hariç: ${esc(n)}</span>`).join("")}</div>`
+  out.innerHTML = `<div class="src-status"><span class="chip teal">${fmtNum(d.works)} yayın tarandı</span>${d.english ? `<span class="chip blue">EN: ${esc(d.english)}</span>` : ""}${d.excluded.map((n) => `<span class="chip">hariç: ${esc(n)}</span>`).join("")}<span class="faint" data-yok-note></span></div>`
     + (d.items.length ? `<div class="t-advisors">${d.items.map((a, i) => expertCard(a, i, a.same_institution ? `<span class="chip gold">Yazarla aynı kurum</span>` : "")).join("")}</div>
       <p class="faint" style="margin-top:12px">Yalnızca Türkiye adresli yayınlar taranır. Ortak yazarlık gibi çıkar çatışmaları otomatik denetlenmez; adayın profilinden kontrol et.</p>`
       : `<div class="card">${emptyState("users", "Aday bulunamadı", "Başlığı daha genel yaz.")}</div>`);
   hydrateIcons(out);
+  const list = $(".t-advisors", out);
+  if (list) tPager(list, 10, () => enrichYok(out));
 }

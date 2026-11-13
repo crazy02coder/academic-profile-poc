@@ -51,8 +51,8 @@ def _unit_tokens(text: str) -> set[str]:
     return {t for t in _key(text).split() if t not in UNIT_NOISE and len(t) > 1}
 
 
-def _client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=45, follow_redirects=True, headers={
+def _client(timeout: float = 45) -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers={
         "User-Agent": UA, "Accept-Language": "tr", "Accept": "application/json", "Referer": f"{BASE}/"})
 
 
@@ -80,17 +80,41 @@ def people_key(university_label: str, faculty_name: str) -> str:
     return "people2-" + hashlib.sha1(f"{university_label}|{' '.join(sorted(want))}".encode()).hexdigest()[:12]
 
 
+COOLDOWN = 20 * 60  # YÖK yanıt vermez / reddederse bu süre boyunca hiç istek atılmaz
+_PAUSE_FILE = DIR / "_pause.json"
+
+
+def paused_until() -> float:
+    try:
+        return float(json.loads(_PAUSE_FILE.read_text())["until"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0
+
+
+def paused() -> bool:
+    return time.time() < paused_until()
+
+
+def _trip(reason: str) -> None:
+    try:
+        DIR.mkdir(parents=True, exist_ok=True)
+        _PAUSE_FILE.write_text(json.dumps({"until": time.time() + COOLDOWN, "reason": reason}))
+    except OSError:
+        pass
+
+
 async def api(client, path: str, **params):
-    """YÖK API çağrısı: `data` alanını döndürür. Zaman aşımında bir kez daha dener."""
-    for attempt in range(2):
-        try:
-            async with _GATE:
-                r = await client.get(API + path, params=params)
-            break
-        except httpx.TimeoutException:
-            if attempt:
-                raise
-            await asyncio.sleep(1.5)
+    """YÖK API çağrısı: `data` alanını döndürür. Zaman aşımı/engelde sigorta atar; tekrar denemez."""
+    if paused():
+        raise httpx.ConnectError("YÖK Akademik şu an yanıt vermiyor; bir süre sonra yeniden denenecek.")
+    try:
+        async with _GATE:
+            r = await client.get(API + path, params=params)
+    except (httpx.TimeoutException, httpx.ConnectError) as exc:
+        _trip(type(exc).__name__)
+        raise
+    if r.status_code in (403, 429) or r.status_code >= 500:
+        _trip(f"HTTP {r.status_code}")
     r.raise_for_status()
     body = r.json()
     if not body.get("result", True):
@@ -103,7 +127,13 @@ async def universities(client, refresh: bool = False) -> list[dict]:
     cached = None if refresh else _load("universities2", LIST_TTL)
     if cached:
         return cached
-    d = await api(client, "/university/list", page=1, length=1000)
+    try:
+        d = await api(client, "/university/list", page=1, length=1000)
+    except httpx.HTTPError:
+        stale = _load("universities2", 10 ** 10)  # YÖK yanıt vermezse eski liste: sayfa takılmasın
+        if stale:
+            return stale
+        raise
     out = [{"name": clean(u["birimAdi"]), "url": f"{BASE}/universities", "birim_id": u["birimId"],
             "name_en": u.get("birimAdiEn") or "", "city": u.get("ilAdi") or "", "type": u.get("tur") or "",
             "year": u.get("yil"), "rector": u.get("adSoyad") or "", "rector_guid": u.get("authorGuidId") or ""}
@@ -353,13 +383,13 @@ def _upper_tr(text: str) -> str:
     return text.replace("i", "İ").replace("ı", "I").upper()
 
 
-async def search_people(q: str, limit: int = 60) -> list[dict]:
+async def search_people(q: str, limit: int = 60, timeout: float = 45) -> list[dict]:
     """YÖK'te ad araması (API, tarayıcısız). Aynı adlı kişiler seçim için listelenir."""
     query = clean(q)
     key = "search2-" + hashlib.sha1(fold(query).encode()).hexdigest()[:12]
     people = _load(key, 24 * 3600)
     if people is None:
-        async with _client() as client:
+        async with _client(timeout) as client:
             d = await api(client, "/akademisyen/list", page=1, length=max(limit, 60),
                           personelAdiSoyadi=_upper_tr(query), personelAdiSoyadi_matchMode="contains")
         people = [_person(r) for r in (d or {}).get("data") or []]

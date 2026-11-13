@@ -173,6 +173,16 @@ def _aia_chain(host: str, port: int = 443, depth: int = 3) -> list[str]:
     return chain
 
 
+_ROOTS: list = []
+
+
+def _root_subjects() -> list:
+    if not _ROOTS:
+        context = ssl.create_default_context(cafile=certifi.where())
+        _ROOTS.extend(tuple(tuple(x) for x in c["subject"]) for c in context.get_ca_certs())
+    return _ROOTS
+
+
 def augmented_bundle() -> str | None:
     return str(_GLOBAL_BUNDLE) if _GLOBAL_BUNDLE.exists() else None
 
@@ -190,10 +200,13 @@ def repaired_bundle(url: str) -> str:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         roots = Path(certifi.where()).read_text()
         current = _GLOBAL_BUNDLE.read_text() if _GLOBAL_BUNDLE.exists() else ""
+        trusted = _root_subjects()
         extra = []
         for candidate in [*_PEM_CERT.findall(current), *chain]:
             candidate = candidate.strip()
-            if candidate not in roots and candidate not in extra and _intermediate_info(candidate):
+            info = candidate not in roots and candidate not in extra and _intermediate_info(candidate)
+            # Güvenilen bir kökün çapraz imzalı kopyası eklenirse OpenSSL ölü (eski köke giden) yolu seçebiliyor.
+            if info and info.get("subject") not in trusted:
                 extra.append(candidate)
         # Her onarımda kök güveni certifi'den kurulur; geçmişte indirilen kök/leaf kalmaz.
         content = roots + "\n" + "\n".join(extra) + "\n"

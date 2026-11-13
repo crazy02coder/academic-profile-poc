@@ -68,34 +68,52 @@ async def _works(client, query: str, inst_id: str) -> list[dict]:
     return r.json().get("results", [])
 
 
-async def _yok(name: str, institution: str) -> dict:
-    """Unvan, birim ve yönetilen tez sayısı (kişi başına en fazla iki hafif API çağrısı, 30 gün önbellek)."""
-    key = "yok-" + hashlib.sha1(f"{fold(name)}|{fold(institution)}".encode()).hexdigest()[:16]
-    hit = _cached(key, 30 * 86400)
-    if hit is not None:
+def _yok_key(name: str, institution: str) -> str:
+    return "yok-" + hashlib.sha1(f"{fold(name)}|{fold(institution)}".encode()).hexdigest()[:16]
+
+
+def cached_yok(name: str, institution: str) -> dict | None:
+    """Yalnız önbellek: aramalar YÖK'e hiç istek atmaz. Boş sözlük = YÖK'te eşleşmedi (o da önbellekte)."""
+    return _cached(_yok_key(name, institution), 30 * 86400)
+
+
+_ONE = asyncio.Semaphore(1)  # zenginleştirme YÖK'e tek tek gider, asla paralel değil
+
+
+async def lookup(name: str, institution: str, theses: bool = False) -> dict:
+    """Tek kişinin YÖK unvan/birim bilgisi (1 istek); `theses` ile yönetilen tezler (+1 istek).
+    Kullanıcı sayfadaki kartları gördükçe sırayla çağrılır; hata önbelleğe ve sigortaya yazılır."""
+    key = _yok_key(name, institution)
+    hit = cached_yok(name, institution)
+    if hit is not None and (not theses or not hit.get("yok_id") or "theses" in hit):
         return hit
-    out: dict = {}
+    if yokdir.paused():
+        return {"paused": True}
+    out = dict(hit or {})
     try:
-        people = await yokdir.search_people(name, 20)
-        want = _tokens(institution)
-        same = [p for p in people if fold(p["name"]) == fold(name)]
-        match = next((p for p in same if not want or want <= _tokens(p.get("university", "")) or _tokens(p.get("university", "")) <= want), None)
-        if not match and len(same) == 1:  # kurum adı İngilizce geldiyse: aynı adlı tek kişi
-            match = same[0]
-        if match:
-            out = {k: match.get(k) or "" for k in ("title", "university", "faculty", "department", "yok_id", "url", "field")}
-            out["keywords"] = match.get("keywords") or []
-            if match.get("yok_id"):
-                async with yokdir._client() as client:
-                    rows = await yokdir.api(client, f"/tez/yurt/ici/yonetilen/{match['yok_id']}") or []
+        async with _ONE:
+            if hit is None:
+                people = await yokdir.search_people(name, 20, timeout=10)
+                want = _tokens(institution)
+                same = [p for p in people if fold(p["name"]) == fold(name)]
+                match = next((p for p in same if not want or want <= _tokens(p.get("university", "")) or _tokens(p.get("university", "")) <= want), None)
+                if not match and len(same) == 1:  # kurum adı İngilizce geldiyse: aynı adlı tek kişi
+                    match = same[0]
+                if match:
+                    out = {k: match.get(k) or "" for k in ("title", "university", "faculty", "department", "yok_id", "url", "field")}
+                    out["keywords"] = match.get("keywords") or []
+                _store(key, out)  # eşleşmeyen de saklanır: aynı isim için tekrar sorulmaz
+            if theses and out.get("yok_id") and "theses" not in out:
+                async with yokdir._client(10) as client:
+                    rows = await yokdir.api(client, f"/tez/yurt/ici/yonetilen/{out['yok_id']}") or []
                 done = [r for r in rows if "devam" not in fold(r.get("durumAdi") or "")]
                 out["theses"] = len(done)
                 out["theses_phd"] = sum(1 for r in done if "doktora" in fold(r.get("tezTurAd") or ""))
                 out["theses_recent"] = sum(1 for r in done if str(r.get("yil") or "0")[:4].isdigit() and int(str(r.get("yil"))[:4]) >= date.today().year - YEARS)
                 out["thesis_titles"] = [clean_title(r.get("tezAdi") or "") for r in sorted(done, key=lambda r: str(r.get("yil") or ""), reverse=True)[:3]]
+                _store(key, out)
     except (httpx.HTTPError, ValueError, TypeError, KeyError):
-        return {}
-    _store(key, out)
+        return {**out, "paused": yokdir.paused(), "error": True}
     return out
 
 
@@ -141,12 +159,11 @@ async def find(q: str, uni_id: str = "", mode: str = "tez", english: str = "") -
             if topic: p["topics"][topic] = p["topics"].get(topic, 0) + 1
     ranked = sorted(people.values(), key=lambda p: -p["score"])[:40]
     chats = {(fold(c.get("name") or "")): c for c in history.list_all()}
-    top = ranked[:12]
-    enriched = await asyncio.gather(*(_yok(p["name"], max(p["institutions"], key=p["institutions"].get)) for p in top), return_exceptions=True)
     items = []
-    for i, p in enumerate(ranked):
+    for p in ranked:
         institution = max(p["institutions"], key=p["institutions"].get)
-        yok = enriched[i] if i < len(top) and isinstance(enriched[i], dict) else {}
+        cached = cached_yok(p["name"], institution)
+        yok = cached or {}
         chat = chats.get(fold(p["name"]))
         title = yok.get("title") or (chat or {}).get("title") or ""
         active = p["last"] >= now - 2
@@ -155,7 +172,8 @@ async def find(q: str, uni_id: str = "", mode: str = "tez", english: str = "") -
         if mode == "2209" and eligible is False:
             continue
         works_ = sorted(p["works"], key=lambda w: (-w["year"], -w["citations"]))
-        items.append({"openalex": p["id"], "name": yok and p["name"] or p["name"], "orcid": p["orcid"], "institution": yok.get("university") or institution,
+        items.append({"openalex": p["id"], "name": p["name"], "orcid": p["orcid"], "institution": yok.get("university") or institution,
+                      "lookup_institution": institution, "yok_checked": cached is not None,
                       "title": title, "faculty": yok.get("faculty", ""), "department": yok.get("department", ""), "field": yok.get("field", ""),
                       "keywords": yok.get("keywords", []), "yok_url": yok.get("url", ""), "chat_id": (chat or {}).get("id", ""), "job_id": (chat or {}).get("job_id", ""),
                       "works": len(p["works"]), "citations": p["citations"], "last_year": p["last"], "active": active,

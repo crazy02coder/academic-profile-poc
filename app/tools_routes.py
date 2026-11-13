@@ -40,6 +40,14 @@ async def advisor_search(q: str = Query(..., min_length=3, max_length=400), uni:
         raise HTTPException(502, f"Kaynağa ulaşılamadı ({type(exc).__name__}).") from None
 
 
+@router.get("/yok-person")
+async def yok_person(name: str = Query(..., min_length=3, max_length=120), institution: str = Query("", max_length=200), theses: bool = False):
+    """Kartlar ekranda göründükçe tek tek çağrılır (asla toplu değil); önbellekte varsa YÖK'e gidilmez."""
+    out = await advisors.lookup(name, institution, theses)
+    out["paused_until"] = yokdir.paused_until() if out.get("paused") else 0
+    return out
+
+
 # ------------------------------------------------------------------ jüri ve hakem önerici
 async def _experts(topic: str, uni: str = "") -> dict:
     """Uzun başlık/özetle arama: anlamlı kelimeler VEYA ile aranır, en çok kelimeyi karşılayan yayınlar öne gelir."""
@@ -73,7 +81,10 @@ async def jury(job_id: str = Query(..., max_length=64), topic: str = Query(..., 
     coauthors = {fold(c.get("name") or "") for c in (prof.get("yok") or {}).get("collaborators") or []}
     for p in result.get("publications") or []:
         coauthors.update(fold(str(a)) for a in (p.get("authors") or [])[:12])
-    uni = next((u for u in await yokdir.university_list() if fold(u["name"]) == fold(institution)), None)
+    try:
+        uni = next((u for u in await yokdir.university_list() if fold(u["name"]) == fold(institution)), None)
+    except httpx.HTTPError:
+        uni = None
     try:
         wide = await _experts(topic)  # sırayla: OpenAlex eşzamanlı isteklerde 429 dönebiliyor
         local = await _experts(topic, uni["id"]) if uni else {"items": []}
