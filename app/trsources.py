@@ -21,6 +21,7 @@ import httpx
 
 from . import rea, recipes
 from .config import USER_AGENT, chromium_executable
+from .yok_rate import HOOKS as RATE_HOOKS, throttle_sync
 from .sources import record
 from .text import clean, fold, name_in_text, name_tokens, title_key
 
@@ -34,7 +35,7 @@ TRDIZIN_TYPES = {"PAPER": "article", "PROCEEDING": "proceedings", "BOOK": "book"
 
 
 def _client(timeout: float = 25, **kw) -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=timeout, follow_redirects=True,
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=True, event_hooks=RATE_HOOKS,
                              headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, **kw)
 
 
@@ -231,6 +232,7 @@ def _learn_tez_recipe(name: str) -> tuple[dict | None, str]:
     exe = chromium_executable()
     if not exe or not rea.available():
         return None, "REA veya Chromium yok"
+    throttle_sync()  # tarayıcı oturumu da yok.gov.tr bütçesinden düşer
     cap = rea.run_scenario_sync({
         "browser": {"mode": "launch", "executable_path": exe, "headless": True},
         "start_url": {"url": TEZ + "tarama.jsp", "query": []},
@@ -284,7 +286,7 @@ async def tez_works(profile, log) -> tuple[list[dict], dict | None]:
     store = recipes.load(TEZ_DOMAIN)
     recipe = store["replay"].get("tez_search")
     had_recipe = bool(recipe)
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, event_hooks=RATE_HOOKS, headers={"User-Agent": USER_AGENT}) as client:
         advised = await _tez_search(client, recipe, "DanismanAdSoyad", upper) if recipe else None
         if advised is None:
             if recipe:

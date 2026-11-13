@@ -24,6 +24,7 @@ from .config import OPENALEX_PARAMS, ROOT, USER_AGENT
 from .net import augmented_bundle, repaired_bundle, soft_404
 from .discover import registrable
 from .text import fold
+from .yok_rate import is_yok, throttle as yok_throttle
 
 CACHE = ROOT / "data" / "organization-logos"
 _LIMIT = asyncio.Semaphore(3)
@@ -151,6 +152,8 @@ async def read_public(client, url: str, max_bytes: int = MAX_BYTES, *, repair_tl
     for _ in range(5):
         if not await public_url(url):
             raise ValueError("Public http(s) URL required")
+        if is_yok(urlsplit(url).hostname):
+            await yok_throttle()  # YÖK logosu/fotoğrafı da ortak yok.gov.tr bütçesinden düşer
         try:
             async with client.stream("GET", url, follow_redirects=False) as response:
                 if response.is_redirect:

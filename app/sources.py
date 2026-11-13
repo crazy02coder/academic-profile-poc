@@ -16,6 +16,7 @@ from .config import CONTACT_MAIL, OPENALEX_PARAMS, USER_AGENT
 from .discover import Profile, registrable, tr_title
 from .net import fetch_smart, parse, wall_reason
 from .text import clean, doi_key, fold, name_score, title_key
+from .yok_rate import HOOKS as RATE_HOOKS, throttle_sync
 
 OPENALEX = "https://api.openalex.org"
 CROSSREF = "https://api.crossref.org"
@@ -59,7 +60,7 @@ def pub_date(value, year=None) -> str:
 
 
 def _client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=25, follow_redirects=True,
+    return httpx.AsyncClient(timeout=25, follow_redirects=True, event_hooks=RATE_HOOKS,
                              headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
 
 
@@ -706,6 +707,7 @@ def yok_detail_sync(paper: dict, profile_url: str, emit) -> dict:
     kind = context.get("kind") or paper.get("type") or "article"
     labels = {"article": "Makaleler", "proceedings": "Bildiriler", "book": "Kitaplar"}
     label = labels.get(kind, "Makaleler")
+    throttle_sync()
     with StealthBridge() as bridge:
         emit("YÖK: akademisyen profili açılıyor; yayın listesi ve ayrıntı aynı oturumda okunacak.")
         profile = bridge.fetch(profile_url, network_idle=False)

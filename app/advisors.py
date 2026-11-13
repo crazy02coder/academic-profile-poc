@@ -80,20 +80,30 @@ def cached_yok(name: str, institution: str) -> dict | None:
 _ONE = asyncio.Semaphore(1)  # zenginleştirme YÖK'e tek tek gider, asla paralel değil
 
 
-async def lookup(name: str, institution: str, theses: bool = False) -> dict:
+def _initials(name: str) -> bool:
+    """"M. Yilmaz", "A B Kaya": tek harfli ad parçası varsa YÖK "içerir" araması anlamsız ve pahalı."""
+    return any(len(t.strip(".-")) <= 1 for t in name.replace(".", ". ").split() if t.strip(".-"))
+
+
+async def lookup(name: str, institution: str, theses: bool = False, cache_only: bool = False) -> dict:
     """Tek kişinin YÖK unvan/birim bilgisi (1 istek); `theses` ile yönetilen tezler (+1 istek).
-    Kullanıcı sayfadaki kartları gördükçe sırayla çağrılır; hata önbelleğe ve sigortaya yazılır."""
+    Yalnız kullanıcı karttaki düğmeye basınca canlı çağrılır; `cache_only` YÖK'e hiç gitmez."""
     key = _yok_key(name, institution)
     hit = cached_yok(name, institution)
     if hit is not None and (not theses or not hit.get("yok_id") or "theses" in hit):
         return hit
+    if cache_only:
+        return {"cached": False, **(hit or {})}
+    if hit is None and _initials(name):
+        _store(key, {})
+        return {}
     if yokdir.paused():
         return {"paused": True}
     out = dict(hit or {})
     try:
         async with _ONE:
             if hit is None:
-                people = await yokdir.search_people(name, 20, timeout=10)
+                people = await yokdir.search_people(name, 20)
                 want = _tokens(institution)
                 same = [p for p in people if fold(p["name"]) == fold(name)]
                 match = next((p for p in same if not want or want <= _tokens(p.get("university", "")) or _tokens(p.get("university", "")) <= want), None)

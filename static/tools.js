@@ -36,7 +36,7 @@ function mountScore(host, jobId) {
       box.innerHTML = `<section class="card t-hero ${miss ? "" : "ok"}">
           <div class="t-rings">${tRing(d.total, d.need, "toplam")}${tRing(d.after_phd, d.need_after, "doktora sonrası")}</div>
           <div class="t-verdict"><span class="t-badge ${miss ? "no" : "ok"}">${miss ? T_CROSS : T_CHECK}${miss ? `${miss} şart eksik` : "Asgari şartlar sağlanıyor"}</span>
-            <h2>${miss ? "Henüz başvuru eşiğinde değil" : "Puan eşiği aşılmış görünüyor"}</h2>
+            <h2>${d.verified ? "" : "Tahmini: "}${miss ? "Henüz başvuru eşiğinde değil" : "Puan eşiği aşılmış görünüyor"}</h2>
             <p class="muted">${d.phd_year ? `Doktora yılı ${d.phd_year}; bu yıldan itibaren yayınlar “doktora sonrası” sayıldı.` : "Doktora yılı bulunamadı."}</p>
             <ul class="t-checks">${d.checks.map((c) => `<li class="${c.ok ? "ok" : "no"}">${c.ok ? T_CHECK : T_CROSS}<span>${esc(c.label)}</span><b>${tNum(c.have)}${c.ok ? "" : ` · ${tNum(c.need - c.have)} eksik`}</b></li>`).join("")}</ul></div></section>
         <div class="notice warn">${icon("info")}<div><b>Taslak ölçüt tablosu.</b> Puanlar ÜAK'ın genel tablo yapısına göre girildi ve resmî tabloyla doğrulanmadı; temel alanına göre puan ve asgari koşullar değişir. ${d.notes.map(esc).join(" ")}</div></div>
@@ -45,7 +45,7 @@ function mountScore(host, jobId) {
     } else {
       const t = data.tesvik, now = new Date().getFullYear();
       box.innerHTML = `<section class="card t-hero ${t.ok ? "ok" : ""}"><div class="t-rings">${tRing(t.total, t.need, "asgari")}</div>
-          <div class="t-verdict"><span class="t-badge ${t.ok ? "ok" : "no"}">${t.ok ? T_CHECK : T_CROSS}${t.ok ? "30 puan eşiği aşılıyor" : `${tNum(t.need - t.total)} puan eksik`}</span>
+          <div class="t-verdict"><span class="t-badge ${t.ok ? "ok" : "no"}">${t.ok ? T_CHECK : T_CROSS}${t.ok ? `${tNum(t.need)} puan eşiği aşılıyor` : `${tNum(t.need - t.total)} puan eksik`}</span>
             <h2>${t.year} faaliyet yılı tahmini</h2><p class="muted">Yalnız o takvim yılının yayın ve tebliğleri. Üst sınır ${t.max} puan.</p>
             <div class="t-years">${[now - 1, now - 2, now].map((y) => `<button type="button" class="chip ${y === t.year ? "blue" : ""}" data-year="${y}">${y}</button>`).join("")}</div></div></section>
         <div class="notice warn">${icon("info")}<div><b>Taslak hesap.</b> ${t.notes.map(esc).join(" ")} Üniversitenin teşvik komisyonu kararı esastır.</div></div>
@@ -99,7 +99,7 @@ async function viewAdvisor(params) {
   }).catch(() => {});
   const box = $("#aResults");
   if (q.length < 3) {
-    box.innerHTML = `<div class="t-steps">${[["search", "Konunu yaz", "Türkçe yazabilirsin; İngilizce karşılığıyla birlikte aranır."], ["users", "Adaylar sıralanır", "Son 5 yıldaki konu yayınları, atıflar ve güncellik birlikte puanlanır."], ["cap", "YÖK bilgisi eklenir", "Ekrandaki adayların unvanı tek tek gelir; tez geçmişi karttan istenir."]].map(([ic, t, d], i) => `<div class="card t-step"><span>${i + 1}</span>${icon(ic)}<b>${t}</b><small>${d}</small></div>`).join("")}</div>`;
+    box.innerHTML = `<div class="t-steps">${[["search", "Konunu yaz", "Türkçe yazabilirsin; İngilizce karşılığıyla birlikte aranır."], ["users", "Adaylar sıralanır", "Son 5 yıldaki konu yayınları, atıflar ve güncellik birlikte puanlanır."], ["cap", "YÖK bilgisi eklenir", "Daha önce bakılanlar hemen görünür; diğerleri için karttaki düğmeyle YÖK’ten istenir."]].map(([ic, t, d], i) => `<div class="card t-step"><span>${i + 1}</span>${icon(ic)}<b>${t}</b><small>${d}</small></div>`).join("")}</div>`;
     hydrateIcons(box); return;
   }
   box.innerHTML = `<div class="loading-line" role="status"><span class="spinner"></span>Konudaki yayınlar taranıyor…</div>${skeleton(4)}`;
@@ -129,13 +129,17 @@ async function viewAdvisor(params) {
   if (list) tPager(list, 10, () => enrichYok(box));
 }
 
-// ------------------------------------------------------------------ YÖK bilgisi: yalnız ekrandaki kartlar, tek tek; YÖK yanıt vermezse durur
+// ------------------------------------------------------------------ YÖK bilgisi: otomatik istek YOK
+// Sayfa açılınca yalnız yerel önbellek okunur (cached=true, YÖK'e gitmez). Canlı istek yalnız karttaki
+// "YÖK bilgisini getir" / "Tez geçmişi" düğmesine basılınca, o kart için gider.
 const YOK_SEEN = new Map();
 const yokAttrs = (a) => `data-yok-name="${esc(a.name)}" data-yok-inst="${esc(a.lookup_institution || a.institution || "")}"${a.yok_checked || a.title ? ` data-yok-done="1"` : ""}`;
-const yokTitle = (a) => `<span class="t-adv-title">${esc(a.title || (a.yok_checked ? "Unvan YÖK'te eşleşmedi" : "YÖK bilgisi sırada…"))}</span>`;
+const yokTitle = (a) => `<span class="t-adv-title">${esc(a.title || (a.yok_checked ? "Unvan YÖK'te eşleşmedi" : "Unvan bilinmiyor"))}</span>`;
 const thesisChip = (a) => a.theses != null ? `<span class="chip blue" data-yok-thesis-chip>${fmtNum(a.theses)} tez yönetti${a.theses_recent ? ` · ${a.theses_recent} son 5 yılda` : ""}${a.theses_phd ? ` · ${a.theses_phd} doktora` : ""}</span>` : "";
+const yokGetBtn = `<button class="btn sm ghost" type="button" data-yok-get>${icon("download")}YÖK bilgisini getir</button>`;
+const yokThesesBtn = `<button class="btn sm ghost" type="button" data-yok-theses>${icon("cap")}Tez geçmişi</button>`;
 const yokButtons = (a) => `${a.yok_url ? `<a class="btn sm" href="${esc(a.yok_url)}" target="_blank" rel="noopener" data-yok-link>${icon("external")}YÖK Akademik</a>` : ""}
-  ${a.theses == null && (a.yok_url || !a.yok_checked) ? `<button class="btn sm ghost" type="button" data-yok-theses>${icon("cap")}Tez geçmişi</button>` : ""}`;
+  ${!(a.yok_checked || a.title) ? yokGetBtn : a.theses == null && a.yok_url ? yokThesesBtn : ""}`;
 
 function tPager(list, size, onPage) {
   const cards = [...list.children];
@@ -157,6 +161,8 @@ function applyYok(card, d) {
   if (unit && d.university) unit.textContent = [d.university, d.department].filter(Boolean).join(" · ");
   const actions = $(".t-adv-actions", card);
   if (actions && d.url && !$("[data-yok-link]", card)) $("a", actions)?.insertAdjacentHTML("afterend", `<a class="btn sm" href="${esc(d.url)}" target="_blank" rel="noopener" data-yok-link>${icon("external")}YÖK Akademik</a>`);
+  if (!d.error) $("[data-yok-get]", card)?.remove();
+  if (!d.error && d.yok_id && d.theses == null && actions && !$("[data-yok-theses]", card)) actions.insertAdjacentHTML("beforeend", yokThesesBtn);
   if (!d.error && !d.yok_id) $("[data-yok-theses]", card)?.remove();
   if (d.theses != null) {
     $("[data-yok-theses]", card)?.remove();
@@ -168,41 +174,59 @@ function applyYok(card, d) {
   hydrateIcons(card);
 }
 
-const yokPausedNote = (host) => { const n = $("[data-yok-note]", host) || $("[data-yok-note]"); if (n) n.textContent = "YÖK Akademik şu an yanıt vermiyor; unvan bilgisi daha sonra eklenecek."; };
+// Sigorta: kalan süre geri sayımı; süre bitene kadar canlı düğmeler kapalı
+let yokPauseUntil = 0, yokPauseTimer = 0;
+function yokPaused(until) {
+  if (until) yokPauseUntil = Math.max(yokPauseUntil, until * 1000);
+  clearInterval(yokPauseTimer);
+  const tick = () => {
+    const left = Math.max(0, Math.round((yokPauseUntil - Date.now()) / 1000));
+    const text = left ? `YÖK sigortası devrede: ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} sonra yeniden denenebilir.` : "";
+    $$("[data-yok-note]").forEach((n) => { n.textContent = text; });
+    $$("[data-yok-get],[data-yok-theses]").forEach((b) => { b.disabled = !!left; b.title = left ? text : ""; });
+    if (!left) clearInterval(yokPauseTimer);
+  };
+  tick(); if (yokPauseUntil > Date.now()) yokPauseTimer = setInterval(tick, 1000);
+}
 
-async function yokFetch(card, theses = false) {
-  const name = card.dataset.yokName, inst = card.dataset.yokInst || "", key = `${name}|${inst}|${theses ? 1 : 0}`;
+async function yokFetch(card, { theses = false, cached = false } = {}) {
+  const name = card.dataset.yokName, inst = card.dataset.yokInst || "", key = `${name}|${inst}|${theses ? 1 : 0}|${cached ? 1 : 0}`;
   if (YOK_SEEN.has(key)) return YOK_SEEN.get(key);
   let d;
-  try { d = await api(`/api/tools/yok-person?name=${encodeURIComponent(name)}&institution=${encodeURIComponent(inst)}${theses ? "&theses=true" : ""}`, { quiet: true }); }
+  try { d = await api(`/api/tools/yok-person?name=${encodeURIComponent(name)}&institution=${encodeURIComponent(inst)}${theses ? "&theses=true" : ""}${cached ? "&cached=true" : ""}`, { quiet: true }); }
   catch { d = { error: true }; }
-  if (!d.error && !d.paused) YOK_SEEN.set(key, d);
+  if (!d.error && !d.paused && d.cached !== false) YOK_SEEN.set(key, d);
+  if (d.paused_until) yokPaused(d.paused_until);
   return d;
 }
 
 let yokRun = 0;
 async function enrichYok(host) {
-  const run = ++yokRun;  // sayfa değişince önceki sıra durur
+  const run = ++yokRun;
+  api("/api/tools/yok-status", { quiet: true }).then((s) => { if (s.paused) yokPaused(s.paused_until); }).catch(() => {});
   for (const card of $$("[data-yok-name]:not([data-yok-done])", host)) {
     if (run !== yokRun || !card.isConnected) return;
     if (card.hidden) continue;
-    card.classList.add("t-yok-wait");
-    const d = await yokFetch(card);
-    card.classList.remove("t-yok-wait");
-    if (d.paused) { yokPausedNote(host); $$(".t-adv-title", host).forEach((t) => { if (t.textContent === "YÖK bilgisi sırada…") t.textContent = "Unvan sonra eklenecek"; }); return; }
+    const d = await yokFetch(card, { cached: true });  // yalnız yerel önbellek
+    if (d.cached === false || d.error) continue;      // önbellekte yok: düğme kalır, YÖK'e gidilmez
     card.dataset.yokDone = "1";
     applyYok(card, d);
   }
 }
 
 document.addEventListener("click", async (e) => {
-  const btn = e.target.closest("[data-yok-theses]"); if (!btn) return;
+  const btn = e.target.closest("[data-yok-get],[data-yok-theses]"); if (!btn || btn.disabled) return;
   const card = btn.closest("[data-yok-name]"); if (!card) return;
-  btn.disabled = true; btn.textContent = "Tezler alınıyor…";
-  const d = await yokFetch(card, true);
-  if (d.paused || d.error) { btn.disabled = false; btn.textContent = d.paused ? "YÖK yanıt vermiyor" : "Tekrar dene"; if (d.paused) yokPausedNote(card.closest(".t-advisors")?.parentElement || document); return; }
+  const theses = btn.hasAttribute("data-yok-theses"), label = btn.innerHTML;
+  btn.disabled = true; btn.textContent = theses ? "Tezler alınıyor…" : "YÖK'ten alınıyor…";
+  const d = await yokFetch(card, { theses });
+  if (d.paused || d.error) {
+    btn.innerHTML = label; hydrateIcons(btn); btn.disabled = false;
+    if (d.paused) yokPaused(d.paused_until); else toast("YÖK bilgisi alınamadı; biraz sonra yeniden dene.");
+    return;
+  }
   card.dataset.yokDone = "1";
-  if (d.theses == null) { btn.remove(); }
+  if (theses && d.theses == null) btn.remove();
   applyYok(card, d);
 });
 
@@ -330,8 +354,8 @@ async function viewReviewer(params) {
   catch (e) { if (location.hash === hash) out.innerHTML = `<div class="notice err"><div>${esc(e.message)}</div></div>`; return; }
   if (location.hash !== hash) return;
   out.innerHTML = `<div class="src-status"><span class="chip teal">${fmtNum(d.works)} yayın tarandı</span>${d.english ? `<span class="chip blue">EN: ${esc(d.english)}</span>` : ""}${d.excluded.map((n) => `<span class="chip">hariç: ${esc(n)}</span>`).join("")}<span class="faint" data-yok-note></span></div>`
-    + (d.items.length ? `<div class="t-advisors">${d.items.map((a, i) => expertCard(a, i, a.same_institution ? `<span class="chip gold">Yazarla aynı kurum</span>` : "")).join("")}</div>
-      <p class="faint" style="margin-top:12px">Yalnızca Türkiye adresli yayınlar taranır. Ortak yazarlık gibi çıkar çatışmaları otomatik denetlenmez; adayın profilinden kontrol et.</p>`
+    + (d.items.length ? `<div class="t-advisors">${d.items.map((a, i) => expertCard(a, i, `${a.coauthor ? `<span class="chip gold">Yazarlarla ortak yayını var</span>` : ""}${a.same_institution ? `<span class="chip gold">Yazarla aynı kurum</span>` : ""}`)).join("")}</div>
+      <p class="faint" style="margin-top:12px">Yalnızca Türkiye adresli yayınlar taranır. ${d.coauthors_checked ? "Yazarların OpenAlex'teki ortak yazarları işaretlenip sona alındı; yine de adayın profilinden kontrol et." : "Yazarlar OpenAlex'te bulunamadı; ortak yazarlık denetlenemedi."}</p>`
       : `<div class="card">${emptyState("users", "Aday bulunamadı", "Başlığı daha genel yaz.")}</div>`);
   hydrateIcons(out);
   const list = $(".t-advisors", out);

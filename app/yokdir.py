@@ -21,6 +21,7 @@ from .config import ROOT
 from .discover import registrable, tr_title
 from .sources import YOK_TITLES
 from .text import clean, fold, name_score, name_tokens
+from .yok_rate import HOOKS as RATE_HOOKS, RATE_GAP, RATE_PER_MIN, throttle, throttle_sync  # noqa: F401  tüm yok.gov.tr istekleri
 
 BASE = "https://akademik.yok.gov.tr"
 API = f"{BASE}/api"
@@ -52,7 +53,7 @@ def _unit_tokens(text: str) -> set[str]:
 
 
 def _client(timeout: float = 45) -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers={
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=True, event_hooks=RATE_HOOKS, headers={
         "User-Agent": UA, "Accept-Language": "tr", "Accept": "application/json", "Referer": f"{BASE}/"})
 
 
