@@ -185,3 +185,72 @@ function renderAgenda(host) {
     if (e.target.closest("[data-ag-read]")) { const c = cats.find((x) => x.id === cat); if (c) openReadingShelf(c.id, c.label); }
   };
 }
+
+// ------------------------------------------------------------------ jüri ve hakem önerici
+const expertCard = (a, i, extra = "") => `<article class="card t-adv"><div class="t-adv-rank">${i + 1}</div>${avatar(a.name, a.job_id ? `/api/jobs/${encodeURIComponent(a.job_id)}/photo?v=2` : "")}
+    <div class="t-adv-main"><div class="t-adv-head"><div><span class="t-adv-title">${esc(a.title || "Unvan YÖK'te eşleşmedi")}</span><h3>${esc(a.name)}</h3><p>${esc([a.institution, a.department].filter(Boolean).join(" · "))}</p></div>
+        <div class="t-match"><b>%${a.match}</b><span>uyum</span>${tBar(a.match, 100)}</div></div>
+      <div class="chips">${extra}<span class="chip">${fmtNum(a.works)} konu yayını</span>${a.active ? `<span class="chip teal">Aktif · ${a.last_year}</span>` : `<span class="chip">son yayın ${a.last_year}</span>`}${a.theses != null ? `<span class="chip blue">${fmtNum(a.theses)} tez yönetti</span>` : ""}</div>
+      ${a.samples?.length ? `<ul class="t-adv-works">${a.samples.slice(0, 2).map((w) => `<li>${w.doi ? `<a href="https://doi.org/${esc(w.doi)}" target="_blank" rel="noopener">${esc(w.title)}</a>` : esc(w.title)}<small>${w.year}</small></li>`).join("")}</ul>` : ""}
+      <div class="t-adv-actions"><a class="btn sm primary" href="${a.chat_id ? `#/profil/${encodeURIComponent(a.chat_id)}` : `#/akademisyenler?q=${encodeURIComponent(a.name)}`}" data-close-modal>${icon("user")}${a.chat_id ? "Profili aç" : "Profili incele"}</a>
+        ${a.yok_url ? `<a class="btn sm" href="${esc(a.yok_url)}" target="_blank" rel="noopener">${icon("external")}YÖK Akademik</a>` : ""}</div></div></article>`;
+
+// Akademisyen profili → Tezler sekmesi: "Jüri öner"
+function openJury() {
+  const r = S.result; if (!r?.job_id) return;
+  const y = r.profile?.yok || {}, rows = [...((y.sections || {}).theses || []), ...((y.tez_merkezi || {}).advised || [])];
+  const titles = [...new Set(rows.map((t) => String(t["Tez Adı"] || t.title || "").trim()).filter((t) => t.length > 8))].slice(0, 60);
+  openModal(`<div class="reading-modal"><header class="reading-head"><span class="reading-ic">${icon("users")}</span><div><h2>Jüri öner</h2><p class="muted">Tez konusunda yayın yapan öğretim üyeleri; ${esc(r.profile?.name || "danışman")} listeden çıkarılır.</p></div></header>
+    <form id="juryForm" class="t-jury-form">${titles.length ? `<select class="select" id="juryPick" aria-label="Tez seç"><option value="">Yönettiği tezlerden seç…</option>${titles.map((t) => `<option>${esc(t)}</option>`).join("")}</select>` : ""}
+      <div class="t-jury-row"><div class="input">${icon("search")}<input id="juryTopic" maxlength="400" placeholder="Tez başlığı ya da konusu"></div><button class="btn primary" type="submit">Jüri öner</button></div></form>
+    <div id="juryOut"><p class="faint">Bir tez seç ya da konuyu yaz. Doktora jürilerinde kurum dışından üye gerektiği için öneriler kurum içi ve kurum dışı olarak ayrılır.</p></div></div>`);
+  const pick = $("#juryPick"), topic = $("#juryTopic"), out = $("#juryOut");
+  if (pick) pick.onchange = () => { if (pick.value) { topic.value = pick.value; $("#juryForm").requestSubmit(); } };
+  $("#juryForm").onsubmit = async (e) => {
+    e.preventDefault(); const q = topic.value.trim(); if (q.length < 5) return;
+    out.innerHTML = `<div class="loading-line"><span class="spinner"></span>Konuda yayın yapanlar taranıyor…</div>${skeleton(3)}`;
+    try {
+      const d = await api(`/api/tools/jury?job_id=${encodeURIComponent(r.job_id)}&topic=${encodeURIComponent(q)}`);
+      if (!out.isConnected) return;
+      const flag = (a) => a.coauthor ? `<span class="chip gold">Danışmanla ortak yayını var</span>` : "";
+      const group = (title, items, empty) => `<div class="m-h">${title} <span class="count">${items.length}</span></div>${items.length ? `<div class="t-advisors">${items.map((a, i) => expertCard(a, i, flag(a))).join("")}</div>` : `<p class="faint">${empty}</p>`}`;
+      out.innerHTML = `<div class="src-status"><span class="chip teal">${fmtNum(d.works)} yayın tarandı</span>${d.english ? `<span class="chip blue">EN: ${esc(d.english)}</span>` : ""}</div>
+        ${group(`Kurum içi · ${esc(d.institution || "")}`, d.inside, "Bu konuda aynı üniversiteden aday bulunamadı.")}${group("Kurum dışı", d.outside, "Kurum dışından aday bulunamadı; konuyu daha genel yaz.")}
+        <p class="faint">Öneriler yayın geçmişine dayanır; jüri koşulları (unvan, kurum dışı üye sayısı) için enstitü yönetmeliğine bak.</p>`;
+      hydrateIcons(out);
+    } catch (err) { if (out.isConnected) out.innerHTML = `<div class="notice err"><div>${esc(err.message)}</div></div>`; }
+  };
+}
+document.addEventListener("click", (e) => {
+  if (e.target.closest("[data-jury]")) { e.preventDefault(); openJury(); return; }
+  if (e.target.closest("[data-close-modal]") && typeof closeModal === "function") closeModal();
+});
+
+// Konu bul → "Hakem bul"
+async function viewReviewer(params) {
+  setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Konu bul", href: "#/ara" }, { label: "Hakem bul" }]);
+  const q = params.get("q") || "", exclude = params.get("exclude") || "", inst = params.get("inst") || "";
+  setView(`<div class="section-head"><div><h1>Hakem bul</h1><p>Makalenin başlığını ya da özetini yaz; konuda yayın yapan akademisyenleri sıralayalım. Yazarlar listeden çıkarılır.</p></div><a class="btn sm" href="#/ara">${icon("arrow")}Konu bul</a></div>
+    <form id="rvForm" class="card t-form"><textarea id="rvQ" rows="3" maxlength="400" placeholder="Makale başlığı ya da özetin ilk cümleleri">${esc(q)}</textarea>
+      <div class="t-form-row"><div class="input" style="flex:2;min-width:240px">${icon("users")}<input id="rvEx" maxlength="400" placeholder="Yazarlar (virgülle) — listeden çıkarılır" value="${esc(exclude)}"></div>
+        <div class="input" style="flex:1;min-width:200px">${icon("building")}<input id="rvInst" maxlength="160" placeholder="Yazarın kurumu (isteğe bağlı)" value="${esc(inst)}"></div>
+        <button class="btn primary" type="submit">${icon("search")}Hakem öner</button></div></form>
+    <div id="rvOut"></div>`);
+  $("#rvForm").onsubmit = (e) => {
+    e.preventDefault(); const v = $("#rvQ").value.trim(); if (v.length < 10) { toast("En az 10 karakterlik bir başlık ya da özet yaz."); return; }
+    const hash = `#/hakem?q=${encodeURIComponent(v)}&exclude=${encodeURIComponent($("#rvEx").value.trim())}&inst=${encodeURIComponent($("#rvInst").value.trim())}`;
+    if (location.hash === hash) viewReviewer(new URLSearchParams(hash.split("?")[1])); else location.hash = hash;
+  };
+  const out = $("#rvOut"), hash = location.hash;
+  if (q.length < 10) return;
+  out.innerHTML = `<div class="loading-line" role="status"><span class="spinner"></span>Konuda yayın yapanlar taranıyor…</div>${skeleton(4)}`;
+  let d;
+  try { d = await api(`/api/tools/reviewers?q=${encodeURIComponent(q)}&exclude=${encodeURIComponent(exclude)}&institution=${encodeURIComponent(inst)}`); }
+  catch (e) { if (location.hash === hash) out.innerHTML = `<div class="notice err"><div>${esc(e.message)}</div></div>`; return; }
+  if (location.hash !== hash) return;
+  out.innerHTML = `<div class="src-status"><span class="chip teal">${fmtNum(d.works)} yayın tarandı</span>${d.english ? `<span class="chip blue">EN: ${esc(d.english)}</span>` : ""}${d.excluded.map((n) => `<span class="chip">hariç: ${esc(n)}</span>`).join("")}</div>`
+    + (d.items.length ? `<div class="t-advisors">${d.items.map((a, i) => expertCard(a, i, a.same_institution ? `<span class="chip gold">Yazarla aynı kurum</span>` : "")).join("")}</div>
+      <p class="faint" style="margin-top:12px">Yalnızca Türkiye adresli yayınlar taranır. Ortak yazarlık gibi çıkar çatışmaları otomatik denetlenmez; adayın profilinden kontrol et.</p>`
+      : `<div class="card">${emptyState("users", "Aday bulunamadı", "Başlığı daha genel yaz.")}</div>`);
+  hydrateIcons(out);
+}

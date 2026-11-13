@@ -90,3 +90,7 @@
 .ag-paper { display: grid; gap: 2px; padding: 9px 10px; border: 0; border-radius: 10px; background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
 .ag-paper:hover { background: var(--surface-2); } .ag-paper b { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ag-paper small { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* jüri */
+.t-jury-form { display: grid; gap: 10px; margin: 6px 0 14px; } .t-jury-row { display: flex; gap: 8px; } .t-jury-row .input { flex: 1; }
+#juryOut .t-advisors { margin-top: 8px; } #juryOut .m-h { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+.t-jury-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }

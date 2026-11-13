@@ -3511,6 +3511,7 @@ function renderProfile(r, chat) {
 
     <div class="panel" data-panel="courses"><div class="card card-pad">${sectionView(sec.courses)}</div></div>
     <div class="panel" data-panel="theses"><div class="stack">
+      <div class="card card-pad t-jury-bar"><div><b>Jüri öner</b><p class="muted" style="margin:2px 0 0">Bir tez seç; konusunda yayın yapan kurum içi ve kurum dışı öğretim üyelerini önerelim.</p></div><button class="btn primary" type="button" data-jury>${icon("users")}Jüri öner</button></div>
       ${tez.own?.length ? `<div class="card card-pad"><div class="card-title">${icon("cap")}Kendi tezleri<span class="spacer"></span><span class="badge tez">Tez Merkezi</span></div>${thesisList(tez.own, false)}</div>` : ""}
       ${tez.advised?.length ? `<div class="card card-pad"><div class="card-title">${icon("users")}Danışmanlık yaptığı tezler<span class="spacer"></span><span class="count">${tez.advised.length}</span><span class="badge tez">Tez Merkezi</span></div>${thesisList(tez.advised, true)}</div>`
         : `<div class="card card-pad"><div class="card-title">${icon("users")}Yönetilen tezler<span class="spacer"></span><span class="badge yok">YÖK</span></div>${sectionView(sec.theses)}</div>`}
@@ -4194,7 +4195,7 @@ async function viewSearch(q, requestedSources = "") {
   if (!Array.isArray(selected) || !selected.filter((key) => TOPIC_SOURCES.includes(key)).length) selected = [...TOPIC_SOURCES];
   selected = selected.filter((key) => TOPIC_SOURCES.includes(key));
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Konu bul" }]);
-  setView(`<div class="section-head"><div><h1>Konu bul</h1><p>${q ? "OpenAlex, Crossref, Semantic Scholar, TR Dizin, OpenAIRE ve WoS kayıtları kaynaklarıyla birleştirilir." : "Bir konu yaz; Türkçe yazdığın konu İngilizceye de çevrilerek bütün kaynaklarda aranır, yayınlar tek listede gelir."}</p></div>${q ? `<a class="btn sm" href="#/ara">${icon("arrow")}Yeni arama</a>` : ""}</div>
+  setView(`<div class="section-head"><div><h1>Konu bul</h1><p>${q ? "OpenAlex, Crossref, Semantic Scholar, TR Dizin, OpenAIRE ve WoS kayıtları kaynaklarıyla birleştirilir." : "Bir konu yaz; Türkçe yazdığın konu İngilizceye de çevrilerek bütün kaynaklarda aranır, yayınlar tek listede gelir."}</p></div><div class="chips"><a class="btn sm" href="#/hakem">${icon("users")}Hakem bul</a>${q ? `<a class="btn sm" href="#/ara">${icon("arrow")}Yeni arama</a>` : ""}</div></div>
     <form class="card quick-search" id="searchForm" style="margin-top:0">
       <div class="input">${icon("search")}<input id="sInput" value="${esc(q)}" placeholder="ör. göğüs hastalıkları, makine öğrenmesi, deprem mühendisliği"></div>
       ${sourcePicker("topicSourcePicker", TOPIC_SOURCES, selected)}<button class="btn primary" type="submit">Ara</button></form>
@@ -4622,7 +4623,7 @@ function route() {
     location.replace(`#/kutuphane?tab=${parts[0] === "favori-makaleler" ? "papers" : "people"}`); return undefined;
   }
   setNav({ akademisyenler: "akademisyenler", profil: "akademisyenler", is: "akademisyenler", universiteler: "universiteler", universite: "universiteler", kurum: "universiteler",
-    firmalar: "firmalar", firma: "firmalar", ara: "ara", kutuphane: "kutuphane", sistem: "sistem", danisman: "danisman" }[parts[0]] || (parts.length ? "" : "home"));
+    firmalar: "firmalar", firma: "firmalar", ara: "ara", kutuphane: "kutuphane", sistem: "sistem", danisman: "danisman", hakem: "ara" }[parts[0]] || (parts.length ? "" : "home"));
   switch (parts[0]) {
     case "ara": return viewSearch(params.get("q") || "", params.get("sources") || "");
     case "kurum": return viewDirectory(params.get("u") || "");
@@ -4637,6 +4638,7 @@ function route() {
     case "firma": return viewFirm(parts[1]);
     case "puan": location.replace(parts[1] ? `#/profil/${parts[1]}` : "#/akademisyenler"); return undefined;
     case "danisman": return viewAdvisor(params);
+    case "hakem": return viewReviewer(params);
     default: return viewHome();
   }
 }
