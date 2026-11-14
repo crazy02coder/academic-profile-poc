@@ -280,7 +280,21 @@ async def _tez_detail(client, card: dict, sem) -> dict:
     return card
 
 
-async def tez_works(profile, log) -> tuple[list[dict], dict | None]:
+async def tez_details(cards: list[dict], name: str = "") -> list[dict]:
+    """Kartların özet/danışman/yer ayrıntısı (tezBilgiDetay). Profil akışını bekletmemek için ayrı, sonradan çalışır.
+    Ad verilirse danışman alanında o ad geçmeyen danışmanlık kartları elenir."""
+    if not cards:
+        return cards
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, event_hooks=RATE_HOOKS, headers={"User-Agent": USER_AGENT}) as client:
+        sem = asyncio.Semaphore(3)
+        done = await asyncio.gather(*(_tez_detail(client, c, sem) for c in cards[:60]), return_exceptions=True)
+    out = [d if isinstance(d, dict) else c for d, c in zip(done, cards)] + cards[60:]
+    if name:
+        out = [c for c in out if c.get("own") or not c.get("advisor") or name_in_text(name, c["advisor"])]
+    return out
+
+
+async def tez_works(profile, log, details: bool = True) -> tuple[list[dict], dict | None]:
     name = profile.name or profile.query_name
     upper = _upper_tr(name)
     store = recipes.load(TEZ_DOMAIN)
@@ -311,20 +325,20 @@ async def tez_works(profile, log) -> tuple[list[dict], dict | None]:
         own = await _tez_search(client, recipe, "AdSoyad", upper) or []
         recipes.save(store)
         own = [c for c in own if _same_person(name, "", c["author"])]
-        sem = asyncio.Semaphore(5)
-        details = await asyncio.gather(*(_tez_detail(client, c, sem) for c in (own + advised)[:60]), return_exceptions=True)
-    details = [d for d in details if isinstance(d, dict)]
-    own = [d for d in details if d in own]
-    # Danışman alanında kişi gerçekten geçmeli (aynı adlı başka hocanın tezleri elenir)
-    advised = [d for d in details if d not in own and (not d.get("advisor") or name_in_text(name, d["advisor"]))]
-    profile.yok.setdefault("tez_merkezi", {"own": own, "advised": advised})
+    for c in own:
+        c["own"] = True
+    if details:
+        # Danışman alanında kişi gerçekten geçmeli (aynı adlı başka hocanın tezleri elenir)
+        cards = await tez_details(own + advised, name)
+        own, advised = [c for c in cards if c.get("own")], [c for c in cards if not c.get("own")]
+    profile.yok.setdefault("tez_merkezi", {"own": own, "advised": advised, **({} if details else {"details_pending": True})})
     records = [record("tez", source_id=c["no"], title=c["title"], year=c["year"], authors=[c["author"]],
                       venue=c["university"], abstract=c.get("abstract_tr") or c.get("abstract_en") or "",
                       url=c["pdf"] or TEZ + "tarama.jsp", type="dissertation", labels=[c["type"]] if c["type"] else [])
                for c in own]
     with_abs = sum(bool(c.get("abstract_tr") or c.get("abstract_en")) for c in advised)
     await log("publications", "running", f"YÖK Tez Merkezi: kendi tezi {len(own)}, danışmanlık yaptığı {len(advised)} tez "
-                                         f"({with_abs} özetli).")
+                                         + (f"({with_abs} özetli)." if details else "(özetler arka planda ayrıca çekilecek)."))
     return records, {"own": len(own), "advised": len(advised)}
 
 

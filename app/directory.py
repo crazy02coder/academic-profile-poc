@@ -110,6 +110,17 @@ async def _page(url: str):
     return parse(page.html, page.url or url), page.url or url
 
 
+# Kart/buton yazıları bağlantı adına karışır ("Detaylı Bilgi MÜHENDİSLİK FAKÜLTESİ", "Computer Engineering Read more").
+CTA_RX = re.compile(r"^(?:(?:detayl[ıi] bilgi|daha fazla(?: bilgi)?|devam[ıi]n[ıi] oku|devam[ıi]|incele|t[ıi]klay[ıi]n[ıi]z|git|"
+                    r"read more|learn more|more info|more|details?|visit|explore)\b[\s:»›>-]*)+"
+                    r"|(?:[\s:»›>-]*\b(?:detayl[ıi] bilgi|daha fazla(?: bilgi)?|devam[ıi]n[ıi] oku|devam[ıi]|incele|"
+                    r"read more|learn more|more info|details?)\s*[»›>]*)+$", re.I)
+
+
+def strip_cta(text: str) -> str:
+    return clean(CTA_RX.sub(" ", text or "")) or clean(text or "")
+
+
 def _anchors(sel, base: str) -> list[dict]:
     root = registrable(urlparse(base).hostname or "")
     seen, out = set(), []
@@ -119,7 +130,7 @@ def _anchors(sel, base: str) -> list[dict]:
             continue
         url = urldefrag(urljoin(base, href))[0].rstrip("/")
         host = urlparse(url).hostname or ""
-        text = clean(a.get_all_text(separator=" ")) or clean(a.attrib.get("title", ""))
+        text = strip_cta(clean(a.get_all_text(separator=" ")) or clean(a.attrib.get("title", "")))
         if not url.startswith("http") or registrable(host) != root or not (3 <= len(text) <= 90):
             continue
         key = (fold(text), url)
@@ -165,7 +176,7 @@ async def _llm_pick(anchors: list[dict], kind: str, context: str, llm) -> list[d
         f"geçiyorsa birim ana sayfasına gideni seç. Birim adını düzgün Türkçe yaz.\n\n{lines}",
         {"type": "object", "properties": {"items": {"type": "array", "items": {
             "type": "object", "properties": {"i": {"type": "integer"}, "name": {"type": "string"}},
-            "required": ["i", "name"]}}}, "required": ["items"]}, timeout=60, fast=True)
+            "required": ["i", "name"]}}}, "required": ["items"]}, timeout=25, fast=True)
     if not data or not isinstance(data.get("items"), list):
         return None
     out, seen = [], set()
@@ -193,7 +204,9 @@ async def faculties(url: str, llm=None, refresh: bool = False) -> dict:
     domain = registrable(host)
     store = load(domain)
     if not refresh and _fresh(store.get("faculties")):
-        return {"domain": domain, "name": store["name"], "home": store["home"], **store["faculties"]}
+        cached = store["faculties"]
+        items = [{**x, "name": strip_cta(x.get("name", ""))} for x in cached.get("items") or []]
+        return {"domain": domain, "name": store["name"], "home": store["home"], **cached, "items": items}
     home = f"{urlparse(url).scheme or 'https'}://{host}"
     pages = await asyncio.gather(_page(url), *(() if url.rstrip("/") == home else (_page(home),)),
                                  return_exceptions=True)
@@ -217,15 +230,34 @@ async def faculties(url: str, llm=None, refresh: bool = False) -> dict:
     return {"domain": domain, "name": store["name"], "home": home, **store["faculties"]}
 
 
+_NEWS_URL = re.compile(r"/(?:notice|duyuru|duyurular|haber|haberler|news|announcements?|etkinlik|events?|blog)s?(?:/|$)", re.I)
+
+
+def _dept_like(anchors: list[dict]) -> list[dict]:
+    """Adı gerçekten bölüm/program adı olan bağlantılar (duyuru başlığı, ofis, menü değil). Aynı bölüm birden çok
+    kez geçiyorsa bölümün kendi sitesine/ana sayfasına giden (en kısa yol) tutulur."""
+    from .unit_names import key, looks_like_department
+    best: dict[str, dict] = {}
+    for a in anchors:
+        if _NEWS_URL.search(urlparse(a["url"]).path) or NOISE_RX.search(a["url"]) or not looks_like_department(a["name"]):
+            continue
+        k = key(a["name"])
+        if k not in best or len(urlparse(a["url"]).path) < len(urlparse(best[k]["url"]).path):
+            best[k] = a
+    return list(best.values())
+
+
 async def departments(unit_url: str, llm=None, refresh: bool = False) -> dict:
     domain = registrable(urlparse(unit_url).hostname or "")
     store = load(domain)
     unit = store["units"].setdefault(unit_url, {})
-    if not refresh and _fresh(unit.get("departments")):
-        return unit["departments"]
+    cached = unit.get("departments")
+    # Eski kural seçimi duyuru başlıklarını bölüm sanıyordu: sürümsüz "kural" kayıtları yeniden seçilir.
+    if not refresh and _fresh(cached) and (cached.get("method") != "kural" or cached.get("rule") == 2):
+        return cached
     sel, base = await _page(unit_url)
     anchors = _anchors(sel, base)
-    if len(_rule_pick(anchors, DEPT_RX)) < 3:
+    if len(_dept_like(anchors)) < 3:
         anchors.extend(await _hub_anchors(anchors, DEPT_RX))
     # Bölüm bağlantıları fakültenin altında olmalı; site geneli menüyü dışarıda bırak
     fac_host, fac_path = urlparse(base).hostname, urlparse(base).path.rstrip("/")
@@ -233,14 +265,18 @@ async def departments(unit_url: str, llm=None, refresh: bool = False) -> dict:
         local = [a for a in anchors if urlparse(a["url"]).path.startswith(fac_path + "/")]
     else:  # muhendislik.site.edu.tr → aynı alt alan adı
         local = [a for a in anchors if urlparse(a["url"]).hostname == fac_host]
-    # Bölümler ayrı alt alan adlarında olabilir (mf.site → mfcs.site, aerospace.site): yerel bağlantılarda
-    # bölüme benzeyen yoksa fakülte sayfasındaki tüm bağlantılar aday olur.
-    pool = local if len(_rule_pick(local, DEPT_RX)) >= 2 else anchors
-    items = await _llm_pick(pool, "department", _site_name(sel) or unit_url, llm)
+    # Bölümler ayrı alt alan adlarında olabilir (eng.site → cse-eng.site, me-eng.site): yerel bağlantılarda gerçek
+    # bölüm adı yoksa (duyuru başlıkları sayılmaz) fakülte sayfasındaki tüm bağlantılar aday olur.
+    valid_local, valid_all = _dept_like(local), _dept_like(anchors)
+    pool = local if len(valid_local) >= 2 else anchors
+    try:
+        items = await _llm_pick(pool, "department", _site_name(sel) or unit_url, llm)
+    except Exception:  # noqa: BLE001 — model yanıt vermezse kural seçimi
+        items = None
     method = "gemini"
     if not items:
-        items, method = _rule_pick(pool, DEPT_RX), "kural"
-    unit["departments"] = _entry(items, method=method)
+        items, method = (valid_local if len(valid_local) >= 2 else valid_all), "kural"
+    unit["departments"] = _entry(items, method=method, rule=2)
     save(store)
     return unit["departments"]
 

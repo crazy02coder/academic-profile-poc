@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import io
@@ -163,15 +164,39 @@ def _manifest(uid: str, faculty: str, department: str) -> dict:
     return result
 
 
+# İngilizce yayın yapan siteler (Koç, Boğaziçi, Sabancı…): birim adlarının kelime kelime Türkçe karşılığı.
+# Yalnız resmî ad çevirisi; programlar arasında bulanık eşleştirme yapmaz. Uzun ifadeler önce uygulanır.
+_EN_TR = {
+    "arts and sciences": "fen edebiyat", "business administration": "isletme", "international relations": "uluslararasi iliskiler",
+    "political science and public administration": "siyaset bilimi kamu yonetimi", "public administration": "kamu yonetimi",
+    "political science": "siyaset bilimi", "molecular biology": "molekuler biyoloji", "materials science": "malzeme bilimi",
+    "computer science": "bilgisayar bilimleri", "foreign language education": "yabanci diller egitimi",
+    "economics": "iktisat", "economy": "iktisat", "engineering": "muhendislik", "computer": "bilgisayar",
+    "mechanical": "makine", "electrical": "elektrik", "electronics": "elektronik", "electronic": "elektronik",
+    "industrial": "endustri", "civil": "insaat", "chemical": "kimya", "chemistry": "kimya", "biological": "biyoloji",
+    "biology": "biyoloji", "biomedical": "biyomedikal", "physics": "fizik", "mathematics": "matematik",
+    "statistics": "istatistik", "genetics": "genetik", "software": "yazilim", "environmental": "cevre",
+    "aerospace": "havacilik ve uzay", "mechatronics": "mekatronik", "metallurgical": "metalurji", "materials": "malzeme",
+    "law": "hukuk", "medicine": "tip", "nursing": "hemsirelik", "dentistry": "dis hekimligi", "pharmacy": "eczacilik",
+    "psychology": "psikoloji", "sociology": "sosyoloji", "history": "tarih", "philosophy": "felsefe",
+    "archaeology": "arkeoloji", "architecture": "mimarlik", "education": "egitim", "sciences": "bilimleri",
+    "science": "bilimleri", "social": "sosyal", "humanities": "insani bilimler", "arts": "sanat", "design": "tasarim",
+    "media": "medya", "communication": "iletisim", "management": "yonetim", "finance": "finans", "tourism": "turizm",
+}
+_EN_RX = re.compile(r"\b(?:" + "|".join(sorted(map(re.escape, _EN_TR), key=len, reverse=True)) + r")\b")
+# Aynı kökün ekli biçimleri tek biçime: mühendisliği/mühendislik, bilimi/bilimleri, eğitimi/eğitim.
+_TR_STEM = ((r"\bmuhendisligi\b", "muhendislik"), (r"\bbilimi\b", "bilimleri"), (r"\begitimi\b", "egitim"),
+            (r"\bmimarligi\b", "mimarlik"), (r"\byonetimi\b", "yonetim"), (r"\btasarimi\b", "tasarim"))
+
+
+@functools.lru_cache(maxsize=20000)
 def _unit(value: str) -> str:
-    value = fold(value)
-    # Official sites may expose an English home menu and Turkish faculty pages.
-    # These are label translations, never a fuzzy match between programmes.
-    for english, turkish in (("faculty of engineering", "muhendislik fakultesi"),
-                             ("software engineering", "yazilim muhendisligi"),
-                             ("computer engineering", "bilgisayar muhendisligi")):
-        value = re.sub(r"\b" + english + r"\b", turkish, value)
-    return clean(re.sub(r"\b(?:fakultesi|fakulte|bolumu|bolum|anabilim dali|programi|pr|faculty|department|of|ingilizce|turkce|english|turkish)\b", " ", value))
+    value = fold(value).replace("-", " ")
+    value = _EN_RX.sub(lambda m: _EN_TR[m.group(0)], value)
+    for rx, stem in _TR_STEM:
+        value = re.sub(rx, stem, value)
+    return clean(re.sub(r"\b(?:fakultesi|fakulte|bolumu|bolum|anabilim dali|programi|pr|faculty|department|college|school"
+                        r"|of|and|ve|the|ingilizce|turkce|english|turkish)\b", " ", value))
 
 
 def _language(value: str) -> str:
@@ -277,10 +302,124 @@ def _slugify(name: str) -> str:
 
 
 _PATTERNS = CACHE / "_course_patterns.json"
+# Ders kataloğu sistemleri (bölüm sitesi ya da dosya sunucusu değil): obs., meobs., sis., ects., bologna., bilgipaketi. …
+_CATALOG_HOST = re.compile(r"(?:[a-z]*ects|[a-z]*obs|oibs|ubs|ebs|sis|bologna|bilgipaketi|akts|katalog|catalog|ders|course)[a-z0-9-]*\.", re.I)
+# Lisans ders planı olmayan sayfalar (çift anadal, yandal, lisansüstü, seçmeli listesi, Erasmus): tarif olarak öğrenilmez.
+_NOT_PLAN = re.compile(r"\bcap\b|cift ana ?dal|\byap\b|yan ?dal|double major|\bminor\b|lisansustu|yuksek lisans|doktora"
+                       r"|graduate|master|\bphd\b|secmeli|elective|erasmus")
 
 
-def _learn_pattern(uid: str, department: str, url: str):
-    """Ders tablosu bulunan adresin yolunda bölüm adı geçiyorsa kalıp olarak sakla:
+def _store() -> dict:
+    try:
+        data = json.loads(_PATTERNS.read_text()) if _PATTERNS.exists() else {}
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _recipes(uid: str, data: dict | None = None) -> dict:
+    """Üniversitenin öğrenilmiş tarifleri: {anahtar: {"h": tutan bölüm, "m": tutmayan bölüm, …}}. Anahtarlar:
+    "dept_site" (dersler bölümün kendi sitesinden bulunuyor), "dept_path:/yol" (bölüm sitesine göre yol),
+    "fac_path:/yol" (fakülte sitesine göre yol), "hub:adres" (ortak program listesi / katalog girişi),
+    "pattern" (adres kalıbı: …/bolum/{}/mufredat). Eski kayıt biçimi ilk okumada çevrilir."""
+    entry = (data if data is not None else _store()).get(uid) or {}
+    recs = entry.get("recipes")
+    if recs is None:
+        recs = {}
+        for hub in entry.get("hubs") or []:
+            host = urlsplit(hub).hostname or ""
+            if _CATALOG_HOST.match(host) or host in {registrable(host), "www." + registrable(host)}:
+                recs[f"hub:{hub}"] = {"h": 2, "m": 0}  # fakülteye özel siteler ortak liste sayılmaz
+        if "{}" in (entry.get("path") or ""):
+            recs["pattern"] = {"h": 2, "m": 0, "base": entry.get("base", ""), "path": entry["path"], "query": entry.get("query", "")}
+    return recs
+
+
+def _trusted(rec: dict) -> bool:
+    """Onaylı tarif: en az iki bölümde tuttu ve tutmadığı bölüm tuttuğundan çok değil."""
+    return rec.get("h", 0) >= 2 and rec.get("h", 0) >= rec.get("m", 0)
+
+
+def _write_store(data: dict) -> None:
+    try:
+        _PATTERNS.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _PATTERNS.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False))
+        tmp.replace(_PATTERNS)
+    except OSError:
+        pass
+
+
+def _note(uid: str, key: str, ok: bool, who: str = "", fac: str = "", **extra) -> None:
+    """Tarif denemesinin sonucu. Aynı bölüm iki kez sayılmaz. İki bölümde tutan tarif onaylanır; tutmadığı bölüm
+    sayısı tuttuğundan çok olan (en az 2) silinir. Yeni tarif yalnız başarıdan doğar (çöp yol tarif olamaz).
+    Yol tarifleri fakülteye göre izlenir: hiç tutmadığı bir fakültede tutmayan yol silinmez, yalnız o fakültede
+    bir daha denenmez (mühendislikte çalışan yol mimarlıkta tutmadı diye kaybolmaz)."""
+    data = _store()
+    entry = data.setdefault(uid, {})
+    recs = _recipes(uid, data)
+    rec = recs.get(key)
+    if rec is None:
+        if not ok:
+            return
+        rec = recs[key] = {"h": 0, "m": 0}
+    if fac and key.startswith(("dept_path:", "fac_path:")):
+        if ok:
+            if fac not in rec.setdefault("facs", []):
+                rec["facs"].append(fac)
+        elif fac not in rec.get("facs", []):
+            if fac not in rec.setdefault("skip", []):
+                rec["skip"].append(fac)
+                entry["recipes"] = recs
+                _write_store(data)
+            return
+    seen = rec.setdefault("by" if ok else "no", [])
+    if who and who in seen:
+        return
+    if who:
+        seen.append(who)
+        del seen[:-12]
+    rec["h" if ok else "m"] += 1
+    rec.update(extra)
+    if rec["m"] >= 2 and rec["m"] > rec["h"]:
+        del recs[key]
+    entry["recipes"] = recs
+    for legacy in ("hubs", "base", "path", "query", "dept_paths", "fac_paths"):
+        entry.pop(legacy, None)
+    entry["ts"] = time.time()
+    _write_store(data)
+
+
+def _drop(uid: str, key: str) -> None:
+    data = _store()
+    recs = _recipes(uid, data)
+    if recs.pop(key, None) is not None:
+        data.setdefault(uid, {})["recipes"] = recs
+        _write_store(data)
+
+
+def _recipe_keys(uid: str, prefix: str, trusted_only: bool = False, fac: str = "") -> list[str]:
+    """Tarif değerleri (önekten sonrası): önce onaylılar, sonra tutma farkına göre. fac: bu fakültede tutmadığı
+    bilinen yollar verilmez; bu fakültede tutmuş olanlar öne alınır."""
+    rows = [(k[len(prefix):], r) for k, r in _recipes(uid).items()
+            if k.startswith(prefix) and (not trusted_only or _trusted(r)) and (not fac or fac not in r.get("skip", []))]
+    rows.sort(key=lambda row: (bool(fac) and fac not in row[1].get("facs", []), not _trusted(row[1]),
+                               row[1].get("m", 0) - row[1].get("h", 0)))
+    return [k for k, _ in rows]
+
+
+def _confirmed(uid: str) -> bool:
+    """Bu üniversitede onaylı (iki bölümde tutmuş) bir tarif var mı: arka plan yalnız o zaman tarifle çalışır."""
+    return any(_trusted(r) for r in _recipes(uid).values())
+
+
+def _hubs(uid: str, trusted_only: bool = False) -> list[str]:
+    """Bölüm bağlantısının bulunduğu ortak liste sayfaları (ör. Bologna lisans program listesi, katalog girişi)."""
+    return _recipe_keys(uid, "hub:", trusted_only)
+
+
+def _pattern_of(department: str, url: str) -> dict | None:
+    """Ders tablosu bulunan adresin yolunda bölüm adı tek başına bir parçaysa adres kalıbı:
     /tr/bolum/bilgisayar-muhendisligi/ders-mufredati → /tr/bolum/{}/ders-mufredati. Siteye özel kod değil, öğrenilir."""
     slug = _slugify(department)
     parts = urlsplit(url)
@@ -288,47 +427,71 @@ def _learn_pattern(uid: str, department: str, url: str):
     for i, seg in enumerate(segments):
         if slug and slug in seg.lower() and not _NEWS_PATH.search(parts.path):
             template = seg.lower().replace(slug, "{}", 1)
+            rest = [x for x in re.split(r"[-_]", template.replace("{}", "")) if x]
+            if any(x not in {"bolumu", "bolum", "programi", "program", "lisans", "tr", "en"} for x in rest):
+                return None  # segmentte bölüm adından başka kelime var: kalıp değil rastlantı
+            if re.search(r"\.(?:pdf|docx?|xlsx?)$", parts.path, re.I):
+                return None
             path = "/".join(segments[:i] + [template] + segments[i + 1:])
-            _remember(uid, base=f"{parts.scheme}://{parts.netloc}", path=path, query=parts.query)
-            return
+            return {"base": f"{parts.scheme}://{parts.netloc}", "path": path, "query": parts.query}
+    return None
 
 
-def _remember(uid: str, **fields):
-    try:
-        data = json.loads(_PATTERNS.read_text()) if _PATTERNS.exists() else {}
-        entry = data.setdefault(uid, {})
-        if hub := fields.pop("hub", None):
-            hubs = [h for h in entry.get("hubs", []) if h != hub]
-            entry["hubs"] = [hub, *hubs][:6]
-        entry.update(fields, ts=time.time())
-        _PATTERNS.parent.mkdir(parents=True, exist_ok=True)
-        _PATTERNS.write_text(json.dumps(data, ensure_ascii=False))
-    except (OSError, ValueError):
-        pass
-
-
-# Ders kataloğu sistemleri (bölüm sitesi ya da dosya sunucusu değil): obs., sis., ects., bologna., bilgipaketi. …
-_CATALOG_HOST = re.compile(r"(?:[a-z]*ects|obs|oibs|ubs|ebs|sis|bologna|bilgipaketi|akts|katalog|catalog|ders|course)[a-z0-9-]*\.", re.I)
-
-
-def _hubs(uid: str) -> list[str]:
-    """Bu sitede bölüm bağlantısının bulunduğu liste sayfaları (ör. Bologna lisans program listesi); kardeş bölümler
-    gezintiye buradan başlar. Öğrenilir, siteye özel değildir."""
-    try:
-        return (json.loads(_PATTERNS.read_text()).get(uid) or {}).get("hubs", []) if _PATTERNS.exists() else []
-    except (OSError, ValueError):
-        return []
-
-
-def _pattern_url(uid: str, department: str) -> str:
-    try:
-        known = json.loads(_PATTERNS.read_text()).get(uid) if _PATTERNS.exists() else None
-    except (OSError, ValueError):
-        return ""
+def _pattern_url(uid: str, department: str, trusted_only: bool = False) -> str:
+    rec = _recipes(uid).get("pattern")
     slug = _slugify(department)
-    if not known or not slug or "{}" not in known.get("path", ""):
+    if not rec or not slug or "{}" not in rec.get("path", "") or (trusted_only and not _trusted(rec)):
         return ""
-    return known["base"] + known["path"].replace("{}", slug, 1) + (f"?{known['query']}" if known.get("query") else "")
+    return rec["base"] + rec["path"].replace("{}", slug, 1) + (f"?{rec['query']}" if rec.get("query") else "")
+
+
+def _learnable_path(rel: str, department: str) -> bool:
+    """Birim sitesine göreli yol başka bölümlere uygulanabilir mi: belge/duyuru değil, bölüme özel değil, lisans planı."""
+    path = unquote(rel.split("?")[0])
+    if not rel or path in {"", "/"} or len(rel) > 120:
+        return False
+    if re.search(r"\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|jpe?g|png)$", path, re.I):
+        return False
+    if _NEWS_PATH.search(path) or re.search(r"/(?:notice|duyuru|haber|event|dosya|files?|uploads?)s?(?:/|$)", path, re.I):
+        return False
+    words = fold(re.sub(r"[-_/.+]+", " ", path))
+    return not _NOT_PLAN.search(words) and not _matches(words, department)
+
+
+def _find_dept_root(pages: list[dict], department: str, home: str) -> str:
+    """Okunan sayfalarda (fakülte sitesi, ana sayfa) adı bölümle eşleşen bağlantının sitesi: enve-eng.… ya da
+    …/bolumler/cevre-muhendisligi. Kurumun ana sitesinin kökü bölüm sitesi sayılmaz."""
+    home_host = urlsplit(home or "").hostname or ""
+    for page in pages:
+        for link in page.get("links") or []:
+            if not _matches(link.get("title") or "", department):
+                continue
+            parts = urlsplit(link["url"])
+            if not parts.hostname or _NEWS_PATH.search(parts.path) or _CATALOG_HOST.match(parts.hostname):
+                continue
+            root = _root(link["url"])
+            if parts.hostname != home_host and parts.path.strip("/") == "":
+                return root  # bölümün kendi alt alan adı
+            if len([x for x in parts.path.split("/") if x]) <= 3 and _slug_matches(link["url"], department):
+                return root  # ana sitede bölüm yolu
+    return ""
+
+
+def _root(url: str) -> str:
+    """Birim sitesinin kökü: https://endustriyeltasarim-mtf.marmara.edu.tr ya da https://x.edu.tr/bolumler/mimarlik."""
+    parts = urlsplit(url or "")
+    return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}" if parts.scheme in {"http", "https"} and parts.netloc else ""
+
+
+def _under(url: str, root: str) -> str | None:
+    """url, root'un altındaysa kökten sonraki yol ("/lisans-programi/mufredat"); değilse None."""
+    if not root:
+        return None
+    a, b = urlsplit(root), urlsplit(url)
+    if a.netloc.lower() != b.netloc.lower() or not (b.path.rstrip("/") + "/").startswith(a.path.rstrip("/") + "/"):
+        return None
+    rest = b.path[len(a.path.rstrip("/")):] or "/"
+    return rest + (f"?{b.query}" if b.query else "")
 
 
 def _scope_matches(page: dict, faculty: str, department: str) -> bool:
@@ -742,7 +905,9 @@ def _candidate(link: dict, page: dict, section: str, faculty: str, department: s
         return None
     unit_link = section == "courses" and (dep_match or fac_match)
     index_link = section == "courses" and bool(re.search(
-        r"programlar|lisans program|bolumler|fakulteler|akademik birim|academic unit|degree program|^lisans$|^on lisans$", label))
+        r"programlar|lisans program|bolumler|fakulteler|akademik birim|academic unit|degree program|^lisans$|^on lisans$"
+        r"|^academics?$|^(?:faculties|colleges|schools|departments)(?: (?:and|&) (?:schools|institutes|departments))?$"
+        r"|undergraduate(?: programs?| studies| education)?$|course catalog|^programs?$", label))
     if not (in_group or unit_link or index_link):
         return None
     if section == "courses" and (faculty or department):
@@ -763,6 +928,10 @@ def _candidate(link: dict, page: dict, section: str, faculty: str, department: s
         # Haftalık ders saatleri ve sınav programı ders listesi değildir.
         if re.search(r"haftalik|ders saatleri|sinav programi|sinav takvimi|akademik takvim|ders kayit|staj|arsiv", route):
             course_score -= 60
+        # Lisans öğrencisi önce lisans planını görmeli: çift anadal / yandal / lisansüstü planları geride.
+        if re.search(r"\bcap\b|cift ana ?dal|\byap\b|yan ?dal|double major|\bminor\b|lisansustu|yuksek lisans|doktora"
+                     r"|graduate|master|\bphd\b", route):
+            course_score -= 45
         # Aynı planın yılları varsa en yenisi önce; çok eski yıllar geri (ör. 2003-2004 arşivi).
         years = [int(y) for y in re.findall(r"(?<!\d)(20[0-4]\d)(?!\d)", route)]
         if years:
@@ -870,20 +1039,122 @@ async def _hedged(client, url: str, limit: int) -> tuple[bytes, str, str]:
             task.cancel()
 
 
-async def _render_race(url: str, domain: str) -> tuple[str, str] | None:
+_CODE_RX = re.compile(r"^[A-ZÇĞİÖŞÜ]{2,8}[ -]?\d{2,4}[A-Z]?$")
+
+
+def _label(title: str) -> str:
+    """Bağlantı etiketi tarif biçiminde: "Müfredat 2" → "mufredat"; ders planı olmayan etiketler "" döner."""
+    text = " ".join(re.sub(r"[\d()\[\]:|>»-]+", " ", fold(clean(title))).split())
+    return text if 3 <= len(text) <= 40 and not _NOT_PLAN.search(text) else ""
+
+
+def _json_courses(data, url: str) -> list[dict]:
+    """JSON yanıtındaki ders kayıtları: içinde ders kodu olan her nesne bir satır (kod + en uzun ad + sayılar)."""
+    lines = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            values = [v for v in node.values() if isinstance(v, (str, int, float)) and not isinstance(v, bool)]
+            texts = [clean(v) for v in values if isinstance(v, str)]
+            code = next((x for x in texts if _CODE_RX.match(x)), "")
+            if code:
+                name = max((x for x in texts if x != code and len(x) <= 120 and re.search(r"[a-zçğıöşü]", x)), key=len, default="")
+                # AKTS yalnız alan adı açıkça söylüyorsa yazılır (rastgele bir sayı AKTS sanılmaz).
+                ects = next((f"{v:g}" for k, v in node.items() if re.search(r"akts|ects", fold(str(k)))
+                             and isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v <= 60), "")
+                if name:
+                    lines.append(" ".join(x for x in (code, name, ects) if x))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(data)
+    return _pdf_courses("\n".join(lines), url) if lines else []
+
+
+def _body_courses(body: bytes, media: str, url: str, domain: str) -> list[dict]:
+    """Veri isteğinin yanıtından dersler: JSON ya da HTML parçası."""
+    text = body.decode("utf-8", errors="replace")
+    if "json" in (media or "") or text.lstrip()[:1] in {"[", "{"}:
+        try:
+            return _json_courses(json.loads(text), url)
+        except ValueError:
+            return []
+    try:
+        return _page(text, url, domain)["course_items"]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _url_numbers(url: str) -> list[str]:
+    parts = urlsplit(url)
+    return re.findall(r"\d+", parts.path + "?" + parts.query)
+
+
+def _xhr_template(page_url: str, xhr_url: str) -> str | None:
+    """Sayfa adresindeki numaralar (program kimlikleri) veri isteğinde de geçiyorsa istek kalıbı:
+    …/ProgramTanitim/x-85-105-0 + …/api/dersler?program=85&birim=105 → …/api/dersler?program={0}&birim={1}."""
+    target = urlsplit(xhr_url)
+    rest, used = target.path + (f"?{target.query}" if target.query else ""), False
+    for index, number in sorted(enumerate(_url_numbers(page_url)), key=lambda row: -len(row[1])):
+        if len(number) < 2:
+            continue
+        replaced = re.sub(rf"(?<!\d){number}(?!\d)", f"{{{index}}}", rest)
+        if replaced != rest:
+            rest, used = replaced, True
+    return f"{target.scheme}://{target.netloc}{rest}" if used else None
+
+
+def _xhr_fill(template: str, page_url: str) -> str:
+    numbers = _url_numbers(page_url)
+    try:
+        return re.sub(r"\{(\d+)\}", lambda m: numbers[int(m[1])], template)
+    except IndexError:
+        return ""
+
+
+def _learn_xhr(uid: str, page_url: str, capture, domain: str, who: str) -> None:
+    """REA'nın yakaladığı istekler arasında ders listesini taşıyan veri isteği bulunursa kalıbı saklanır; aynı
+    katalogdaki diğer programlar tarayıcı açmadan o istekle okunur."""
+    host = urlsplit(page_url).hostname or ""
+    for tx in getattr(capture, "transactions", None) or []:
+        if (tx.method or "").upper() != "GET" or tx.status != 200 or not tx.response_body or _url_key(tx.url) == _url_key(page_url):
+            continue
+        if registrable(urlsplit(tx.url).hostname or "") != domain or len(tx.response_body) > 3_000_000:
+            continue
+        if tx.resource_type not in {"xhr", "fetch"} and "json" not in (tx.media_type or ""):
+            continue
+        if len(_body_courses(tx.response_body, tx.media_type, tx.url, domain)) < 5:
+            continue
+        template = _xhr_template(page_url, tx.url)
+        if template:
+            _note(uid, f"xhr:{host}", True, who, tpl=template)
+            return
+
+
+async def _render_race(url: str, domain: str, on_capture=None) -> tuple[str, str] | None:
     """JS ile çizilen sayfa: Scrapling tarayıcısı ve REA aynı anda; aynı alan adında, metni dolu ilk sonuç."""
     from . import rea
     from .net import fetch_stealth
 
     async def via_rea():
         cap = await rea.recon(url, settle_ms=1200)
+        if on_capture is not None:
+            try:
+                on_capture(cap)
+            except Exception:  # noqa: BLE001 — öğrenme hatası okumayı bozmaz
+                pass
         return cap.dom, cap.final_url or url
 
     async def via_scrapling():
         page = await fetch_stealth(url)
         return page.html, page.url
 
-    tasks = {asyncio.create_task(via_rea()), asyncio.create_task(via_scrapling())}
+    rea_task = asyncio.create_task(via_rea())
+    rea_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+    tasks = {rea_task, asyncio.create_task(via_scrapling())}
     try:
         async with asyncio.timeout(20):
             while tasks:
@@ -898,11 +1169,49 @@ async def _render_race(url: str, domain: str) -> tuple[str, str] | None:
         pass
     finally:
         for task in tasks:
-            task.cancel()
+            if task is not rea_task or on_capture is None:  # öğrenme isteniyorsa REA yakalaması tamamlansın
+                task.cancel()
     return None
 
 
-async def _collect(uid: str, llm, section: str, faculty: str, department: str) -> dict:
+# Kardeş bölümler aynı sayfaları okur (ana sayfa, fakülte sitesi, program listesi): kısa süreli bellek önbelleği
+# her bölüm taramasında aynı sayfanın yeniden indirilmesini önler. Aynı anda istenen sayfa bir kez indirilir.
+_PAGE_CACHE: dict[str, tuple[float, bytes, str, str]] = {}
+_INFLIGHT: dict[str, asyncio.Future] = {}
+PAGE_TTL = 15 * 60
+_DEADLINES: dict[str, asyncio.Timeout] = {}  # süren taramaların süre sınırı (kullanıcı tıklayınca uzatılır)
+_SKIPPED: dict[str, float] = {}              # arka planda ders bulunamayan bölümler: yeniden denenmez, tıklanınca tam tarama
+_SCOUTS: dict[str, dict] = {}                # üniversite başına keşif sayacı ve kapısı
+SKIP_TTL = 30 * 60
+SCOUT_MAX = 4                                # onaylı tarif çıkmadan arka planda en çok bu kadar bölüm keşfedilir
+
+
+def _cached_page(url: str):
+    hit = _PAGE_CACHE.get(_url_key(url))
+    return hit[1:] if hit and time.time() - hit[0] < PAGE_TTL else None
+
+
+def _cache_page(url: str, raw: bytes, mime: str, final: str) -> None:
+    if len(raw) > 1_500_000:
+        return
+    if len(_PAGE_CACHE) >= 300:
+        for old in sorted(_PAGE_CACHE, key=lambda k: _PAGE_CACHE[k][0])[:80]:
+            _PAGE_CACHE.pop(old, None)
+    _PAGE_CACHE[_url_key(url)] = (time.time(), raw, mime, final)
+
+
+def _stub(uid: str, section: str, faculty: str, department: str) -> dict:
+    """Arka planda taranmayan/bulunamayan bölüm: kayıt yazılmaz; arayüz bunu sonuç saymaz, tıklanınca tam tarama yapılır."""
+    return {"version": CACHE_VERSION, "collection_version": COLLECTION_VERSION, "uid": uid, "section": section,
+            "faculty": faculty, "department": department, "groups": _groups(section), "checked_at": time.time(),
+            "pages_read": 0, "home": "", "status": "skipped", "errors": [], "cached": False, "skipped": True}
+
+
+async def _collect(uid: str, llm, section: str, faculty: str, department: str, dept_url: str = "", faculty_url: str = "",
+                   mode: str = "urgent", fresh: bool = False) -> dict:
+    """mode: "urgent" (kullanıcı bekliyor: tarif + arama + gezinti aynı anda), "scout" (arka plan keşfi: onaylı tarif
+    yokken sınırlı gezinti), "recipe" (arka plan: yalnız onaylı tarif, birkaç istek, serbest gezinti yok). Arka plan
+    taraması sürerken kullanıcı aynı bölüme tıklarsa tarama yerinde tam moda yükselir (URGENT_KEYS)."""
     old = _load(uid, section, faculty, department) or _read_cache(CACHE / f"{_key(uid, section, faculty, department)}.json")
     result = {"version": CACHE_VERSION, "collection_version": COLLECTION_VERSION,
               "uid": uid, "section": section, "faculty": faculty, "department": department,
@@ -910,9 +1219,29 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
               "status": "partial", "errors": [], "cached": False}
     pages, seen = [], set()
     progress_key = _key(uid, section, faculty, department)
+    dept_root, fac_root = _root(dept_url), _root(faculty_url)
+    for name in ("dept_root", "fac_root"):  # kurumun ana sitesinin kökü birim sitesi sayılmaz
+        u = urlsplit(locals()[name])
+        if u.hostname and not u.path.strip("/") and u.hostname in {registrable(u.hostname), "www." + registrable(u.hostname)}:
+            dept_root = "" if name == "dept_root" else dept_root
+            fac_root = "" if name == "fac_root" else fac_root
     missing = False
 
     steps: list[str] = []
+    blocked: list[dict] = []  # site erişimi reddetti (401/403/429): bağlantı kullanıcıya verilir, aşılmaz
+    trace: list[str] = []  # tanı: hangi sayfa neden okunamadı, arama ne döndü (önbellek kaydına yazılır)
+    tried: set[str] = set()  # bu taramada denenen tarifler; sonunda tuttu/tutmadı yazılır
+    xhr_hits: set[str] = set()  # tarayıcısız veri isteğiyle ders getiren kataloglar
+    who = fold(department)
+    searched = False
+    start_search = None
+    attempted = 1
+
+    def urgent() -> bool:
+        return mode == "urgent" or progress_key in URGENT_KEYS
+
+    def live() -> str:
+        return "urgent" if urgent() else mode
 
     def report(step: str, done: str = ""):
         """Arayüz için ara durum: o anki adım + okunan sayfaların başlıkları (sırayla belirir)."""
@@ -922,33 +1251,70 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                                   "errors": result["errors"], "checked_at": result["checked_at"], "partial": True}
 
     report("Kurum sitesi açılıyor…")
-    alias_task = asyncio.create_task(_learn_aliases(llm, [faculty, department]))  # site açılırken
+    if mode == "urgent":  # İngilizce adlar arka planda öğrenilir; tarama bunu beklemez (kurallı sözlük zaten var)
+        alias_task = asyncio.create_task(_learn_aliases(llm, [faculty, department]))
+        alias_task.add_done_callback(lambda t: t.cancelled() or t.exception())
     try:
-        async with asyncio.timeout(DEADLINE):
-            async with _LIMIT(progress_key in URGENT_KEYS):
+        async with asyncio.timeout({"urgent": DEADLINE, "scout": 35, "recipe": 18}.get(mode, DEADLINE)) as deadline:
+            _DEADLINES[progress_key] = deadline
+            if urgent() and mode != "urgent":
+                deadline.reschedule(asyncio.get_running_loop().time() + DEADLINE)
+            async with _LIMIT(urgent()):
                 home = await university_home(uid)
             result["home"] = home
             if not home:
                 raise ValueError("Kurumun resmî site bağlantısı bulunamadı.")
             domain = registrable(urlsplit(home).hostname or "")
             async with public_client(timeout=12, headers={"User-Agent": USER_AGENT, "Accept-Language": "tr"}) as client:
+                async def fetch(url, is_home):
+                    limit = 8_000_000 if section == "courses" else 4_000_000
+                    if not is_home:
+                        return await _hedged(client, url, limit)
+                    try:
+                        return await fetch_home_page(client, url, limit)
+                    except (httpx.HTTPError, ValueError, OSError):
+                        # httpx reddedildi (TLS, bot süzgeci, zaman aşımı): Scrapling tarayıcı kimliğiyle.
+                        from .net import fetch_static
+                        got = await fetch_static(url, timeout=15)
+                        if got.status >= 400 or not got.html:
+                            raise ValueError(f"HTTP {got.status}")
+                        return got.html.encode("utf-8"), "text/html", got.url or url
+
+                async def fetch_shared(url, is_home):
+                    """Önbellekte varsa oradan; başka bir tarama aynı sayfayı şu an indiriyorsa onu bekler."""
+                    key = _url_key(url)
+                    if not fresh:
+                        if (hit := _cached_page(url)) is not None:
+                            return hit
+                        if (waiting := _INFLIGHT.get(key)) is not None:
+                            try:
+                                return await asyncio.shield(waiting)
+                            except asyncio.CancelledError:
+                                if not waiting.cancelled():
+                                    raise  # iptal edilen biziz
+                    future = asyncio.get_running_loop().create_future()
+                    future.add_done_callback(lambda f: f.cancelled() or f.exception())
+                    _INFLIGHT[key] = future
+                    try:
+                        got = await fetch(url, is_home)
+                    except BaseException as exc:
+                        if not future.done():
+                            future.set_exception(exc) if isinstance(exc, Exception) else future.cancel()
+                        raise
+                    else:
+                        future.set_result(got)
+                        _cache_page(url, *got)
+                        return got
+                    finally:
+                        if _INFLIGHT.get(key) is future:
+                            _INFLIGHT.pop(key, None)
+
                 async def read(url, *, is_home=False, parent=None, link=None):
-                    async with _LIMIT(progress_key in URGENT_KEYS):
+                    async with _LIMIT(urgent()):
                         try:
-                            limit = 8_000_000 if section == "courses" else 4_000_000
-                            if is_home:
-                                try:
-                                    raw, mime, final = await fetch_home_page(client, url, limit)
-                                except (httpx.HTTPError, ValueError, OSError):
-                                    # httpx reddedildi (TLS, bot süzgeci, zaman aşımı): Scrapling tarayıcı kimliğiyle.
-                                    from .net import fetch_static
-                                    got = await fetch_static(url, timeout=15)
-                                    if got.status >= 400 or not got.html:
-                                        raise ValueError(f"HTTP {got.status}")
-                                    raw, mime, final = got.html.encode("utf-8"), "text/html", got.url or url
-                            else:
-                                raw, mime, final = await _hedged(client, url, limit)
+                            raw, mime, final = await fetch_shared(url, is_home)
                             if registrable(urlsplit(final).hostname or "") != domain:
+                                trace.append(f"başka alan adına yönlendi: {url} → {final}"[:220])
                                 return None
                             if mime == "application/pdf" or raw.startswith(b"%PDF"):
                                 def pdf_text():
@@ -959,7 +1325,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                                     lines = await asyncio.wait_for(asyncio.to_thread(pdf_text), 8)
                                     text = clean(lines)[:26000]
                                     title = (link or {}).get("title") or "Kurum belgesi"
-                                    return _scope({"url": final, "title": title, "heading": text[:700],
+                                    return _scope({"url": final, "title": title, "heading": text[:700], "pdf": True,
                                                    "text": text, "links": [], "course_items": _pdf_courses(lines, final)},
                                                   faculty, department, parent, link)
                                 except Exception:
@@ -971,33 +1337,113 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                             except UnicodeDecodeError:
                                 html = raw.decode("windows-1254", errors="replace")
                             page = _page(html, final, domain)
-                            if (section == "courses" and not page["course_items"] and len(page["text"]) < 300
+                            catalog = bool(_CATALOG_HOST.match(urlsplit(final).hostname or ""))
+                            page_host = urlsplit(final).hostname or ""
+                            xhr = _recipes(uid).get(f"xhr:{page_host}") if section == "courses" and not page["course_items"] else None
+                            if xhr and (api := _xhr_fill(xhr.get("tpl", ""), final)):
+                                # Bu katalogun veri isteği öğrenilmiş: tarayıcı açmadan doğrudan okunur.
+                                tried.add(f"xhr:{page_host}")
+                                try:
+                                    api_raw, api_mime, _ = await fetch_shared(api, False)
+                                    page["course_items"] = _body_courses(api_raw, api_mime, final, domain)
+                                except (httpx.HTTPError, ValueError, OSError):
+                                    pass
+                                if page["course_items"]:
+                                    xhr_hits.add(f"xhr:{page_host}")
+                                    trace.append(f"veri isteği (tarayıcısız): {api} · {len(page['course_items'])} ders"[:220])
+                            if (section == "courses" and not page["course_items"] and "rendered" not in mime
+                                    and (len(page["text"]) < 300 or catalog and len(page["text"]) < 5000)
                                     and len(page.get("links") or []) < 25
                                     and re.search(r"bologna|ects|akts|bilgi.?paket|curriculum|m[üu]fredat|ders|program",
                                                   f"{final} {(link or {}).get('title', '')}", re.I)):
                                 # JS ile dolan sayfa: tarayıcıda çizim; Scrapling ve REA yarışır, önce dolu gelen kazanır.
-                                rendered = await _render_race(final, domain)
+                                learn = (lambda cap, _u=final: _learn_xhr(uid, _u, cap, domain, who)) if catalog and not xhr else None
+                                rendered = await _render_race(final, domain, learn)
                                 if rendered:
                                     page = _page(rendered[0], rendered[1], domain)
+                                    # Çizilmiş hali saklanır: kardeş bölümler aynı sayfa için tarayıcı açmaz.
+                                    _cache_page(url, rendered[0].encode("utf-8"), "text/html; rendered", rendered[1])
                             page = _scope(page, faculty, department, parent, link)
+                            # Bölüm/fakülte sitesi kurumun kendi menüsünden eşlendi: altındaki sayfalar o birime aittir.
+                            if dept_root and _under(final, dept_root) is not None:
+                                page["department_verified"] = page["faculty_verified"] = True
+                            elif fac_root and _under(final, fac_root) is not None and not department:
+                                page["faculty_verified"] = True
                             if parent:
                                 page["via"] = parent["url"]
+                            if link:
+                                page["via_title"] = clean(link.get("title") or "")
                             label = clean(page.get("title") or page.get("heading") or "")[:70] or urlsplit(final).path[:70]
                             mark = " · bölüm sayfası" if page.get("department_verified") else ""
                             report(f"{label} okundu…", f"{label}{mark}{' · ' + str(len(page['course_items'])) + ' ders' if page.get('course_items') else ''}")
+                            trace.append(f"okundu: {final} · {len(page.get('links') or [])} bağlantı · {len(page['text'])} karakter"[:220])
                             return page
-                        except (httpx.HTTPError, ValueError, OSError):
+                        except (httpx.HTTPError, ValueError, OSError) as exc:
+                            code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 0
+                            if code in (401, 403, 429) or re.search(r"HTTP (?:401|403|429)\b", str(exc)):
+                                blocked.append({"title": clean((link or {}).get("title") or ""), "url": url})
+                            trace.append(f"okunamadı: {url} → {type(exc).__name__}: {exc}"[:220])
                             return None
+                scanned: set[int] = set()
+
+                async def adopt_dept_root():
+                    """Okunan sayfalarda (fakülte sitesi, ana sayfa, liste) bölümün kendi sitesi bulunursa öğrenilmiş yollar
+                    hemen o siteye uygulanır (cse-eng…/lisans-programi/… → enve-eng…/lisans-programi/…)."""
+                    nonlocal dept_root, attempted
+                    if dept_root or section != "courses" or not department:
+                        return
+                    fresh_pages = [pg for pg in pages if id(pg) not in scanned]
+                    scanned.update(id(pg) for pg in fresh_pages)
+                    found_root = _find_dept_root(fresh_pages, department, home)
+                    if not found_root:
+                        return
+                    dept_root = found_root
+                    trace.append(f"bölüm sitesi bulundu: {dept_root}")
+                    for pg in pages:  # daha önce okunan sayfalar bu sitenin altındaysa bölüme aittir
+                        if _under(pg["url"], dept_root) is not None:
+                            pg["department_verified"] = pg["faculty_verified"] = True
+                    tried.update(f"dept_path:{rel}" for rel in dept_paths)
+                    guesses = [g for g in dict.fromkeys([dept_root + rel for rel in dept_paths] + [dept_root])
+                               if _url_key(g) not in seen]
+                    if guesses:
+                        trace.append("tarif benzetmesi: " + ", ".join(guesses)[:220])
+                        seen.update(_url_key(g) for g in guesses)
+                        attempted += len(guesses)
+                        pages.extend(x for x in await asyncio.gather(*(read(g) for g in guesses)) if x)
+
                 search, guessed = None, None
                 home_task = asyncio.create_task(read(home, is_home=True))
-                hub_task = (asyncio.gather(*(read(url) for url in _hubs(uid)[:3]))
-                            if section == "courses" and department else None)
+                seeds, hub_set = [], set()
+                only_trusted = mode == "recipe"  # arka plan yalnız onaylı tarifi dener; tıklama ve keşif adayları da
+                fac_key = fold(faculty)
+                dept_paths = _recipe_keys(uid, "dept_path:", only_trusted, fac_key)[:2 if only_trusted else 3]
+                fac_paths = _recipe_keys(uid, "fac_path:", only_trusted, fac_key)[:1 if only_trusted else 2]
+                if section == "courses" and department:
+                    # Yol 1 — tarif: başka bölüm/fakültede öğrenilen göreli yol bu birimin sitesine uygulanır; birim
+                    # sitesinin kendisi ve ortak liste sayfaları (katalog girişi, program listesi) da başlangıçtır.
+                    if dept_root:
+                        seeds += [dept_root + rel for rel in dept_paths]
+                        tried.update(f"dept_path:{rel}" for rel in dept_paths)
+                    if fac_root:
+                        seeds += [fac_root + rel for rel in fac_paths]
+                        tried.update(f"fac_path:{rel}" for rel in fac_paths)
+                    seeds += [u for u in (dept_root, fac_root) if u]
+                    hubs = [h for h in _hubs(uid, only_trusted)[:3]
+                            if not fac_root or urlsplit(h).hostname != urlsplit(fac_root).hostname]
+                    seeds += hubs
+                    hub_set = {_url_key(h) for h in hubs}
+                    tried.update(f"hub:{h}" for h in hubs)
+                seeds = list(dict.fromkeys(seeds))[:8]
+                hub_task = asyncio.gather(*(read(url) for url in seeds)) if seeds else None
+                trace.append(f"mod: {mode}" + (" · tarif/tohum: " + ", ".join(seeds)[:200] if seeds else ""))
                 if section == "courses" and department:
                     from .websearch import site_results_race
 
                     def start_search():
                         # Arama motorları aynı anda (ddgs, Google, Brave); ana sayfa okunurken çalışır. İngilizce yayın
                         # yapan sitelerde bölümün İngilizce adıyla da aranır; iki arama paralel, sonuçlar birleşir.
+                        nonlocal searched
+                        searched = True
                         queries = [f"{department} ders müfredatı"]
                         if english := (ALIASES.get(fold(department)) or [""])[0]:
                             queries.append(f"{english} curriculum courses")
@@ -1005,26 +1451,25 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                         async def both():
                             found = await asyncio.gather(*(site_results_race(home, q, k=4) for q in queries), return_exceptions=True)
                             rows, seen = [], set()
-                            for part in found:
+                            for q, part in zip(queries, found):
+                                trace.append(f"arama '{q}': " + (f"{len(part)} sonuç" if isinstance(part, list) else type(part).__name__))
                                 for row in part if isinstance(part, list) else []:
                                     if row.get("url") not in seen:
                                         seen.add(row.get("url"))
                                         rows.append(row)
                             return rows[:6]
                         return asyncio.create_task(asyncio.wait_for(both(), 20))
-                    guess = _pattern_url(uid, department)  # bu sitede (herhangi bir fakültede) öğrenilmiş adres kalıbı
-                    if progress_key in URGENT_KEYS or not guess:
+                    guess = _pattern_url(uid, department, only_trusted)  # bu sitede öğrenilmiş adres kalıbı
+                    if urgent() or (mode == "scout" and not guess):
                         # Kullanıcı bekliyor: tarif, arama ve liste sayfaları aynı anda; önce doğrulanan kazanır.
                         search = start_search()
                     if guess:
+                        tried.add("pattern")
                         guessed = await read(guess)
-                    if not search and not (guessed and guessed.get("course_items") and _scope_matches(guessed, faculty, department)):
-                        search = start_search()  # arka plan: tarif tutmadıysa arama (motorları gereksiz yormaz)
+                    if (not search and live() != "recipe"
+                            and not (guessed and guessed.get("course_items") and _scope_matches(guessed, faculty, department))):
+                        search = start_search()  # keşif: tarif tutmadıysa arama (onaylı tarifle çalışan arka plan aramaz)
                 first = await home_task
-                try:  # İngilizce adlar sayfalar puanlanmadan önce hazır olsun (en çok birkaç saniye)
-                    await asyncio.wait_for(asyncio.shield(alias_task), 8)
-                except Exception:
-                    pass
                 if not first and not (search or guessed or hub_task):
                     raise ValueError("Kurum sitesi şu anda okunamıyor; tekrar deneyebilirsiniz.")
                 if not first:
@@ -1038,12 +1483,21 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                 if guessed:
                     pages.append(guessed)
                     seen.add(_url_key(guessed["url"]))
+                hub_pages = []
                 if hub_task:
-                    hub_pages = [hub for hub in await hub_task if hub]
+                    seed_pages = await hub_task
+                    for seed_url, seed_page in zip(seeds, seed_pages):
+                        if seed_page and _url_key(seed_url) in hub_set:
+                            hub_set.add(_url_key(seed_page["url"]))  # yönlendirmeden sonraki adres de liste sayfasıdır
+                    hub_pages = [hub for hub in seed_pages if hub]
                     for hub in hub_pages:
                         if _url_key(hub["url"]) not in seen:
                             pages.append(hub)
                             seen.add(_url_key(hub["url"]))
+                    seen.update(_url_key(u) for u in seeds)
+                await adopt_dept_root()
+                hub_pages = [hub for hub in hub_pages if _url_key(hub["url"]) in hub_set]  # yalnız ortak liste sayfaları
+                if hub_pages and section == "courses" and department:
                     # Üniversitenin bütün programlarını listeleyen sayfada (en az 3 fakülte başlığı) bölüm adı hiç
                     # geçmiyorsa program sitede yayımlanmıyor: 18 sayfa gezmeden dur.
                     whole = [h for h in hub_pages if len(re.findall(r"\bfakultesi\b", fold(h["text"]))) >= 3]
@@ -1059,7 +1513,6 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                 # The page budget includes failed attempts. Keep the working
                 # course route unchanged; other categories can reach office >
                 # programme > conditions/agreements, without a whole-site crawl.
-                attempted = 1
                 async def use_search(wait: float):
                     """Arama sonucu geldiyse sayfalarını paralel oku. Gezinti aramayı beklemez: en çok `wait` sn."""
                     nonlocal search, attempted
@@ -1085,29 +1538,66 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                         pages.extend(p for p in await asyncio.gather(*(read(h["url"], parent=first, link=h) for h in hits)) if p)
                         seen.update(_url_key(p["url"]) for p in pages)
 
-                report("Arama sonuçları bekleniyor…")
-                await use_search(3)
-                page_limit = (attempted + 4) if missing else 18 if section == "courses" else MAX_PAGES
-                fetch_until = time.monotonic() + (15 if missing else 65 if section == "courses" else 45)
-                while attempted < page_limit and time.monotonic() < fetch_until:
+                def found() -> bool:
+                    return section == "courses" and any(
+                        p.get("course_items") and _scope_matches(p, faculty, department) for p in pages)
+
+                if not found():  # tarif tuttuysa arama beklenmez
+                    report("Arama sonuçları bekleniyor…")
+                    await use_search(3)
+                started, base_attempted = time.monotonic(), attempted
+
+                def budget() -> tuple[int, float]:
+                    """(sayfa sınırı, bitiş anı). Kullanıcı bekliyorsa geniş; arka plan keşfi dar; onaylı tarif birkaç istek."""
+                    if missing:
+                        return base_attempted + 4, started + 15
+                    if section != "courses":
+                        return MAX_PAGES, started + 45
+                    return {"urgent": (18, started + 65), "scout": (10, started + 25),
+                            "recipe": (base_attempted + 7, started + 12)}[live()]
+
+                while attempted < budget()[0] and time.monotonic() < budget()[1]:
+                    if urgent() and not searched and start_search:
+                        search = start_search()  # arka plan taraması tıklamayla öne alındı: arama da devreye girer
                     await use_search(0)  # arama gezinti sürerken bittiyse sonuçları şimdi eklenir
-                    if section == "courses" and any(p.get("course_items") and _scope_matches(p, faculty, department) for p in pages):
-                        break  # arama sonucundan ders tablosu geldiyse gezinmeye gerek yok
-                    candidates = {}
+                    if found():
+                        break  # ders tablosu geldiyse gezinmeye gerek yok
+                    await adopt_dept_root()
+                    if found():
+                        break
+                    restricted = live() == "recipe"
+                    labels = set(_recipe_keys(uid, "dept_label:", only_trusted)) if section == "courses" else set()
+                    candidates, labelled = {}, {}
                     for page in pages:
+                        in_scope = page.get("department_verified") or _url_key(page["url"]) in hub_set
                         for link in page["links"]:
                             rank = _candidate(link, page, section, faculty, department)
-                            if _url_key(link["url"]) not in seen and rank is not None:
-                                previous = candidates.get(link["url"])
-                                if previous is None or rank > previous[0]:
-                                    candidates[link["url"]] = (rank, page, link)
-                    # Follow a strong unit link first, then parallel category pages.
+                            if _url_key(link["url"]) in seen:
+                                continue
+                            # Tarif: bölüm sitesinde bu etiketli bağlantı ders planına götürür (başka bölümlerde öğrenildi).
+                            if labels and page.get("department_verified") and (tag := _label(link["title"])) in labels:
+                                rank = (rank or 0) + 250
+                                labelled[link["url"]] = tag
+                            if rank is None:
+                                continue
+                            # Onaylı tarifle çalışan arka plan serbest gezmez: yalnız bölümün kendi sayfalarındaki bağlantılar
+                            # ve liste sayfalarında adı bölümle (fakülte sitesi bilinmiyorsa fakülteyle) eşleşen bağlantı.
+                            if restricted and not in_scope and not (
+                                    _matches(link["title"], department) or _slug_matches(link["url"], department)
+                                    or (faculty and not fac_root and _matches(link["title"], faculty))):
+                                continue
+                            previous = candidates.get(link["url"])
+                            if previous is None or rank > previous[0]:
+                                candidates[link["url"]] = (rank, page, link)
                     ranked = sorted(candidates, key=lambda url: (-candidates[url][0], url.count("/"), url))
-                    batch = 1 if ranked and candidates[ranked[0]][0] >= 90 else 3
-                    choices = ranked[:min(batch, page_limit - attempted)]
+                    # En güçlü adaylar birlikte okunur (derslerde üçe kadar; güçlünün yanında zayıf aday okunmaz).
+                    top = candidates[ranked[0]][0] if ranked else 0
+                    batch = 3 if section == "courses" or top < 90 else 1
+                    choices = [u for u in ranked[:batch] if candidates[u][0] >= top - 30][:max(0, budget()[0] - attempted)]
                     if not choices:
                         break
                     seen.update(_url_key(url) for url in choices)
+                    tried.update(f"dept_label:{labelled[url]}" for url in choices if url in labelled)
                     attempted += len(choices)
                     pages.extend(p for p in await asyncio.gather(*(
                         read(url, parent=candidates[url][1], link=candidates[url][2]) for url in choices)) if p)
@@ -1116,7 +1606,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                     report(f"{len(pages)} sayfa okundu…")
                     # A verified catalogue already contains the requested list;
                     # do not spend the remaining budget on another language's programme.
-                    if section == "courses" and any(p.get("course_items") and _scope_matches(p, faculty, department) for p in pages):
+                    if found():
                         break
                 if search:
                     search.cancel()  # gezinti bitti, geç kalan arama beklenmez
@@ -1130,29 +1620,83 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                 else:
                     missing = False
             result["pages_read"] = len(pages)
+            result["trace"] = trace[-40:]
             scoped = bool(faculty or department)
             evidence_pages = [i for i, page in enumerate(pages) if not scoped or _scope_matches(page, faculty, department)]
             if section == "courses" and department:
                 source = next((p for p in pages if p.get("course_items") and _scope_matches(p, faculty, department)), None)
+                hits: set[str] = set()
                 if source:
-                    _learn_pattern(uid, department, source["url"])
-                    # Hatırlanan sayfa bölüme özel olmamalı: bölüm sayfalarını (ör. Bologna program sayfası) geçip
-                    # bölüm bağlantısını taşıyan liste sayfasına (lisans program listesi) kadar geri çıkılır.
+                    src = urlsplit(source["url"])
+                    src_host, home_host = src.hostname or "", urlsplit(result["home"]).hostname or ""
+                    if not dept_root and src_host and src_host != home_host and not _CATALOG_HOST.match(src_host) \
+                            and (not fac_root or src_host != urlsplit(fac_root).hostname):
+                        # Dersler bölümün kendi alt alan adında bulundu (cse-eng.…): yol o siteye göre öğrenilir.
+                        dept_root = f"{src.scheme}://{src_host}"
                     by_url = {_url_key(p["url"]): p for p in pages}
+                    chain, via = [source["url"]], source.get("via")
+                    while via and len(chain) < 8:
+                        chain.append(via)
+                        via = by_url.get(_url_key(via), {}).get("via")
+                    # Dersler bölümün kendi sitesinden bulundu (sayfası ya da oradan bağlanan belge/katalog sayfası).
+                    if dept_root and any(_under(u, dept_root) is not None for u in chain):
+                        hits.add("dept_site")
+                    rel = _under(source["url"], dept_root)
+                    if rel is not None:
+                        if _learnable_path(rel, department) and not source.get("pdf"):
+                            hits.add(f"dept_path:{rel}")
+                    elif (rel := _under(source["url"], fac_root)) is not None:
+                        if _learnable_path(rel, department) and not source.get("pdf"):
+                            hits.add(f"fac_path:{rel}")
+                    # Ders sayfasına bölüm sitesindeki hangi etiketli bağlantıdan gelindi ("Müfredat", "Ders Planı").
+                    parent_url = source.get("via") or ""
+                    if dept_root and parent_url and _under(parent_url, dept_root) is not None and (tag := _label(source.get("via_title", ""))):
+                        hits.add(f"dept_label:{tag}")
+                    hits.update(xhr_hits)
+                    if (shape := _pattern_of(department, source["url"])) is not None:
+                        current = _recipes(uid).get("pattern")
+                        same = bool(current) and all(current.get(k) == shape[k] for k in ("base", "path", "query"))
+                        if same or not current or not _trusted(current):
+                            if current and not same:
+                                _drop(uid, "pattern")
+                            _note(uid, "pattern", True, who, **shape)
+                            hits.add("pattern")
+                    # Ortak liste sayfası bölüme özel olmamalı: bölüm sayfalarını (ör. Bologna program sayfası) geçip
+                    # bölüm bağlantısını taşıyan liste sayfasına (lisans program listesi) kadar geri çıkılır.
                     via = source.get("via")
                     while via and by_url.get(_url_key(via), {}).get("department_verified"):
                         via = by_url[_url_key(via)].get("via")
-                    if via and _url_key(via) != _url_key(result["home"]):
-                        _remember(uid, hub=via)
+                    via_host = urlsplit(via or "").hostname or ""
+                    if (via and _url_key(via) != _url_key(result["home"])
+                            and _under(via, dept_root) is None and _under(via, fac_root) is None
+                            and (via_host == home_host or _CATALOG_HOST.match(via_host))):
+                        hits.add(f"hub:{via}")
                     # Katalog ayrı bir sistemdeyse (ör. ects.… / bologna.… / obs.…) o sistemin giriş sayfası da liste
-                    # sayfası olarak saklanır: program listesi oradadır, kardeş bölümler doğrudan oradan başlar.
-                    cat = urlsplit(source["url"])
-                    if (cat.hostname and _CATALOG_HOST.match(cat.hostname) and cat.hostname != urlsplit(result["home"]).hostname
-                            and cat.hostname != urlsplit(via or "").hostname):
-                        first = next((seg for seg in cat.path.split("/") if seg), "")
-                        root = f"{cat.scheme}://{cat.netloc}/" + (first + "/" if re.fullmatch(r"[a-z]{2}", first) else "")
-                        _remember(uid, hub=root)
-            if scoped and not evidence_pages and not missing:
+                    # sayfası adayıdır: program listesi oradaysa kardeş bölümler doğrudan oradan başlar.
+                    if src_host and _CATALOG_HOST.match(src_host) and src_host != home_host and src_host != via_host:
+                        lang = next((seg for seg in src.path.split("/") if seg), "")
+                        hits.add(f"hub:{src.scheme}://{src.netloc}/" + (lang + "/" if re.fullmatch(r"[a-z]{2}", lang) else ""))
+                    for key in hits - {"pattern"}:
+                        _note(uid, key, True, who, fold(faculty))
+                    trace.append("tuttu: " + ", ".join(sorted(hits))[:200] if hits else "tuttu: (tarif çıkmadı)")
+                if dept_root:
+                    tried.add("dept_site")
+                if not missing:
+                    for key in tried - hits:
+                        _note(uid, key, False, who, fold(faculty))  # denenen tarif bu bölümde tutmadı
+            plan_links = []
+            if section == "courses" and department and not result["groups"][section]["items"]:
+                # Doğru sayfa bulundu ama site otomatik okumaya kapalı: resmî bağlantı verilir (engel aşılmaz).
+                for b in blocked:
+                    if (_matches(b["title"], department) or _slug_matches(b["url"], department)) and b["url"] not in {
+                            l["url"] for l in plan_links}:
+                        plan_links.append({"title": b["title"] or "Ders planı (resmî sayfa)", "url": b["url"]})
+                if plan_links:
+                    group = result["groups"][section]
+                    group["links"] = plan_links[:6] + [l for l in group.get("links") or [] if l["url"] not in {x["url"] for x in plan_links}]
+                    result["errors"].append("Üniversitenin sitesi otomatik okumaya izin vermiyor (erişim engeli); ders planının "
+                                            "resmî sayfaları bulundu, aşağıdaki bağlantılardan açabilirsiniz.")
+            if scoped and not evidence_pages and not missing and not plan_links:
                 result["errors"].append("Seçilen fakülte/bölümün bilgileri resmî sayfa metninde doğrulanamadı; program veya ders içeriği varsayılmadı.")
             if section == "courses":
                 known = {(fold(item["title"]), fold(item.get("period", ""))) for item in result["groups"][section]["items"]}
@@ -1169,12 +1713,13 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
             catalog_ready = section == "courses" and bool(result["groups"][section]["items"])
             if catalog_ready:
                 result["groups"][section]["format"] = "course_catalog"
-            if callable(llm) and evidence_pages and not catalog_ready:
+            # Model yalnız kullanıcı beklerken ve ders tablosu bulunamadığında devreye girer; arka plan modelsiz çalışır.
+            if callable(llm) and evidence_pages and not catalog_ready and urgent():
                 try:
                     llm = await llm()
                 except Exception:
                     llm = None
-            if not catalog_ready and evidence_pages and llm and llm.available:
+            if not catalog_ready and evidence_pages and urgent() and llm and not callable(llm) and llm.available:
                 schema = {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {
                     "group": {"type": "string", "enum": [section]}, "title": {"type": "string"}, "detail": {"type": "string"},
                     "period": {"type": "string"}, "quote": {"type": "string"}, "context_quote": {"type": "string"}, "page": {"type": "integer"}},
@@ -1202,7 +1747,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                     "Dönemi bilinmeyen ücreti güncel fiyat olarak sunma. Bir bağlantının başlığından program varlığı, Erasmus anlaşması veya fiyat çıkarma. "
                     "Eksik bilgiyi madde olarak ekleme; items boş olabilir. Türkçe kısa ve anlaşılır yaz.")
                 try:
-                    extracted = await asyncio.wait_for(llm.json(json.dumps(evidence, ensure_ascii=False), schema, system=system, timeout=35, fast=True), 40)
+                    extracted = await asyncio.wait_for(llm.json(json.dumps(evidence, ensure_ascii=False), schema, system=system, timeout=20, fast=True), 24)
                     if not isinstance(extracted, dict) or not isinstance(extracted.get("items"), list):
                         raise ValueError("Özet yanıtı alınamadı")
                     for item in extracted["items"][:32]:
@@ -1232,17 +1777,25 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                 except Exception:
                     if not result["groups"][section]["items"]:
                         result["errors"].append("Sayfa özetleri hazırlanamadı; bulunan resmî bağlantılar gösteriliyor.")
-            elif not catalog_ready and evidence_pages and not result["groups"][section]["items"]:
+            elif not catalog_ready and evidence_pages and urgent() and not result["groups"][section]["items"]:
                 result["errors"].append("Sayfa özetleri için yapay zekâ bağlantısı gerekli; resmî bağlantılar gösteriliyor.")
             result["status"] = "done" if not result["errors"] else "partial"
     except TimeoutError:
         result["errors"].append("Kurum sitesi taramasının süre sınırına ulaşıldı.")
     except (ValueError, httpx.HTTPError, OSError) as exc:
         result["errors"].append(str(exc)[:200])
+    finally:
+        _DEADLINES.pop(progress_key, None)
     result["pages_read"] = len(pages)
+    result["trace"] = trace[-40:]
+    result["mode"] = live()
     # A late HTTP/LLM timeout must not discard facts from already-read sources.
     _retain_facts(result, pages, section, faculty, department)
     _retain_links(result, pages, section, faculty, department)
+    if mode != "urgent" and not urgent() and section == "courses" and not result["groups"][section]["items"]:
+        # Arka plan denemesi ders bulamadı: boş sonuç kayda girmez; kullanıcı tıklarsa tam tarama (tarif + arama + gezinti).
+        result["skipped"] = True
+        return result
     # Geçici erişim problemi önceki doğrulanmış bilgileri boşaltmaz.
     if old:
         for key, previous in old.get("groups", {}).items():
@@ -1261,7 +1814,10 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
 
 
 async def get(uid: str, llm, refresh: bool = False, section: str | None = None, background: bool = False,
-              faculty: str = "", department: str = "") -> dict:
+              faculty: str = "", department: str = "", dept_url: str = "", faculty_url: str = "",
+              trusted: bool = False) -> dict:
+    """background=True: arka plan ön yüklemesi. Onaylı tarif varsa yalnız tarifle (birkaç istek), yoksa sınırlı keşifle
+    çalışır; ders bulunamazsa kayıt yazmaz ("skipped"). trusted: bölüm adı YÖK listesinden (site adı değil)."""
     faculty, department = clean(faculty), clean(department)
     if section is None:
         return _manifest(uid, faculty, department)
@@ -1275,19 +1831,57 @@ async def get(uid: str, llm, refresh: bool = False, section: str | None = None, 
     if saved and not refresh:
         return {**saved, "cached": True, "program_note": note}
     key = _key(uid, section, faculty, department)
+    background = background and section == "courses" and bool(department)
+    if background and key not in TASKS:
+        if time.time() - _SKIPPED.get(key, 0) < SKIP_TTL:
+            return _stub(uid, section, faculty, department)
+        if not trusted:
+            from .unit_names import looks_like_department
+            if not looks_like_department(department):
+                # Site menüsünden gelen ad bölüm adı değil (duyuru, program başlığı): arka planda taranmaz.
+                _SKIPPED[key] = time.time()
+                return _stub(uid, section, faculty, department)
     if not background:
-        URGENT_KEYS.add(key)  # arka planda sürüyorsa da öne alınır
+        URGENT_KEYS.add(key)  # arka planda sürüyorsa da öne alınır: tarama yerinde tam moda yükselir
+        if (deadline := _DEADLINES.get(key)) is not None:
+            try:
+                deadline.reschedule(asyncio.get_running_loop().time() + DEADLINE)
+            except RuntimeError:
+                pass
     task = TASKS.get(key)
     if task is None:
         async def run():
-            hubs_before, pattern_before = set(_hubs(uid)), _pattern_url(uid, department) if department else ""
-            out = await _collect(uid, llm, section, faculty, department)
+            mode = ("recipe" if _confirmed(uid) else "scout") if background else "urgent"
+            before = set(_recipes(uid))
+            held, state = False, None
+            if mode == "scout":
+                # Onaylı tarif yok: aynı anda en çok iki bölüm keşfedilir, toplamda SCOUT_MAX. Kullanıcı tıklarsa sıra beklenmez.
+                state = _SCOUTS.setdefault(uid, {"n": 0, "ts": time.time(), "sem": asyncio.Semaphore(2)})
+                if time.time() - state["ts"] > 3600:
+                    state.update(n=0, ts=time.time())
+                while key not in URGENT_KEYS:
+                    if _confirmed(uid):
+                        mode = "recipe"
+                        break
+                    if state["n"] >= SCOUT_MAX:
+                        return _stub(uid, section, faculty, department)
+                    try:
+                        await asyncio.wait_for(state["sem"].acquire(), 0.4)
+                        held = True
+                        break
+                    except (TimeoutError, asyncio.TimeoutError):
+                        continue
+                if held and mode == "scout":
+                    state["n"] += 1
+            try:
+                out = await _collect(uid, llm, section, faculty, department, dept_url, faculty_url, mode, refresh)
+            finally:
+                if held:
+                    state["sem"].release()
             empty = not ((out.get("groups") or {}).get(section) or {}).get("items")
-            learned = set(_hubs(uid)) - hubs_before or (department and _pattern_url(uid, department) != pattern_before)
-            if section == "courses" and department and empty and learned:
-                # Bu tarama sürerken kardeş bölüm sitenin yapısını öğrendi (liste sayfası / adres kalıbı): bir kez
-                # daha, öğrenilen yoldan (kısa sürer).
-                out = await _collect(uid, llm, section, faculty, department)
+            if section == "courses" and department and empty and not out.get("skipped") and set(_recipes(uid)) - before:
+                # Bu tarama sürerken kardeş bölüm sitenin yapısını öğrendi (yeni tarif): bir kez daha, öğrenilen yoldan.
+                out = await _collect(uid, llm, section, faculty, department, dept_url, faculty_url, "urgent", refresh)
             return out
         task = TASKS[key] = asyncio.create_task(run())
         def done(completed):
@@ -1295,8 +1889,14 @@ async def get(uid: str, llm, refresh: bool = False, section: str | None = None, 
                 TASKS.pop(key, None)
                 PROGRESS.pop(key, None)
                 URGENT_KEYS.discard(key)
+            if not completed.cancelled() and completed.exception() is None and completed.result().get("skipped"):
+                _SKIPPED[key] = time.time()
         task.add_done_callback(done)
-    return {**await asyncio.shield(task), "program_note": note}
+    out = await asyncio.shield(task)
+    if out.get("skipped") and not background:
+        # Arka plan denemesi tam bu sırada boş bitti: kullanıcı için tam tarama.
+        return await get(uid, llm, refresh, section, False, faculty, department, dept_url, faculty_url, trusted)
+    return {**out, "program_note": note}
 
 
 # ------------------------------------------------------------------ bağlantı önizlemesi (bağlantının içeriği)

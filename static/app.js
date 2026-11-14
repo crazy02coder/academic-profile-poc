@@ -2859,7 +2859,7 @@ function studentSectionResult(data, section) {
   const date = (value) => value ? new Date(value * 1000).toLocaleDateString("tr-TR") : "—";
   const previous = (group.items?.length || group.links?.length) && group.previously_checked_at;
   // Derslerde madde yoksa yalnız ders planı/müfredat adlı bağlantılar gösterilir (haber, kalite belgesi, arşiv değil).
-  const planLink = (l) => /öğretim planı|ogretim plani|ders planı|ders plani|müfredat|mufredat|curriculum|course plan|ders içerik|ders icerik|bilgi paketi|program listesi/i.test(`${l.title} ${l.url}`) && !/\.(rar|zip|7z)$/i.test(l.url);
+  const planLink = (l) => /öğretim planı|ogretim plani|ders planı|ders plani|müfredat|mufredat|curriculum|course plan|ders içerik|ders icerik|ders tanım|ders tanim|ders-tanim|bilgi paketi|program listesi|resmî sayfa/i.test(`${l.title} ${l.url}`) && !/\.(rar|zip|7z)$/i.test(l.url);
   const links = (section === "courses" ? (group.items?.length ? [] : (group.links || []).filter(planLink)) : group.links || []).filter((l) => safeUrl(l.url) && !/^(türkçe|turkce|english|ingilizce|tr|en)$/i.test((l.title || "").trim()) && (section !== "work_travel" || /work.?(and|&)?.?travel|\bwat\b/i.test(`${l.title} ${l.url}`)));
   const hasItems = Boolean(group.items?.length);
   const empty = !hasItems && !links.length
@@ -2918,6 +2918,13 @@ async function loadStudentSection(details, d, refresh = false) {
   d.studentChatScope = { faculty, department }; drawStudentChat(d);
   const key = JSON.stringify([section, faculty, department]), box = $(":scope > .student-content", details);
   if (section === "courses" && d.studentResults.has(key) && d.studentResults.get(key).collection_version !== 6) d.studentResults.delete(key);
+  if (section === "courses" && department && !d.studentResults.has(key) && !d.studentPending.has(key)) {
+    // Arka plan bölümü sitedeki adıyla taramış olabilir (YÖK adından biraz farklı): aynı sonuç kullanılır.
+    const site = d.studentSiteNames?.get(JSON.stringify([faculty, nameKey(department)]));
+    const alt = site && site !== department ? JSON.stringify([section, faculty, site]) : "";
+    if (alt && d.studentResults.has(alt)) d.studentResults.set(key, d.studentResults.get(alt));
+    else if (alt && d.studentPending.has(alt)) { d.studentPending.set(key, d.studentPending.get(alt)); if (d.studentBackground?.has(alt)) d.studentBackground.add(key); }
+  }
   const draw = (data) => {
     if (S.uni !== d || !details.isConnected) return;
     updateStudentContent(details, () => { box.innerHTML = studentSectionResult(data, section); });
@@ -2946,6 +2953,7 @@ async function loadStudentSection(details, d, refresh = false) {
     const query = new URLSearchParams({ section });
     if (faculty) query.set("faculty", faculty);
     if (department) query.set("department", department);
+    if (section === "courses" && department) Object.entries(unitUrls(d, faculty, department)).forEach(([k, v]) => query.set(k, v));
     if (refresh) query.set("refresh", "1");
     pending = api(`/api/universities/${encodeURIComponent(d.id)}/student?${query}`, { quiet: true });
     d.studentPending.set(key, pending);
@@ -2983,8 +2991,8 @@ function renderStudentFaculties(details, d) {
   box.innerHTML = faculties.length ? `<p class="student-hint">Bir fakülte seçerek bölümlerini aç.</p><div class="student-tree">${faculties.map(({ fac, i }) => `<details class="student-accordion student-branch" data-student-faculty="${i}"><summary><span class="student-summary-icon">${icon("building")}</span><span><b>${esc(fac.name)}</b></span>${icon("chevron")}</summary><div class="student-content"></div></details>`).join("")}</div>` : '<p class="student-missing">Fakülte listesi şu an YÖK, üniversite sitesi ve Vikipedi’den alınamadı; sayfayı biraz sonra yenileyin.</p>';
   $$("[data-student-faculty]", box).forEach((entry) => entry.addEventListener("toggle", () => { if (entry.open) loadStudentFaculty(entry, d); }));
   bindStudentAccordions(box, d);
-}
-async function loadStudentFaculty(details, d, refresh = false) {
+  prefetchStudentFaculties(d);  // tıklanmasa da: bölüm listeleri ve ders içerikleri arka planda başlar
+}async function loadStudentFaculty(details, d, refresh = false) {
   if (S.uni !== d || !details.isConnected || (details.dataset.ready && !refresh)) return;
   const faculty = d.data.items[Number(details.dataset.studentFaculty)], box = $(":scope > .student-content", details);
   if (!faculty) return;
@@ -3025,7 +3033,8 @@ async function loadStudentFaculty(details, d, refresh = false) {
     box.innerHTML = `<div class="student-tree">${data.departments.map((dep, i) => `<details class="student-accordion student-branch" data-student-department="${i}"><summary><span class="student-summary-icon">${icon("grid")}</span><span><b>${esc(dep.name)}</b><small>${dep.count == null ? "Program ve ders içeriği" : `${fmtNum(dep.count)} akademisyen · YÖK Akademik`}</small></span>${icon("chevron")}</summary><div class="student-content"></div></details>`).join("") || '<p class="student-missing">Bu fakülte için bölüm bilgisi bulunamadı.</p>'}</div><div class="student-section-meta"><span>Bölüm listesi 1 yıl saklanır</span><button class="btn sm" type="button" data-faculty-refresh>${icon("refresh")}Bölümleri yenile</button></div>`;
   });
   $("[data-faculty-refresh]", box).onclick = () => loadStudentFaculty(details, d, true);
-  prefetchStudentCourses(d, faculty.raw, data.departments.map((dep) => dep.name));
+  rememberUnitUrls(d, faculty.raw, data);
+  prefetchStudentCourses(d, faculty.raw, data.departments.map((dep) => dep.name), true, data.source === "yok");  // tıklanan fakülte öne
   $$("[data-student-department]", box).forEach((entry) => entry.addEventListener("toggle", () => {
     if (!entry.open || entry.dataset.ready) return;
     entry.dataset.ready = "1";
@@ -3053,14 +3062,41 @@ function siteDepartments(d, facultyRaw) {
   }
   return pending;
 }
+// Lisans birimi: fakülte / yüksekokul (enstitü, meslek yüksekokulu, merkez değil). Arka plan yalnız bunları tarar.
+const studentUnit = (f) => /fakulte|yuksekokul|faculty|school/.test(fold(f.name || f.raw || "")) && !/meslek|enstitu|lisansustu|graduate|merkez|koordinat/.test(fold(f.name || f.raw || ""));
+// Bölüm ve fakülte sitelerinin adresi (kurumun menüsünden): tarif bunlara göre göreli yol olarak uygulanır.
+function rememberUnitUrls(d, facultyRaw, data) {
+  d.studentUnitUrls ||= new Map(); d.studentFacUrls ||= new Map(); d.studentSiteNames ||= new Map();
+  if (data?.faculty_url) d.studentFacUrls.set(facultyRaw, data.faculty_url);
+  (data?.departments || []).forEach((dep) => {
+    const k = JSON.stringify([facultyRaw, nameKey(dep.name)]);
+    if (dep.url) d.studentUnitUrls.set(k, dep.url);
+    if (!d.studentSiteNames.has(k)) d.studentSiteNames.set(k, dep.name);
+  });
+}
+function unitUrls(d, facultyRaw, department) {
+  const out = {};
+  const dep = d.studentUnitUrls?.get(JSON.stringify([facultyRaw, nameKey(department)]));
+  const fac = d.studentFacUrls?.get(facultyRaw);
+  if (dep) out.dept_url = dep;
+  if (fac) out.faculty_url = fac;
+  return out;
+}
 async function prefetchStudentFaculties(d) {
   if (d.studentFacultiesPrefetch) return;
   d.studentFacultiesPrefetch = true;
-  const queue = [...(d.data.items || [])];
+  studentState(d);
+  const queue = (d.data.items || []).filter(studentUnit);
   const work = async () => {
     while (S.uni === d && queue.length) {
       const faculty = queue.shift();
-      try { await siteDepartments(d, faculty.raw); } catch { /* tıklanınca YÖK'ten gelir */ }
+      try {
+        const site = await siteDepartments(d, faculty.raw);
+        rememberUnitUrls(d, faculty.raw, site);
+        // Tarif ilk bölümlerden öğrenilir; diğer fakültelerin bölümleri sıraya arkadan eklenir (tıklanan öne geçer).
+        const yok = d.studentFaculties?.get(faculty.raw);
+        prefetchStudentCourses(d, faculty.raw, (yok?.departments || site.departments || []).map((x) => x.name), false, yok?.source === "yok");
+      } catch { /* tıklanınca YÖK'ten gelir */ }
     }
   };
   await Promise.all([work(), work(), work()]);
@@ -3106,16 +3142,22 @@ async function studentStaffBox(host, data, facultyRaw, dep, d, refresh = false) 
 }
 // Fakülte açılınca bölümlerin ders içeriği arka planda hazırlanır: ilk bölüm tek başına (site adres kalıbını
 // öğrensin, kardeşler aramasız gelsin), sonra üç işçiyle paralel. Tıklanan bölüm sunucuda sıranın önüne geçer.
-async function prefetchStudentCourses(d, faculty, names) {
+async function prefetchStudentCourses(d, faculty, names, front = false, trusted = false) {
   d.studentPrefetched ||= new Set();
+  d.studentTrusted ||= new Set();  // adı YÖK listesinden gelen bölümler (site menüsünden gelen adlar sunucuda süzülür)
+  if (trusted) names.forEach((name) => d.studentTrusted.add(JSON.stringify([faculty, name])));
   d.studentBackground ||= new Set();
   d.studentQueue ||= [];
+  const add = [];
   for (const name of names) {
     const key = JSON.stringify(["courses", faculty, name]);
-    if (d.studentPrefetched.has(key) || d.studentResults.has(key) || d.studentPending.has(key)) continue;
+    if (d.studentResults.has(key) || d.studentPending.has(key)) continue;
+    if (d.studentPrefetched.has(key) && !front) continue;
     d.studentPrefetched.add(key);
-    d.studentQueue.push([faculty, name]);
+    d.studentQueue = d.studentQueue.filter(([f, n]) => !(f === faculty && n === name));
+    add.push([faculty, name]);
   }
+  if (front) d.studentQueue.unshift(...add); else d.studentQueue.push(...add);
   // Üniversite başına üç işçi: açılan bütün fakültelerin bölümleri tek kuyruktan, aynı anda en çok üç tarama.
   d.studentWorkers ||= 0;
   const work = async () => {
@@ -3125,10 +3167,14 @@ async function prefetchStudentCourses(d, faculty, names) {
         const [fac, name] = d.studentQueue.shift();
         const key = JSON.stringify(["courses", fac, name]);
         if (d.studentResults.has(key) || d.studentPending.has(key)) continue;
-        const pending = api(`/api/universities/${encodeURIComponent(d.id)}/student?${new URLSearchParams({ section: "courses", faculty: fac, department: name, background: "true" })}`, { quiet: true });
+        // Kullanıcı bir bölüme tıkladıysa arka plan yeni tarama başlatmaz: tıklanan önce biter.
+        while (S.uni === d && d.studentClicks > 0) await new Promise((r) => setTimeout(r, 300));
+        if (S.uni !== d || d.studentResults.has(key) || d.studentPending.has(key)) continue;
+        const pending = api(`/api/universities/${encodeURIComponent(d.id)}/student?${new URLSearchParams({ section: "courses", faculty: fac, department: name, background: "true", ...(d.studentTrusted.has(JSON.stringify([fac, name])) ? { trusted: "true" } : {}), ...unitUrls(d, fac, name) })}`, { quiet: true });
         d.studentPending.set(key, pending);
         d.studentBackground.add(key);
-        try { const r = await pending; if (!d.studentResults.has(key)) d.studentResults.set(key, r); } catch { /* tıklanınca yeniden denenir */ }
+        // "skipped": arka plan ders bulamadı ya da taramadı; sonuç sayılmaz, tıklanınca tam tarama yapılır.
+        try { const r = await pending; if (!r.skipped && !d.studentResults.has(key)) d.studentResults.set(key, r); } catch { /* tıklanınca yeniden denenir */ }
         finally { if (d.studentPending.get(key) === pending) d.studentPending.delete(key); d.studentBackground.delete(key); }
         while (d.studentWorkers < 3 && d.studentQueue.length) work();  // ilk sonuçtan sonra üç işçiye çık
       }
@@ -3697,6 +3743,7 @@ function renderProfile(r, chat) {
         <div class="kpi"><b>${count((y.collaborators || []).length)}</b><span>iş birliği</span></div>
       </div>
     </section>
+    <div id="yokStatsBox"></div>
 
     <div class="tabs" role="tablist">${tabs.map(([k, l, n], i) => `<button class="tab ${i === 0 ? "active" : ""}" data-tab="${k}" type="button" ${k === "patents" && !n ? "hidden" : ""}>${esc(l)}${n !== "" && n != null ? `<span class="n">${fmtNum(n)}</span>` : ""}</button>`).join("")}</div>
 
@@ -3759,6 +3806,7 @@ function renderProfile(r, chat) {
   const drawPubs = () => publicationTable.update(r.publications);
 
   $("#refreshProfileBtn").onclick = () => refreshProfileModal(r);
+  loadYokStats(r.job_id);
   bindSourcePicker($("#profileSourcesPicker"), (sources) => runProfileRefresh(r, ["publications"], sources));
   $("#favPersonBtn").onclick = async () => {
     const btn = $("#favPersonBtn");
@@ -4482,11 +4530,13 @@ async function viewSystem() {
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Ayarlar" }]);
   setView(`<div class="section-head"><div><h1>Ayarlar</h1><p>Kullanılacak yapay zekâ, servislerin durumu ve REA'nın öğrendiği site tarifleri.</p></div></div>
     <div class="card card-pad ai-card" id="aiCard">${skeleton(3)}</div>
+    <div class="card card-pad" id="speedCard">${skeleton(2)}</div>
     <div class="grid-2"><div class="card card-pad"><div class="card-title">${icon("info")}Durum</div><div id="sysState">${skeleton(3)}</div></div>
       <div class="card card-pad"><div class="card-title">${icon("settings")}Site tarifleri</div>
         <p class="muted" style="margin:0 0 14px">REA sitelerin arka plandaki isteklerini öğrenir; site değişince yeniden öğrenir.</p>
         <div class="actions"><button class="btn sm" type="button" data-recipes>Öğrenilen tarifler</button><button class="btn sm" type="button" data-scan>Değişiklikleri tara</button></div></div></div>`);
   aiSettingsCard();
+  speedSettingsCard();
   let h = null;
   try { h = await api("/api/health"); } catch { /* aşağıda gösterilir */ }
   const box = $("#sysState");
@@ -4495,6 +4545,51 @@ async function viewSystem() {
   box.innerHTML = h ? [row("Yapay zekâ", h.llm_ready, h.llm), row("REA", h.rea, h.rea ? "Hazır" : "Kurulu değil"), row("Tarayıcı", h.chromium, h.chromium ? "Hazır" : "Kurulu değil"),
     row("Patentler (EPO)", h.patents, h.patents ? "Anahtar tanımlı" : "Anahtar yok; patent sekmeleri kapalı")].join("") : `<p class="muted">Sunucuya ulaşılamadı.</p>`;
 }
+
+// YÖK istek hızı (1-5). Profil çıkarma her zaman bir üst kademeden çalışır.
+async function speedSettingsCard() {
+  const card = $("#speedCard");
+  let cfg = null;
+  try { cfg = await api("/api/settings/yok-speed"); } catch { if (card) card.innerHTML = `<p class="muted">Hız ayarı okunamadı.</p>`; return; }
+  if (!card) return;
+  const names = { 1: "Çok yavaş", 2: "Güvenli", 3: "Orta", 4: "Hızlı", 5: "En hızlı" };
+  const info = (lv) => { const l = cfg.levels[lv]; return `${names[lv]}: dakikada en fazla ${l.per_min} istek, aralık ${l.gap} sn${lv >= 4 ? " · IP engeli riski artar" : ""}`; };
+  card.innerHTML = `<div class="card-title">${icon("settings")}YÖK hızı</div>
+    <p class="muted" style="margin:0 0 12px">yok.gov.tr'ye giden tüm isteklerin hızı. Profil çıkarma bir üst kademeden çalışır. Engel yerseniz kademeyi düşürün.</p>
+    <div class="actions" style="align-items:center;gap:12px"><input type="range" min="1" max="5" step="1" value="${cfg.level}" data-speed style="flex:1;max-width:260px" aria-label="YÖK hızı">
+      <b data-speed-val>${cfg.level}</b></div>
+    <p class="muted" data-speed-info style="margin:10px 0 0">${esc(info(cfg.level))}</p>`;
+  const range = card.querySelector("[data-speed]");
+  range.addEventListener("input", () => { card.querySelector("[data-speed-val]").textContent = range.value; card.querySelector("[data-speed-info]").textContent = info(range.value); });
+  range.addEventListener("change", async () => {
+    try { cfg = await post("/api/settings/yok-speed", { level: Number(range.value) }); toast(`YÖK hızı: ${cfg.level}`); }
+    catch { card.querySelector("[data-speed-info]").textContent = "Kaydedilemedi."; }
+  });
+}
+
+// YÖK Akademik'in hazır istatistikleri: Web of Science yıllık yayın/atıf ve yayın türleri. Profil hazır olduktan sonra
+// ayrıca istenir; YÖK yanıt vermezse ya da kayıt yoksa kutu hiç görünmez.
+async function loadYokStats(jobId) {
+  const box = $("#yokStatsBox");
+  if (!box || !jobId) return;
+  let d = null;
+  try { d = await api(`/api/jobs/${encodeURIComponent(jobId)}/yok-stats`, { quiet: true }); } catch { return; }
+  if (!box.isConnected || !d || (!d.wos_yearly?.length && !d.types?.length)) return;
+  const years = (d.wos_yearly || []).slice().sort((a, b) => a.year - b.year);
+  const pubs = years.reduce((s, x) => s + x.pubs, 0), cites = years.reduce((s, x) => s + x.cites, 0);
+  const maxC = Math.max(1, ...years.map((x) => x.cites)), maxP = Math.max(1, ...years.map((x) => x.pubs));
+  const bars = years.map((x) => `<div class="ys-col" title="${x.year}: ${fmtNum(x.pubs)} yayın, ${fmtNum(x.cites)} atıf">
+      <div class="ys-bars"><i class="ys-cite" style="height:${Math.round((x.cites / maxC) * 100)}%"></i><i class="ys-pub" style="height:${Math.round((x.pubs / maxP) * 100)}%"></i></div>
+      <span>${String(x.year).slice(2)}</span></div>`).join("");
+  const types = (d.types || []).filter((t) => t.national + t.international > 0).map((t) =>
+    `<tr><td>${esc(tTitle(t.name))}</td><td>${fmtNum(t.national)}</td><td>${fmtNum(t.international)}</td><td><b>${fmtNum(t.national + t.international)}</b></td></tr>`).join("");
+  box.innerHTML = `<div class="card card-pad yok-stats"><div class="card-title">${icon("info")}YÖK Akademik istatistikleri<small class="muted" style="font-weight:400;margin-left:8px">Kaynak: YÖK Akademik</small></div>
+    ${years.length ? `<div class="ys-head"><div><b>${fmtNum(pubs)}</b><span>Web of Science yayını</span></div><div><b>${fmtNum(cites)}</b><span>Web of Science atfı</span></div>
+        <div class="ys-legend"><span><i class="ys-pub"></i>yayın</span><span><i class="ys-cite"></i>atıf</span></div></div>
+      <div class="ys-chart">${bars}</div>` : `<p class="muted" style="margin:0 0 12px">YÖK Akademik'te bu kişi için Web of Science istatistiği yok.</p>`}
+    ${types ? `<table class="ys-table"><thead><tr><th>Yayın türü</th><th>Ulusal</th><th>Uluslararası</th><th>Toplam</th></tr></thead><tbody>${types}</tbody></table>` : ""}</div>`;
+}
+const tTitle = (s) => (s || "").toLocaleLowerCase("tr-TR").replace(/(^|\s)\S/g, (c) => c.toLocaleUpperCase("tr-TR"));
 
 // Yapay zekâ sağlayıcısı. Anahtar sunucuda kalır; arayüze yalnızca "kayıtlı mı" bilgisi gelir.
 async function aiSettingsCard() {

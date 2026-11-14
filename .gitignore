@@ -10,3 +10,6 @@ data/*
 !data/yok_university_logos.json
 .ai-settings.json
 .ai-settings.tmp
+.app-settings.json
+.app-settings.tmp
+data/job-log/

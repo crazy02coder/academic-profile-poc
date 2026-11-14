@@ -2409,3 +2409,22 @@ html.page-vt.tx-perspective.tx-back::view-transition-new(page) { z-index: 1; ani
 .student-term.sk-term .sk-line { width: 70px; }
 .sk-cards { display: grid; gap: 12px; }
 .sk-card { display: grid; gap: 10px; padding: 18px; border: 1px solid var(--line, #eaecf0); border-radius: 14px; }
+
+/* YÖK Akademik istatistikleri (profil) */
+.yok-stats { margin: 16px 0; }
+.ys-head { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-end; margin-bottom: 14px; }
+.ys-head b { display: block; font-size: 22px; font-weight: 800; letter-spacing: -.02em; }
+.ys-head span { color: var(--muted, #6b7280); font-size: 13px; }
+.ys-legend { margin-left: auto; display: flex; gap: 14px; }
+.ys-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+.ys-pub { background: #3b5bdb; }
+.ys-cite { background: #9db4f5; }
+.ys-chart { display: flex; align-items: flex-end; gap: 4px; height: 120px; overflow-x: auto; padding-bottom: 2px; }
+.ys-col { flex: 1 0 14px; min-width: 14px; display: flex; flex-direction: column; align-items: center; height: 100%; }
+.ys-bars { flex: 1; width: 100%; display: flex; align-items: flex-end; gap: 1px; }
+.ys-bars i { flex: 1; min-height: 1px; border-radius: 2px 2px 0 0; }
+.ys-col span { font-size: 10px; color: var(--muted, #6b7280); margin-top: 4px; }
+.ys-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
+.ys-table th, .ys-table td { text-align: right; padding: 6px 10px; border-top: 1px solid var(--line); }
+.ys-table th:first-child, .ys-table td:first-child { text-align: left; }
+.ys-table th { font-weight: 600; color: var(--muted, #6b7280); border-top: 0; }

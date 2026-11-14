@@ -5,7 +5,7 @@ import re
 import time
 import httpx
 from fastapi import APIRouter, HTTPException, Query
-from . import academic_score, advisors, history, library, yokdir
+from . import academic_score, advisors, history, library, yok_rate, yokdir
 from .text import fold, STOP
 from .llm import LLM
 
@@ -58,7 +58,7 @@ async def yok_status():
     """Sigorta durumu: arayüz kalan süreyi gösterir."""
     until = yokdir.paused_until()
     return {"paused": until > time.time(), "paused_until": until, "remaining": max(0, int(until - time.time())),
-            "rate": {"gap_seconds": yokdir.RATE_GAP, "per_minute": yokdir.RATE_PER_MIN}}
+            "rate": dict(zip(("gap_seconds", "per_minute"), yok_rate.limits(True)), level=yok_rate.level())}
 
 
 # ------------------------------------------------------------------ jüri ve hakem önerici

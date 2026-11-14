@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Literal
 
-from . import advisors, rea, recipes, org_assets, student_view, student_assistant, uni_facts, firm_facts, reading
+from . import advisors, rea, recipes, org_assets, student_view, student_assistant, uni_facts, firm_facts, reading, unit_names
 from .consensus import save_run, verify_papers, verify_profile
 from .net import fetch_static
 from .analysis import analyze
@@ -26,7 +26,7 @@ from . import history as history_store
 from .chat import MODES, Knowledge, answer
 from .paper import detail as paper_detail
 import os
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from .config import ROOT, chromium_executable, redact
 from .text import detect_title, fold, word_match
@@ -54,9 +54,19 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 @app.middleware("http")
 async def no_stale_assets(request: Request, call_next):
     """Arayüz dosyaları her açılışta ETag ile doğrulanır: güncelleme sonrası tarayıcı eski app.js'i kullanmaz."""
+    started = time.time()
     response = await call_next(request)
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache"
+    elif request.url.path.startswith("/api/universities/") and "/progress" not in request.url.path:
+        # Tanı: üniversite isteklerinin saati ve süresi (öğrenci bakışı hız ölçümü)
+        try:
+            (ROOT / "data" / "job-log").mkdir(parents=True, exist_ok=True)
+            with open(ROOT / "data" / "job-log" / "http.log", "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S', time.localtime(started))}  {time.time() - started:6.1f}s  "
+                        f"{response.status_code}  {unquote(str(request.url.path))}?{unquote(request.url.query)}\n")
+        except OSError:
+            pass
     return response
 JOBS: dict[str, dict] = {}
 
@@ -107,9 +117,19 @@ class RefreshIn(BaseModel):
     sources: list[str] | None = Field(default=None, max_length=12)
 
 
+_JOB_LOG = ROOT / "data" / "job-log"
+
+
 def _emit(job: dict, event: dict):
     event["t"] = round(time.time() - job["started"], 1)
     job["events"].append(event)
+    if event.get("type") == "log":  # tanı: adım süreleri kalıcı (sunucu yeniden başlasa da okunur)
+        try:
+            _JOB_LOG.mkdir(parents=True, exist_ok=True)
+            with open(_JOB_LOG / f"{job['id']}.log", "a", encoding="utf-8") as f:
+                f.write(f"{event['t']:7.1f}s  {event.get('step', '')}/{event.get('status', '')}  {event.get('message', '')}\n")
+        except (OSError, KeyError):
+            pass
 
 
 def _slim_records(records) -> list[dict]:
@@ -151,7 +171,57 @@ async def _locate(data: JobIn, name: str, log, llm) -> tuple[Profile, dict]:
     return profile, report
 
 
+_TEZ_TASKS: dict[str, asyncio.Task] = {}
+
+
+def _spawn_tez_details(job_id: str) -> None:
+    """Tez özetleri profil sonucundan sonra, öncelik almadan (arka plan hızında) çekilir; kayıt sonra güncellenir."""
+    if job_id in _TEZ_TASKS and not _TEZ_TASKS[job_id].done():
+        return
+    _TEZ_TASKS[job_id] = asyncio.create_task(_tez_details_later(job_id))
+
+
+async def _tez_details_later(job_id: str) -> None:
+    from .yok_rate import URGENT
+    token = URGENT.set(False)
+    try:
+        result = history_store.load_result(job_id) or {}
+        tez = ((result.get("profile") or {}).get("yok") or {}).get("tez_merkezi") or {}
+        if not tez.get("details_pending"):
+            return
+        name = (result.get("profile") or {}).get("name") or ""
+        cards = await trsources.tez_details((tez.get("own") or []) + (tez.get("advised") or []), name)
+        # Bu arada kayıt yenilenmiş olabilir: en güncelini okuyup yalnız tez kısmını yaz
+        result = history_store.load_result(job_id) or result
+        yok = (result.get("profile") or {}).get("yok") or {}
+        if not (yok.get("tez_merkezi") or {}).get("details_pending"):
+            return
+        own = [c for c in cards if c.get("own")]
+        yok["tez_merkezi"] = {"own": own, "advised": [c for c in cards if not c.get("own")]}
+        abstracts = {c.get("no"): c.get("abstract_tr") or c.get("abstract_en") or "" for c in own}
+        for pub in result.get("publications") or []:
+            for src in pub.get("sources") or [pub]:
+                if isinstance(src, dict) and src.get("source") == "tez" and not src.get("abstract"):
+                    src["abstract"] = abstracts.get(src.get("source_id"), "")
+            if not pub.get("abstract") and pub.get("source") == "tez":
+                pub["abstract"] = abstracts.get(pub.get("source_id"), "")
+        history_store.save_result(job_id, result)
+        if job_id in JOBS:
+            JOBS[job_id]["result"] = result
+        KB_CACHE.pop(job_id, None)
+    except Exception:  # noqa: BLE001 — arka plan işi; profil zaten hazır
+        pass
+    finally:
+        URGENT.reset(token)
+        _TEZ_TASKS.pop(job_id, None)
+
+
 async def pipeline(job: dict, data: JobIn):
+    # Profil çıkarma kullanıcının beklediği iştir: YÖK istekleri arka plan taramalarının önüne geçer ve dakikalık
+    # bütçenin tamamını kullanabilir (toplam hız sınırı değişmez).
+    from .yok_rate import URGENT
+    URGENT.set(True)
+
     async def log(step: str, status: str, message: str):
         _emit(job, {"type": "log", "step": step, "status": status, "message": message})
 
@@ -193,7 +263,7 @@ async def pipeline(job: dict, data: JobIn):
         scholar_task = asyncio.create_task(scholar_works(profile, log))
         early = [asyncio.create_task(trsources.trdizin_works(profile, log, identity_ready)),
                  asyncio.create_task(trsources.openaire_works(profile, log, identity_ready)),
-                 asyncio.create_task(trsources.tez_works(profile, log))]
+                 asyncio.create_task(trsources.tez_works(profile, log, details=False))]
         scholar_task.add_done_callback(announce("Scholar"))
         for label, task in zip(("TR Dizin", "OpenAIRE", "Tez Merkezi"), early):
             task.add_done_callback(announce(label))
@@ -332,6 +402,7 @@ async def pipeline(job: dict, data: JobIn):
         publication_status.annotate(result.get("publications") or [])
         job["result"] = result
         history_store.save_result(result["job_id"], result)
+        _spawn_tez_details(result["job_id"])
         # Yalnız kullanıcının başlattığı tam toplama sırasında WoS işi oluştur.
         # Kayıtlı profilin açılması artık salt durum okumasıdır.
         if job.get("wos", True):
@@ -382,6 +453,26 @@ class AiSettingsIn(BaseModel):
     fast_model: str = ""
     embed_model: str = ""
     base_url: str = ""
+
+
+class SpeedIn(BaseModel):
+    level: int
+
+
+@app.get("/api/settings/yok-speed")
+async def yok_speed_get():
+    from . import yok_rate
+    return {"level": yok_rate.level(), "levels": {k: {"gap": g, "per_min": m} for k, (g, m) in yok_rate.LEVELS.items()}}
+
+
+@app.post("/api/settings/yok-speed")
+async def yok_speed_save(body: SpeedIn):
+    from . import yok_rate
+    try:
+        yok_rate.set_level(body.level)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return await yok_speed_get()
 
 
 @app.get("/api/settings/ai")
@@ -479,6 +570,9 @@ def _start(data: JobIn, refresh: dict | None = None, options: dict | None = None
 
 
 async def _selective_pipeline(job: dict, options: dict):
+    from .yok_rate import URGENT
+    URGENT.set(True)  # profil yenileme de kullanıcının beklediği iş
+
     async def log(step, status, message):
         _emit(job, {"type": "log", "step": step, "status": status, "message": message})
 
@@ -779,6 +873,19 @@ async def start_wos(jid: str, retry: bool = False):
         return current
 
     return wos.start(result, retry=retry, on_publications=persist)
+
+
+@app.get("/api/jobs/{jid}/yok-stats")
+async def yok_stats(jid: str, refresh: bool = False):
+    """Profilin YÖK Akademik istatistikleri (WoS yıllık yayın/atıf, yayın türleri). Profil açılınca ayrıca istenir;
+    profil çıkarmayı bekletmez. YÖK kimliği yoksa ya da YÖK yanıt vermezse boş döner (hata değil)."""
+    result = _result_for(jid)
+    if not result:
+        raise HTTPException(404)
+    link = ((result.get("profile") or {}).get("links") or {}).get("yok") or ""
+    found = re.search(r"authorGuidId=([0-9A-F]{16})", link)
+    data = await yokdir.academic_stats(found[1], refresh) if found else None
+    return data or {"wos_yearly": [], "types": [], "totals": {}}
 
 
 @app.get("/api/jobs/{jid}/wos")
@@ -1436,14 +1543,18 @@ async def university(uid: str):
 @app.get("/api/universities/{uid}/student")
 async def university_student(uid: str, refresh: bool = False, section: str | None = None,
                              faculty: str = Query(default="", max_length=200),
-                             department: str = Query(default="", max_length=200), background: bool = False):
+                             department: str = Query(default="", max_length=200), background: bool = False,
+                             dept_url: str = Query(default="", max_length=500), faculty_url: str = Query(default="", max_length=500),
+                             trusted: bool = False):
     if section is not None and section not in student_view.GROUPS:
         raise HTTPException(422, "Geçerli bir öğrenci bilgisi başlığı seçin.")
     if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not await yokdir._university(uid):
         raise HTTPException(404, "Üniversite bulunamadı.")
     # Model bağlantısı yalnız yeni bir başlık gerçekten taranacaksa hazırlanır.
+    # Bölüm/fakülte sitesi (site-departments'tan): yalnız http(s); okuma kurumun alan adıyla sınırlı kalır.
+    ok = lambda u: u if re.fullmatch(r"https?://[^\s<>\"']+", u or "") else ""
     return await student_view.get(uid, _llm, refresh, section=section, faculty=faculty, department=department,
-                                  background=background)
+                                  background=background, dept_url=ok(dept_url), faculty_url=ok(faculty_url), trusted=trusted)
 
 
 @app.get("/api/universities/{uid}/student/progress")
@@ -1585,6 +1696,7 @@ async def university_departments(uid: str, faculty: str = Query(default="", max_
             raise HTTPException(404, "Bölüm listesi YÖK'te bulunamadı.")
         return await university_site_departments(uid, faculty)
     links = yokdir.department_links(uid, faculty)
+    unit_names.add(names)  # YÖK'ün bölüm adları sözlüğe: diğer fakültelerin site listeleri bununla doğrulanır
     _learn_aliases_soon([faculty, *names])
     return {"faculty": yokdir.display_uni(faculty), "source": "yok", "people": None,
             "departments": [{"name": n, "key": n, "count": None, "url": links.get(n, "")} for n in names]}
@@ -1640,8 +1752,14 @@ async def _site_faculty_staff(uid: str, faculty: str) -> dict | None:
 def _unit_score(department: str, other: str) -> float:
     """Birim adı benzerliği; İngilizce yayın yapan sitelerde öğrenilmiş İngilizce adla da ("İktisat" ~ "Economics")."""
     names = [department, *student_view.ALIASES.get(fold(department), [])]
+    other = directory.strip_cta(other)
     have = yokdir._unit_tokens(other)
-    return max(yokdir._jaccard(yokdir._unit_tokens(n), have) for n in names)
+    score = max(yokdir._jaccard(yokdir._unit_tokens(n), have) for n in names)
+    # İngilizce ad kurallı sözlükle Türkçeye çevrilip karşılaştırılır ("Computer Engineering" ~ "Bilgisayar Mühendisliği").
+    a, b = set(student_view._unit(department).split()), set(student_view._unit(other).split())
+    if a and b:
+        score = max(score, len(a & b) / len(a | b))
+    return score
 
 
 async def _site_department_staff(uid: str, faculty: str, department: str) -> list[dict] | None:
@@ -1674,7 +1792,7 @@ async def university_department_staff(uid: str, faculty: str = Query(default="",
     uni = (await yokdir._university(uid)) or {}
     if people is None:
         try:
-            d = await _directory_call(yokdir.faculty_detail(uid, faculty[:200]))
+            d = await _directory_call(yokdir.faculty_detail(uid, faculty[:200], by_departments=False))
         except HTTPException:
             d = None
         want = yokdir._unit_tokens(department)
@@ -1753,8 +1871,8 @@ def _department_name(raw: str) -> str:
     if not text or _NOT_DEPARTMENT.search(fold(text)):
         return ""
     core = yokdir.clean(_DEPT_NOISE_PARTS.sub(" ", text)).strip(" -–:|,")
-    if len(core) < 3 or _DEPT_GENERIC.match(core) or len(core.split()) > 7:
-        return ""
+    if len(core) < 3 or _DEPT_GENERIC.match(core) or len(core.split()) > 7 or unit_names.is_noise(core):
+        return ""  # duyuru/ofis/menü başlığı ("Akademik Destek", "Socrates-Erasmus", "Bölümlerimiz")
     return yokdir.display_uni(core) if core.isupper() else core
 
 
