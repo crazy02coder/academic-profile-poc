@@ -1102,9 +1102,9 @@ function mountStaffList(host, prefix, people, options = {}) {
       return `<div class="person staff-person" style="--i:${Math.min(i, 24)}">${avatar(p.name, p.photo)}
         <div class="p-main"><b>${esc(p.name)}</b>${options.mode === "yok" ? staffRoles(p).map((r) => `<span class="role-badge ${/^(Dekan|Bölüm Başkanı)$/.test(r) ? "lead" : ""}">${esc(r)}</span>`).join("") : ""}<span>${esc([p.title, p.department].filter(Boolean).join(" · "))}</span>
           <span class="staff-metrics">${esc(metrics)}</span>${staffSources(p).length ? `<div class="chips">${sourceBadges({ sources: staffSources(p) })}</div>` : ""}${state ? `<span class="faint">${esc(state)}</span>` : ""}</div>
-        <div class="p-act">${p.email ? `<a class="icon-btn" href="mailto:${esc(p.email)}" title="${esc(p.email)}">${icon("mail")}</a>` : ""}
+        <div class="p-act">
           ${safeUrl(p.site_url || p.url) ? `<a class="icon-btn" href="${esc(safeUrl(p.site_url || p.url))}" target="_blank" rel="noopener" title="Kişinin kaynak sayfası">${icon("external")}</a>` : ""}
-          ${refreshBtn}<button class="btn sm ${p.chat_id || refreshBtn ? "" : "primary"}" data-staff-open="${id}" type="button">${p.chat_id ? "Aç" : "Profil"}</button></div></div>`;
+          ${refreshBtn}<button class="btn sm ${p.chat_id || refreshBtn ? "" : "primary"}" data-staff-open="${id}" type="button" title="${p.chat_id ? "Kayıtlı profili aç" : "Bu akademisyenin profilini bizim sistemde çıkar"}">${p.chat_id ? "Aç" : `${icon("sparkle")}Profil çıkar`}</button></div></div>`;
     }).join("") || `<div class="col-empty">Filtreye uygun akademisyen yok.</div>`;
     $(`#${prefix}StaffCount`).textContent = `${fmtNum(list.length)} / ${fmtNum(all.length)} akademisyen`;
     if (options.countElement) options.countElement.textContent = all.length;
@@ -1118,9 +1118,11 @@ function openStaffProfile(id) {
   const p = entry.person;
   if (p.chat_id) { closeDrawer(); location.hash = `#/profil/${p.chat_id}`; return; }
   closeDrawer();
-  if (entry.mode === "yok" || /akademik\.yok\.gov\.tr/.test(safeUrl(p.url))) {
+  // YÖK satırı (akademik.yok.gov.tr bağlantılı) YÖK'ten; sitedeki kişi kartı ya da OpenAlex satırı kişinin sayfasından.
+  if (/akademik\.yok\.gov\.tr/.test(safeUrl(p.url))) {
     startFromYok({ ...p, university: p.university || entry.institution || "" });
-  } else startJob(p.site_url || p.url || entry.page, p.name);
+  } else if (safeUrl(p.site_url || p.url || entry.page)) startJob(p.site_url || p.url || entry.page, p.name);
+  else newPersonModal("", p.name);
 }
 function paperCard(p, source, i = 0) {
   const id = reg(p, source);

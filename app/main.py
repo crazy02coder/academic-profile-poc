@@ -1737,6 +1737,27 @@ _NOT_DEPARTMENT = re.compile(r"basvuru|duyuru|haber|etkinlik|iletisim|lisansustu
                              r"admission|apply|news|contact|graduate program|ogrenci isleri|takvim|yonetmelik")
 
 
+_DEPT_NOISE_PARTS = re.compile(r"\b(?:19|20)\d{2}\s*[-–/]\s*(?:19|20)\d{2}\b|\b(?:19|20)\d{2}\b|"
+                               r"\b(?:g[üu]z|bahar|yaz)\s+(?:d[öo]nemi|yar[ıi]y[ıi]l[ıi])\b|"
+                               r"\b(?:haftal[ıi]k\s+)?ders\s+programlar[ıi]?\b|\bders\s+program[ıi]\b|"
+                               r"\bs[ıi]nav\s+programlar[ıi]?\b|\bb[öo]l[üu]m[üu]\b|\bprogram[ıi]\b", re.I)
+_DEPT_GENERIC = re.compile(r"^(?:haftal[ıi]k|b[öo]l[üu]m hakk[ıi]nda|hakk[ıi]m[ıi]zda|hakk[ıi]nda|tan[ıi]t[ıi]m|misyon|vizyon|"
+                           r"akademik kadro|personel|[öo][ğg]renci|mezun|staj|erasmus|i[şs]letme kodlar[ıi]|"
+                           r"lisans|[öo]n lisans|bolumler|b[öo]l[üu]mler|programlar|duyurular?|haberler?)$", re.I)
+
+
+def _department_name(raw: str) -> str:
+    """Sitenin menüsünden gelen bağlantı metninden bölüm adı; bölüm değilse "". "2026-2027 GÜZ DÖNEMİ BİLGİSAYAR
+    MÜHENDİSLİĞİ BÖLÜMÜ DERS PROGRAMI" → "Bilgisayar Mühendisliği"; "Haftalık Ders Programı", "Bölüm Hakkında" → ""."""
+    text = yokdir.clean(raw)
+    if not text or _NOT_DEPARTMENT.search(fold(text)):
+        return ""
+    core = yokdir.clean(_DEPT_NOISE_PARTS.sub(" ", text)).strip(" -–:|,")
+    if len(core) < 3 or _DEPT_GENERIC.match(core) or len(core.split()) > 7:
+        return ""
+    return yokdir.display_uni(core) if core.isupper() else core
+
+
 def _learn_aliases_soon(names: list[str]) -> None:
     """Bölüm listesi gösterilirken adların İngilizcesi arka planda öğrenilir (tek model çağrısı); bölüme
     tıklanınca İngilizce yayın yapan sitede doğrulama ve arama beklemeden hazır olur."""
@@ -1801,8 +1822,11 @@ async def university_site_departments(uid: str, faculty: str = Query(default="",
         wiki = await _wiki_departments(uid, faculty, best["url"])
         if wiki:
             return wiki
-    urls = {re.sub(r"\s+B[öo]l[üu]m[üu]$", "", yokdir.clean(x["name"]), flags=re.I): x.get("url", "") for x in deps
-            if x.get("name") and not _NOT_DEPARTMENT.search(fold(x["name"]))}
+    urls: dict[str, str] = {}
+    for x in deps:
+        name = _department_name(x.get("name") or "")
+        if name and name not in urls:
+            urls[name] = x.get("url", "")
     names = sorted(urls, key=fold)
     _learn_aliases_soon([faculty, *names])
     return {"university": "", "faculty": yokdir.display_uni(faculty), "source": "site", "faculty_url": best["url"],

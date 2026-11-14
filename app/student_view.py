@@ -307,6 +307,10 @@ def _remember(uid: str, **fields):
         pass
 
 
+# Ders kataloğu sistemleri (bölüm sitesi ya da dosya sunucusu değil): obs., sis., ects., bologna., bilgipaketi. …
+_CATALOG_HOST = re.compile(r"(?:[a-z]*ects|obs|oibs|ubs|ebs|sis|bologna|bilgipaketi|akts|katalog|catalog|ders|course)[a-z0-9-]*\.", re.I)
+
+
 def _hubs(uid: str) -> list[str]:
     """Bu sitede bölüm bağlantısının bulunduğu liste sayfaları (ör. Bologna lisans program listesi); kardeş bölümler
     gezintiye buradan başlar. Öğrenilir, siteye özel değildir."""
@@ -933,7 +937,15 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                         try:
                             limit = 8_000_000 if section == "courses" else 4_000_000
                             if is_home:
-                                raw, mime, final = await fetch_home_page(client, url, limit)
+                                try:
+                                    raw, mime, final = await fetch_home_page(client, url, limit)
+                                except (httpx.HTTPError, ValueError, OSError):
+                                    # httpx reddedildi (TLS, bot süzgeci, zaman aşımı): Scrapling tarayıcı kimliğiyle.
+                                    from .net import fetch_static
+                                    got = await fetch_static(url, timeout=15)
+                                    if got.status >= 400 or not got.html:
+                                        raise ValueError(f"HTTP {got.status}")
+                                    raw, mime, final = got.html.encode("utf-8"), "text/html", got.url or url
                             else:
                                 raw, mime, final = await _hedged(client, url, limit)
                             if registrable(urlsplit(final).hostname or "") != domain:
@@ -1013,10 +1025,12 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                     await asyncio.wait_for(asyncio.shield(alias_task), 8)
                 except Exception:
                     pass
-                if not first:
-                    if search:
-                        search.cancel()
+                if not first and not (search or guessed or hub_task):
                     raise ValueError("Kurum sitesi şu anda okunamıyor; tekrar deneyebilirsiniz.")
+                if not first:
+                    # Ana sayfa okunamadı ama arama, öğrenilmiş adres kalıbı ya da liste sayfaları var: durmadan onlarla devam.
+                    first = _scope(_page("<html></html>", home, domain), faculty, department)
+                    report("Ana sayfa okunamadı; arama ve öğrenilmiş yollarla devam ediliyor…")
                 pages.append(first)
                 result["home"] = first["url"]
                 seen.add(_url_key(home))
@@ -1130,6 +1144,14 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                         via = by_url[_url_key(via)].get("via")
                     if via and _url_key(via) != _url_key(result["home"]):
                         _remember(uid, hub=via)
+                    # Katalog ayrı bir sistemdeyse (ör. ects.… / bologna.… / obs.…) o sistemin giriş sayfası da liste
+                    # sayfası olarak saklanır: program listesi oradadır, kardeş bölümler doğrudan oradan başlar.
+                    cat = urlsplit(source["url"])
+                    if (cat.hostname and _CATALOG_HOST.match(cat.hostname) and cat.hostname != urlsplit(result["home"]).hostname
+                            and cat.hostname != urlsplit(via or "").hostname):
+                        first = next((seg for seg in cat.path.split("/") if seg), "")
+                        root = f"{cat.scheme}://{cat.netloc}/" + (first + "/" if re.fullmatch(r"[a-z]{2}", first) else "")
+                        _remember(uid, hub=root)
             if scoped and not evidence_pages and not missing:
                 result["errors"].append("Seçilen fakülte/bölümün bilgileri resmî sayfa metninde doğrulanamadı; program veya ders içeriği varsayılmadı.")
             if section == "courses":
@@ -1257,7 +1279,17 @@ async def get(uid: str, llm, refresh: bool = False, section: str | None = None, 
         URGENT_KEYS.add(key)  # arka planda sürüyorsa da öne alınır
     task = TASKS.get(key)
     if task is None:
-        task = TASKS[key] = asyncio.create_task(_collect(uid, llm, section, faculty, department))
+        async def run():
+            hubs_before, pattern_before = set(_hubs(uid)), _pattern_url(uid, department) if department else ""
+            out = await _collect(uid, llm, section, faculty, department)
+            empty = not ((out.get("groups") or {}).get(section) or {}).get("items")
+            learned = set(_hubs(uid)) - hubs_before or (department and _pattern_url(uid, department) != pattern_before)
+            if section == "courses" and department and empty and learned:
+                # Bu tarama sürerken kardeş bölüm sitenin yapısını öğrendi (liste sayfası / adres kalıbı): bir kez
+                # daha, öğrenilen yoldan (kısa sürer).
+                out = await _collect(uid, llm, section, faculty, department)
+            return out
+        task = TASKS[key] = asyncio.create_task(run())
         def done(completed):
             if TASKS.get(key) is completed:
                 TASKS.pop(key, None)
