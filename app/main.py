@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import base64
 import copy
 import logging
@@ -17,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Literal
 
-from . import rea, recipes, org_assets, student_view, student_assistant, uni_facts, firm_facts, reading
+from . import advisors, rea, recipes, org_assets, student_view, student_assistant, uni_facts, firm_facts, reading
 from .consensus import save_run, verify_papers, verify_profile
 from .net import fetch_static
 from .analysis import analyze
@@ -36,7 +37,7 @@ from .llm import LLM, list_models
 from .sources import crossref_works, openalex_by_doi, openalex_works, orcid_works, scholar_works, yok_works
 import httpx
 
-from . import directory, firms, industry, library, patents, profile_refresh, publication_status, quartiles, trsources, unit_publications, wos, wos_enrichment, wos_verification, yokdir
+from . import directory, firms, industry, library, patents, profile_refresh, publication_status, quartiles, trsources, unit_publications, wiki_units, wos, wos_enrichment, wos_verification, yokdir
 
 from .library_routes import router as library_router
 
@@ -1414,19 +1415,44 @@ async def university(uid: str):
         raise HTTPException(502, f"YÖK'e ulaşılamadı ({type(exc).__name__}).") from None
     if not d:
         raise HTTPException(404, "Üniversite YÖK listesinde bulunamadı.")
+    if d.get("yok_error") and not d["items"] and d.get("home"):
+        # YÖK'e ulaşılamıyor ve kayıt yok: fakülteler üniversitenin kendi sitesinden (YÖK'e istek atmaz).
+        try:
+            site = await asyncio.wait_for(directory.faculties(d["home"], await _llm()), 60)
+            d["items"] = [{"name": f["name"], "raw": f["name"], "url": f["url"]} for f in site.get("items", [])]
+            if d["items"]:
+                d["yok_error"] = "YÖK Akademik'e şu an ulaşılamıyor; fakülteler üniversitenin sitesinden gösteriliyor."
+        except Exception:
+            pass
+    if d.get("yok_error") and not d["items"]:
+        # Site de listeyi vermedi (engelli site, JS menü): Türkçe Vikipedi maddesi.
+        wiki = await wiki_units.units(d["name"])
+        d["items"] = [{"name": yokdir.display_uni(n), "raw": n} for n in wiki]
+        if d["items"]:
+            d["yok_error"] = "YÖK Akademik'e ve üniversite sitesine şu an ulaşılamıyor; fakülteler Vikipedi'den gösteriliyor."
     return d
 
 
 @app.get("/api/universities/{uid}/student")
 async def university_student(uid: str, refresh: bool = False, section: str | None = None,
                              faculty: str = Query(default="", max_length=200),
-                             department: str = Query(default="", max_length=200)):
+                             department: str = Query(default="", max_length=200), background: bool = False):
     if section is not None and section not in student_view.GROUPS:
         raise HTTPException(422, "Geçerli bir öğrenci bilgisi başlığı seçin.")
     if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not await yokdir._university(uid):
         raise HTTPException(404, "Üniversite bulunamadı.")
     # Model bağlantısı yalnız yeni bir başlık gerçekten taranacaksa hazırlanır.
-    return await student_view.get(uid, _llm, refresh, section=section, faculty=faculty, department=department)
+    return await student_view.get(uid, _llm, refresh, section=section, faculty=faculty, department=department,
+                                  background=background)
+
+
+@app.get("/api/universities/{uid}/student/progress")
+async def university_student_progress(uid: str, section: str = "", faculty: str = Query(default="", max_length=200),
+                                      department: str = Query(default="", max_length=200)):
+    """Süren toplamanın o ana kadar bulduğu bilgiler ve adımı (yerel, ağa çıkmaz); bitince boş döner."""
+    if section not in student_view.GROUPS or not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(422, "Geçersiz istek.")
+    return student_view.progress(uid, section, faculty, department)
 
 
 @app.get("/api/universities/{uid}/student/preview")
@@ -1441,12 +1467,12 @@ async def university_student_preview(uid: str, url: str):
 
 
 @app.get("/api/universities/{uid}/student/program")
-async def university_student_program(uid: str, url: str):
+async def university_student_program(uid: str, url: str, key: str = Query(default="", max_length=20)):
     """OIBS Bologna program profili, mezun iş alanları ve üst kademe bilgisi (yalnız kurum alan adı)."""
     if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or len(url) > 2000:
         raise HTTPException(422, "Geçersiz istek.")
     try:
-        return await student_view.program(uid, url)
+        return await student_view.program(uid, url, key)
     except (ValueError, httpx.HTTPError, OSError, asyncio.TimeoutError) as exc:
         raise HTTPException(422, str(exc)[:200] or "Program bilgisi okunamadı.") from None
 
@@ -1511,11 +1537,11 @@ async def university_staff_counts(uid: str):
 
 
 @app.get("/api/universities/{uid}/roles")
-async def university_roles(uid: str, name: str = ""):
+async def university_roles(uid: str, name: str = "", fetch: bool = False):
     """Fakültede süren idari görevler (dekan, bölüm başkanı); yalnız önbellekteki kadro için."""
     if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not name or len(name) > 200:
         raise HTTPException(422, "Geçersiz istek.")
-    d = await uni_facts.faculty_roles(uid, name)
+    d = await uni_facts.faculty_roles(uid, name, fetch)  # varsayılan: yalnız kayıtlı görevler, YÖK'e istek yok
     if d is None:
         raise HTTPException(404, "Üniversite YÖK listesinde bulunamadı.")
     return d
@@ -1526,11 +1552,261 @@ async def university_faculty(uid: str, name: str = "", metrics: bool = True):
     """Fakülte kadrosu ve bölümleri (kişilerin YÖK kurum yolundan). İlk açılış birkaç saniye, sonra önbellekten."""
     if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not name:
         raise HTTPException(422, "Geçersiz istek.")
-    d = await _directory_call(yokdir.faculty_detail(uid, name[:200]))
-    if not d:
-        raise HTTPException(502, "Bu birimin kadrosu YÖK'ten alınamadı. Biraz sonra tekrar deneyin.")
+    try:
+        d = await _directory_call(yokdir.faculty_detail(uid, name[:200]))
+    except HTTPException:
+        d = None
+    if not d or not d["people"]:
+        # YÖK'ten kadro gelmedi (ulaşılamadı ya da birimde kayıt yok): hata yerine kurum sitesindeki kişi kartları.
+        site = await _site_faculty_staff(uid, name[:200])
+        if site:
+            return site
+        if not d:
+            raise HTTPException(404, "Bu birimin kadrosu ne YÖK Akademik'te ne de üniversite sitesinde bulunabildi.")
     # Öğrenci dizini için bütün kayıtlı profillerin yayın/atıf metriklerini okumaya gerek yok.
     return {**d, "people": _staff_metrics(d["people"], d["university"]) if metrics else d["people"]}
+
+
+@app.get("/api/universities/{uid}/departments")
+async def university_departments(uid: str, faculty: str = Query(default="", max_length=200), refresh: bool = False,
+                                  background: bool = False):
+    """Öğrenci bakışı: fakültenin bölümleri hemen (kadro çekilmez). YÖK birim listesi; olmazsa kurum sitesi."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not faculty:
+        raise HTTPException(422, "Geçersiz istek.")
+    try:
+        names = await asyncio.wait_for(yokdir.faculty_departments(uid, faculty, refresh, urgent=not background), 25 if not background else 120)
+    except Exception:
+        names = None
+    if not names:
+        # YÖK'e ulaşılamadı: önce daha önce kaydedilmiş kadrodan (ağsız), sonra kurum sitesinden.
+        names = yokdir.cached_departments(uid, faculty, await yokdir._university(uid))
+    if not names:
+        if background:  # arka plan ön yüklemesi siteyi taramaz; fakülte tıklanınca site yedeği çalışır
+            raise HTTPException(404, "Bölüm listesi YÖK'te bulunamadı.")
+        return await university_site_departments(uid, faculty)
+    links = yokdir.department_links(uid, faculty)
+    _learn_aliases_soon([faculty, *names])
+    return {"faculty": yokdir.display_uni(faculty), "source": "yok", "people": None,
+            "departments": [{"name": n, "key": n, "count": None, "url": links.get(n, "")} for n in names]}
+
+
+def _site_person(p: dict, university: str, faculty: str, department: str) -> dict:
+    return {"name": p.get("name", ""), "title": p.get("title", ""), "photo": p.get("photo", ""), "url": p.get("url", ""),
+            "site_url": p.get("url", ""), "university": university, "faculty": faculty, "department": department,
+            "department_raw": department, "orcid": "", "email": p.get("email", ""), "yok_id": "", "source": "site"}
+
+
+async def _site_faculty_staff(uid: str, faculty: str) -> dict | None:
+    """YÖK kadrosu yokken fakültenin kadrosu üniversite sitesinden: bölüm sayfalarının kişi kartları (aynı anda
+    üç sayfa), bölüm yoksa fakülte sayfası. YÖK'e istek atmaz. None: sitede de bulunamadı."""
+    try:
+        deps = await university_site_departments(uid, faculty)
+    except HTTPException:
+        return None
+    uni = (await yokdir._university(uid)) or {}
+    university, fac_name = uni.get("name", ""), yokdir.display_uni(faculty)
+    sem = asyncio.Semaphore(3)
+
+    async def one(dep):
+        async with sem:
+            try:
+                return dep["name"], await asyncio.wait_for(directory.site_people(dep["url"]), 40)
+            except Exception:
+                return dep["name"], []
+    people, seen = [], set()
+    for dep_name, rows in await asyncio.gather(*(one(x) for x in deps["departments"] if x.get("url"))):
+        for p in rows:
+            key = fold(p.get("name", ""))
+            if key and key not in seen:
+                seen.add(key)
+                people.append(_site_person(p, university, fac_name, dep_name))
+    if not people and deps.get("faculty_url"):
+        try:
+            rows = await asyncio.wait_for(directory.site_people(deps["faculty_url"]), 40)
+        except Exception:
+            rows = []
+        people = [_site_person(p, university, fac_name, "") for p in rows]
+    if not people:
+        return None
+    counts = Counter(p["department"] for p in people)
+    names = {x["name"] for x in deps["departments"]} | set(counts)
+    departments = [{"name": n or "Bölümü belirtilmemiş", "key": n, "count": counts.get(n, 0)}
+                   for n in sorted(names, key=lambda n: (not n, fold(n)))]
+    return {"university": university, "faculty": fac_name, "people": people, "departments": departments,
+            "domain": yokdir.registrable(re.sub(r"^https?://", "", deps.get("faculty_url", "")).split("/")[0]),
+            "source": "site", "notice": "YÖK Akademik'ten kadro alınamadı; liste üniversitenin sitesinden okundu."}
+
+
+def _unit_score(department: str, other: str) -> float:
+    """Birim adı benzerliği; İngilizce yayın yapan sitelerde öğrenilmiş İngilizce adla da ("İktisat" ~ "Economics")."""
+    names = [department, *student_view.ALIASES.get(fold(department), [])]
+    have = yokdir._unit_tokens(other)
+    return max(yokdir._jaccard(yokdir._unit_tokens(n), have) for n in names)
+
+
+async def _site_department_staff(uid: str, faculty: str, department: str) -> list[dict] | None:
+    """Tek bölümün kadrosu kurum sitesinden (YÖK'e istek yok)."""
+    try:
+        deps = await university_site_departments(uid, faculty)
+    except HTTPException:
+        return None
+    dep = max(deps["departments"], key=lambda x: _unit_score(department, x["name"]), default=None)
+    url = dep["url"] if dep and dep.get("url") and _unit_score(department, dep["name"]) >= 0.6 else ""
+    if not url:
+        return None
+    try:
+        rows = await asyncio.wait_for(directory.site_people(url), 40)
+    except Exception:
+        return None
+    uni = (await yokdir._university(uid)) or {}
+    return [_site_person(p, uni.get("name", ""), yokdir.display_uni(faculty), department) for p in rows] or None
+
+
+@app.get("/api/universities/{uid}/department-staff")
+async def university_department_staff(uid: str, faculty: str = Query(default="", max_length=200),
+                                      department: str = Query(default="", max_length=200), background: bool = False,
+                                      refresh: bool = False):
+    """Öğrenci bakışı: yalnız tıklanan bölümün kadrosu (YÖK bölüm süzgeci, çoğunlukla tek istek). Süzgeç
+    kullanılamazsa fakülte kadrosundan ayıklanır. background=true: arka plan ön yüklemesi, öncelik almaz."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not faculty or not department:
+        raise HTTPException(422, "Geçersiz istek.")
+    people = await yokdir.department_staff(uid, faculty, department, urgent=not background, refresh=refresh)
+    uni = (await yokdir._university(uid)) or {}
+    if people is None:
+        try:
+            d = await _directory_call(yokdir.faculty_detail(uid, faculty[:200]))
+        except HTTPException:
+            d = None
+        want = yokdir._unit_tokens(department)
+        people = [p for p in (d or {}).get("people", []) if yokdir._jaccard(want, yokdir._unit_tokens(p["department"])) >= 0.6]
+        if people:
+            return {"people": people}
+    elif people:
+        return {"people": yokdir.by_rank([yokdir.public_person(p, uni.get("raw", "")) for p in people])}
+    # YÖK'ten kadro gelmedi: hata yerine bölümün kendi sayfasındaki kişi kartları.
+    site = await _site_department_staff(uid, faculty, department)
+    if site:
+        return {"people": site, "source": "site"}
+    # Son yedek: OpenAlex'te bu üniversitede bölümün konusunda yayın yapanlar (Danışman bul ile aynı arama; yaklaşık).
+    try:
+        topic = (student_view.ALIASES.get(fold(department)) or [department])[0]
+        found = await asyncio.wait_for(advisors.find(topic, uid, english=topic), 30)
+    except Exception:
+        found = {"items": []}
+    people = [{"name": x["name"], "title": x.get("title") or "", "photo": "", "url": f"https://openalex.org/{x['openalex']}",
+               "site_url": "", "university": x.get("institution", ""), "faculty": yokdir.display_uni(faculty), "department": department,
+               "orcid": x.get("orcid", ""), "yok_id": "", "source": "openalex"} for x in found.get("items", [])[:25]]
+    return {"people": people, "source": "openalex" if people else "none",
+            "notice": "YÖK ve bölüm sayfası kadro vermedi; OpenAlex'te bu üniversitede bölümün konusunda yayın yapanlar (yaklaşık)." if people else ""}
+
+
+@app.get("/api/universities/{uid}/site-photos")
+async def university_site_photos(uid: str, faculty: str = Query(default="", max_length=200),
+                                 department: str = Query(default="", max_length=200)):
+    """YÖK kadrosundaki kişilerin fotoğrafları: bölümün (yoksa fakültenin) kendi sayfasındaki kişi kartlarından,
+    ad eşleşmesiyle. YÖK'e istek atmaz. {"photos": {ad: foto adresi}, "urls": {ad: profil sayfası}}."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not faculty:
+        raise HTTPException(422, "Geçersiz istek.")
+    try:
+        deps = await university_site_departments(uid, faculty)
+    except HTTPException:
+        return {"photos": {}, "urls": {}}
+    dep = max(deps["departments"], key=lambda x: _unit_score(department, x["name"]), default=None) if department else None
+    url = dep["url"] if dep and dep.get("url") and _unit_score(department, dep["name"]) >= 0.6 else deps["faculty_url"]
+    try:
+        people = await asyncio.wait_for(directory.site_people(url), 40)
+    except Exception:
+        return {"photos": {}, "urls": {}}
+    return {"photos": {p["name"]: p["photo"] for p in people if p.get("photo")},
+            "urls": {p["name"]: p["url"] for p in people if p.get("url")}}
+
+
+async def _wiki_departments(uid: str, faculty: str, faculty_url: str = "") -> dict | None:
+    """Fakültenin bölümleri Vikipedi'den (son yedek; YÖK'e ve kurum sitesine istek atmaz)."""
+    uni = (await yokdir._university(uid)) or {}
+    wiki = await wiki_units.units(uni.get("name") or uid)
+    name = max(wiki, key=lambda n: _unit_score(faculty, n), default=None)
+    if not name or _unit_score(faculty, name) < 0.6 or not wiki[name]:
+        return None
+    return {"university": "", "faculty": yokdir.display_uni(faculty), "source": "wikipedia", "faculty_url": faculty_url,
+            "people": [], "departments": [{"name": n, "key": n, "count": None, "url": ""} for n in sorted(wiki[name], key=fold)]}
+
+
+# Sitenin menüsünden bölüm diye gelen ama bölüm olmayan bağlantılar (başvuru, duyuru, lisansüstü sayfaları…).
+_NOT_DEPARTMENT = re.compile(r"basvuru|duyuru|haber|etkinlik|iletisim|lisansustu|yuksek lisans|doktora|enstitu|"
+                             r"admission|apply|news|contact|graduate program|ogrenci isleri|takvim|yonetmelik")
+
+
+def _learn_aliases_soon(names: list[str]) -> None:
+    """Bölüm listesi gösterilirken adların İngilizcesi arka planda öğrenilir (tek model çağrısı); bölüme
+    tıklanınca İngilizce yayın yapan sitede doğrulama ve arama beklemeden hazır olur."""
+    task = asyncio.create_task(student_view._learn_aliases(_llm, [n for n in names if n][:40]))
+    task.add_done_callback(lambda t: t.exception())
+
+
+def _name_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", fold(yokdir.display_uni(name)).replace("ı", "i")).strip("-")
+
+
+async def _find_faculty_page(home: str, facs: list[dict], faculty: str) -> dict | None:
+    """Menüde olmayan fakültenin sayfası. 1) Tarif: kardeş fakültelerin adresi adlarının kalıbıysa
+    (…/fakulteler/tip-fakultesi) aynı kalıpla adres kurulur. 2) Site içi arama (arama motorları aynı anda)."""
+    from .net import fetch_smart
+    slug = _name_slug(faculty)
+    guesses = []
+    for f in facs:
+        own = _name_slug(f["name"])
+        if own and own in f["url"]:
+            guesses.append(f["url"].replace(own, slug, 1))
+    for url in dict.fromkeys(guesses):
+        try:
+            page = await asyncio.wait_for(fetch_smart(url, allow_stealth=False), 15)
+        except Exception:
+            continue
+        if page.status < 400 and page.html and _unit_score(faculty, re.sub(r"<[^>]+>", " ", page.html[:200000])) > 0:
+            return {"name": yokdir.display_uni(faculty), "url": page.url or url}
+    try:
+        from .websearch import site_results_race
+        rows = await asyncio.wait_for(site_results_race(home, yokdir.display_uni(faculty), k=5), 20)
+    except Exception:
+        rows = []
+    for row in rows:
+        if _unit_score(faculty, f"{row.get('title', '')} {row.get('url', '').replace('-', ' ')}") >= 0.5:
+            return {"name": yokdir.display_uni(faculty), "url": row["url"]}
+    return None
+
+
+@app.get("/api/universities/{uid}/site-departments")
+async def university_site_departments(uid: str, faculty: str = Query(default="", max_length=200)):
+    """Öğrenci bakışı: fakültenin bölümleri üniversitenin kendi sitesinden (YÖK'e istek atmaz). YÖK kadrosu
+    alınamadığında bölüm listesi bununla gelir; kadro yalnız "Akademik kadro" kutusunu etkiler."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not faculty:
+        raise HTTPException(422, "Geçersiz istek.")
+    home = await org_assets.university_home(uid)
+    if not home:
+        raise HTTPException(502, "Üniversitenin resmî sitesi bulunamadı.")
+    llm = await _llm()
+    facs = (await _directory_call(directory.faculties(home, llm)))["items"]
+    best = max(facs, key=lambda f: _unit_score(faculty, f["name"]), default=None)
+    if not best or _unit_score(faculty, best["name"]) < 0.5:
+        # Fakülte sitenin menüsünde yok: kardeş fakültelerin adres kalıbından tahmin, olmazsa site içi arama.
+        best = await _find_faculty_page(home, facs, faculty)
+        if not best:
+            wiki = await _wiki_departments(uid, faculty)
+            if wiki:
+                return wiki
+            raise HTTPException(404, "Bu fakültenin bölümleri ne YÖK'te ne sitede ne de Vikipedi'de bulunabildi.")
+    deps = (await _directory_call(directory.departments(best["url"], llm)))["items"]
+    if not deps:
+        wiki = await _wiki_departments(uid, faculty, best["url"])
+        if wiki:
+            return wiki
+    urls = {re.sub(r"\s+B[öo]l[üu]m[üu]$", "", yokdir.clean(x["name"]), flags=re.I): x.get("url", "") for x in deps
+            if x.get("name") and not _NOT_DEPARTMENT.search(fold(x["name"]))}
+    names = sorted(urls, key=fold)
+    _learn_aliases_soon([faculty, *names])
+    return {"university": "", "faculty": yokdir.display_uni(faculty), "source": "site", "faculty_url": best["url"],
+            "people": [], "departments": [{"name": n, "key": n, "count": None, "url": urls.get(n, "")} for n in names]}
 
 
 class YokPapersIn(BaseModel):
@@ -1593,9 +1869,46 @@ async def people_search(q: str = ""):
     if len(fold(q)) < 3:
         raise HTTPException(422, "En az 3 harf yazın.")
     try:
-        return {"items": await yokdir.search_people(q[:120])}
+        return {"items": await yokdir.search_people(q[:120]), "source": "yok"}
     except httpx.HTTPError as exc:
-        raise HTTPException(502, f"YÖK'e ulaşılamadı ({type(exc).__name__}). Biraz sonra tekrar deneyin.") from None
+        reason = type(exc).__name__
+    # YÖK'e ulaşılamadı: arama durmaz, OpenAlex yazar araması (Türkiye'deki kurumlar önce).
+    try:
+        items = await _openalex_people(q[:120])
+    except (httpx.HTTPError, ValueError):
+        items = []
+    return {"items": items, "source": "openalex",
+            "notice": f"YÖK Akademik'e şu an ulaşılamıyor ({reason}); sonuçlar OpenAlex'ten. Unvan ve bölüm bilgisi eksik olabilir."}
+
+
+async def _openalex_people(q: str) -> list[dict]:
+    """OpenAlex'te ad araması; kurumun sitesi (profil işi buradan başlar) kurum kaydından eklenir."""
+    from .config import OPENALEX_PARAMS
+    from .reading import OPENALEX, _client as oa_client
+    select = "id,display_name,orcid,last_known_institutions,topics,works_count"
+    async with oa_client() as client:
+        r = await client.get(f"{OPENALEX}/authors", params=OPENALEX_PARAMS | {"search": q, "per_page": 15, "select": select,
+                                                                          "filter": "last_known_institutions.country_code:TR"})
+        rows = r.json().get("results") or [] if r.status_code == 200 else []
+        if not rows:
+            r = await client.get(f"{OPENALEX}/authors", params=OPENALEX_PARAMS | {"search": q, "per_page": 10, "select": select})
+            rows = r.json().get("results") or [] if r.status_code == 200 else []
+        inst_ids = {(a.get("last_known_institutions") or [{}])[0].get("id", "").rsplit("/", 1)[-1] for a in rows} - {""}
+        homes = {}
+        if inst_ids:
+            r = await client.get(f"{OPENALEX}/institutions", params=OPENALEX_PARAMS | {
+                "filter": "openalex:" + "|".join(sorted(inst_ids)[:50]), "select": "id,homepage_url", "per_page": 50})
+            for i in (r.json().get("results") or []) if r.status_code == 200 else []:
+                homes[i["id"].rsplit("/", 1)[-1]] = i.get("homepage_url") or ""
+    out = []
+    for a in rows:
+        inst = (a.get("last_known_institutions") or [{}])[0]
+        iid = (inst.get("id") or "").rsplit("/", 1)[-1]
+        out.append({"name": a.get("display_name") or "", "title": "", "university": inst.get("display_name") or "",
+                    "faculty": "", "department": ", ".join(t["display_name"] for t in (a.get("topics") or [])[:2]),
+                    "orcid": (a.get("orcid") or "").rsplit("/", 1)[-1], "url": a.get("id") or "", "site": homes.get(iid, ""),
+                    "photo": "", "email": "", "yok_id": "", "source": "openalex", "works": a.get("works_count") or 0})
+    return out
 
 
 @app.get("/api/overview")

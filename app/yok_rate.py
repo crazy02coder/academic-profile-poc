@@ -8,6 +8,7 @@ yok.gov.tr'ye giden her istek sayılır, başka alan adları etkilenmez.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import fcntl
 import json
 import time
@@ -19,6 +20,12 @@ RATE_GAP = 2.0
 RATE_PER_MIN = 20
 _RATE_FILE = DIR / "_rate.json"
 _LOCK_FILE = DIR / "_rate.lock"
+# Kullanıcının beklediği küçük istekler (ör. bölüm listesi) arka plan taramalarının arkasında kalmasın:
+# acil istek varken diğerleri sırasını ona bırakır; dakikalık bütçenin son URGENT_ROOM'u yalnız acil isteklere açık.
+# Toplam bütçe (RATE_GAP, RATE_PER_MIN) değişmez; YÖK'e giden istek sayısı artmaz.
+URGENT = contextvars.ContextVar("yok_urgent", default=False)
+URGENT_ROOM = 4
+_urgent_waiting = 0
 
 
 def is_yok(host: str | None) -> bool:
@@ -26,7 +33,7 @@ def is_yok(host: str | None) -> bool:
     return host == "yok.gov.tr" or host.endswith(".yok.gov.tr")
 
 
-def _reserve() -> float:
+def _reserve(urgent: bool = False) -> float:
     """Yer varsa şimdiye bir istek yazar ve 0 döndürür; yoksa beklenmesi gereken saniyeyi döndürür."""
     DIR.mkdir(parents=True, exist_ok=True)
     with open(_LOCK_FILE, "a+") as lock:
@@ -41,8 +48,9 @@ def _reserve() -> float:
             wait = 0.0
             if stamps:
                 wait = max(wait, stamps[-1] + RATE_GAP - now)
-            if len(stamps) >= RATE_PER_MIN:
-                wait = max(wait, stamps[-RATE_PER_MIN] + 60 - now)
+            limit = RATE_PER_MIN if urgent else RATE_PER_MIN - URGENT_ROOM
+            if len(stamps) >= limit:
+                wait = max(wait, stamps[-limit] + 60 - now)
             if wait > 0:
                 return wait
             stamps.append(now)
@@ -55,7 +63,21 @@ def _reserve() -> float:
 
 
 async def throttle() -> None:
-    while (wait := await asyncio.to_thread(_reserve)) > 0:
+    global _urgent_waiting
+    if URGENT.get():
+        _urgent_waiting += 1
+        try:
+            while (wait := await asyncio.to_thread(_reserve, True)) > 0:
+                await asyncio.sleep(min(wait, 1) + 0.02)
+        finally:
+            _urgent_waiting -= 1
+        return
+    while True:
+        while _urgent_waiting:
+            await asyncio.sleep(0.25)
+        wait = await asyncio.to_thread(_reserve)
+        if wait <= 0:
+            return
         await asyncio.sleep(min(wait, 5) + 0.05)
 
 

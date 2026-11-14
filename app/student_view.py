@@ -6,8 +6,9 @@ import hashlib
 import json
 import io
 import re
+import logging
 import time
-from urllib.parse import urljoin, urlsplit, urldefrag, parse_qsl, urlencode
+from urllib.parse import urljoin, urlsplit, urldefrag, parse_qsl, urlencode, unquote
 
 import httpx
 from lxml import html as html_tree
@@ -18,9 +19,46 @@ from .discover import registrable
 from .org_assets import fetch_home_page, public_client, read_public, university_home
 from .text import clean, fold
 
+logging.getLogger("pypdf").setLevel(logging.ERROR)  # bozuk PDF'lerde satır satır uyarı basar
+
 CACHE = ROOT / "data" / "student-view"
 TASKS: dict[str, asyncio.Task] = {}
-_LIMIT = asyncio.Semaphore(3)
+PROGRESS: dict[str, dict] = {}  # süren toplama: bulunanlar ve adım; arayüz beklerken gösterir
+
+
+class _Gate:
+    """Sayfa okuma kapısı: aynı anda en çok `size` okuma (siteleri yormaz). Kullanıcının tıkladığı taramalar
+    sırada önce geçer ve `extra` ek yer kullanabilir; arka plan ön yüklemeleri onları bekletmez."""
+
+    def __init__(self, size: int, extra: int):
+        self.size, self.extra, self.used, self.urgent_waiting = size, extra, 0, 0
+        self.cond: asyncio.Condition | None = None
+
+    def __call__(self, urgent: bool = False):
+        gate = self
+
+        class _Slot:
+            async def __aenter__(self):
+                if gate.cond is None:
+                    gate.cond = asyncio.Condition()
+                async with gate.cond:
+                    gate.urgent_waiting += urgent
+                    try:
+                        await gate.cond.wait_for(lambda: gate.used < gate.size + gate.extra if urgent
+                                                 else gate.used < gate.size and not gate.urgent_waiting)
+                    finally:
+                        gate.urgent_waiting -= urgent
+                    gate.used += 1
+
+            async def __aexit__(self, *exc):
+                async with gate.cond:
+                    gate.used -= 1
+                    gate.cond.notify_all()
+        return _Slot()
+
+
+_LIMIT = _Gate(3, 2)
+URGENT_KEYS: set[str] = set()  # kullanıcının şu an beklediği taramalar (arka plandan öne alınır)
 MAX_PAGES = 10
 DEADLINE = 90
 CACHE_VERSION = 2
@@ -146,9 +184,147 @@ def _language(value: str) -> str:
 
 
 def _matches(text: str, unit: str) -> bool:
-    expected = _unit(unit)
-    return (bool(expected) and f" {expected} " in f" {_unit(text)} "
-            and not (_language(unit) and _language(text) and _language(unit) != _language(text)))
+    expected, seen = _unit(unit), f" {_unit(text)} "
+    if _language(unit) and _language(text) and _language(unit) != _language(text):
+        return False
+    if expected and f" {expected} " in seen:
+        return True
+    # İngilizce yayın yapan siteler: birim adının İngilizcesi (bir kez çıkarılıp saklanır) da kabul edilir.
+    return any(f" {alias} " in seen for alias in (_unit(a) for a in ALIASES.get(fold(unit), [])) if alias)
+
+
+ALIASES_FILE = CACHE / "_unit_aliases.json"
+try:
+    ALIASES: dict[str, list[str]] = json.loads(ALIASES_FILE.read_text())
+except (OSError, ValueError):
+    ALIASES = {}
+
+
+async def _learn_aliases(llm, names: list[str]) -> None:
+    """Fakülte/bölüm adlarının resmî İngilizce karşılıkları (ör. "İktisat" → "Economics"): model ile bir kez,
+    kalıcı saklanır. Model yoksa ya da yanıt vermezse eşleştirme yalnız Türkçe adla sürer."""
+    todo = [n for n in names if n and fold(n) not in ALIASES]
+    if not todo:
+        return
+    try:
+        if callable(llm):
+            llm = await llm()
+        if not (llm and llm.available):
+            return
+        schema = {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {
+            "tr": {"type": "string"}, "en": {"type": "array", "items": {"type": "string"}}}, "required": ["tr", "en"]}}},
+            "required": ["items"]}
+        prompt = ("Türk üniversitelerindeki şu birim adlarının üniversite sitelerinde kullanılan İngilizce adlarını ver "
+                  "(en çok 2 yaygın yazım; 'Faculty of', 'Department of' ekleme):\n" + "\n".join(todo))
+        wait = 12 + len(todo) // 2  # fakültenin bütün bölümleri tek çağrıda (arka planda) gelebilir
+        data = await asyncio.wait_for(llm.json(prompt, schema, timeout=wait, fast=True), wait + 3)
+    except Exception:
+        return
+    for row in (data or {}).get("items") or []:
+        tr, en = row.get("tr") or "", [clean(x) for x in row.get("en") or [] if clean(x)][:2]
+        if tr and en:
+            ALIASES[fold(tr)] = en
+    for n in todo:
+        ALIASES.setdefault(fold(n), [])
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        ALIASES_FILE.write_text(json.dumps(ALIASES, ensure_ascii=False))
+    except OSError:
+        pass
+
+
+def _slug(url: str) -> str:
+    """Adres yolundaki kelimeler: /tr/bolum/bilgisayar-muhendisligi/ders-mufredati → "tr bolum bilgisayar muhendisligi ders mufredati"."""
+    return re.sub(r"[-_/.+%]+", " ", unquote(urlsplit(url).path)).strip()
+
+
+_NEWS_PATH = re.compile(r"/(?:haber|haberler|duyuru|duyurular|news|announcements?|etkinlik|events?|blog)(?:/|$)", re.I)
+
+
+def _slug_matches(url: str, unit: str) -> bool:
+    """Bölüm adı adresin yolunda geçiyor mu (haber/duyuru adresleri sayılmaz). Siteye özel kalıp değil."""
+    return bool(unit) and not _NEWS_PATH.search(urlsplit(url).path) and _matches(_slug(url), unit)
+
+
+_SINGLE_PROGRAM = re.compile(r"tip|dis hekimligi|eczacilik|veteriner(?: hekimligi)?|hukuk")
+
+
+def _single_program(faculty: str) -> str:
+    """Tek lisans programı olan fakülte (Tıp, Diş Hekimliği, Eczacılık, Veteriner, Hukuk): YÖK'teki "bölüm"ler
+    anabilim dalıdır, dersler fakültenin programındadır. Program adını döndürür ("Tıp"); değilse ""."""
+    name = re.sub(r"\s*fak[üuÜU]ltes[iİı]\s*$", "", clean(faculty), flags=re.I).strip()
+    from .discover import tr_title
+    return tr_title(name) if name and _SINGLE_PROGRAM.fullmatch(fold(name)) else ""
+
+
+def _scoped(faculty: str, department: str) -> tuple[str, str]:
+    """(aranacak bölüm, ekran notu). Tek programlı fakültede bütün anabilim dalları aynı programa gider."""
+    program = _single_program(faculty)
+    if program and department and fold(department) != fold(program):
+        return program, (f"{department}, {program} programındaki bir anabilim dalıdır; lisans dersleri tek programda "
+                         f"verildiği için {program} programının dersleri gösteriliyor.")
+    return department, ""
+
+
+def progress(uid: str, section: str, faculty: str = "", department: str = "") -> dict:
+    faculty = clean(faculty)
+    department, _note = _scoped(faculty, clean(department))
+    return PROGRESS.get(_key(uid, section, faculty, department)) or {}
+
+
+def _slugify(name: str) -> str:
+    return re.sub(r"\s+", "-", fold(re.sub(r"\s+b[öo]l[üu]m[üu]$", "", clean(name), flags=re.I)))
+
+
+_PATTERNS = CACHE / "_course_patterns.json"
+
+
+def _learn_pattern(uid: str, department: str, url: str):
+    """Ders tablosu bulunan adresin yolunda bölüm adı geçiyorsa kalıp olarak sakla:
+    /tr/bolum/bilgisayar-muhendisligi/ders-mufredati → /tr/bolum/{}/ders-mufredati. Siteye özel kod değil, öğrenilir."""
+    slug = _slugify(department)
+    parts = urlsplit(url)
+    segments = parts.path.split("/")
+    for i, seg in enumerate(segments):
+        if slug and slug in seg.lower() and not _NEWS_PATH.search(parts.path):
+            template = seg.lower().replace(slug, "{}", 1)
+            path = "/".join(segments[:i] + [template] + segments[i + 1:])
+            _remember(uid, base=f"{parts.scheme}://{parts.netloc}", path=path, query=parts.query)
+            return
+
+
+def _remember(uid: str, **fields):
+    try:
+        data = json.loads(_PATTERNS.read_text()) if _PATTERNS.exists() else {}
+        entry = data.setdefault(uid, {})
+        if hub := fields.pop("hub", None):
+            hubs = [h for h in entry.get("hubs", []) if h != hub]
+            entry["hubs"] = [hub, *hubs][:6]
+        entry.update(fields, ts=time.time())
+        _PATTERNS.parent.mkdir(parents=True, exist_ok=True)
+        _PATTERNS.write_text(json.dumps(data, ensure_ascii=False))
+    except (OSError, ValueError):
+        pass
+
+
+def _hubs(uid: str) -> list[str]:
+    """Bu sitede bölüm bağlantısının bulunduğu liste sayfaları (ör. Bologna lisans program listesi); kardeş bölümler
+    gezintiye buradan başlar. Öğrenilir, siteye özel değildir."""
+    try:
+        return (json.loads(_PATTERNS.read_text()).get(uid) or {}).get("hubs", []) if _PATTERNS.exists() else []
+    except (OSError, ValueError):
+        return []
+
+
+def _pattern_url(uid: str, department: str) -> str:
+    try:
+        known = json.loads(_PATTERNS.read_text()).get(uid) if _PATTERNS.exists() else None
+    except (OSError, ValueError):
+        return ""
+    slug = _slugify(department)
+    if not known or not slug or "{}" not in known.get("path", ""):
+        return ""
+    return known["base"] + known["path"].replace("{}", slug, 1) + (f"?{known['query']}" if known.get("query") else "")
 
 
 def _scope_matches(page: dict, faculty: str, department: str) -> bool:
@@ -161,7 +337,7 @@ def _scope(page: dict, faculty: str, department: str, parent: dict | None = None
     """Confirm units from page headings; inherit only a verified programme branch."""
     heading = clean(page["title"] + " " + page.get("heading", ""))
     page["faculty_verified"] = bool(faculty and _matches(heading, faculty))
-    page["department_verified"] = bool(department and _matches(heading, department))
+    page["department_verified"] = bool(department and (_matches(heading, department) or _slug_matches(page["url"], department)))
     page["context_quote"], page["context_source_url"] = heading[:700], page["url"]
     if not parent or not link:
         return page
@@ -190,6 +366,47 @@ def _scope(page: dict, faculty: str, department: str, parent: dict | None = None
     return page
 
 
+def _pdf_courses(text: str, url: str) -> list[dict]:
+    """PDF öğretim planındaki ders satırları: "BIL 101 Bilgisayar Programlama 3 0 3 5" gibi, satır başında ders kodu.
+    Dönem başlıkları ("1. Yarıyıl", "Güz Dönemi 1. Yıl") satırlardan izlenir. Sisteme özel değil."""
+    items, period = [], ""
+    for raw in text.splitlines():
+        line = clean(raw)
+        if not line:
+            continue
+        if (found := _course_period(line)) and len(line) < 80:
+            period = found
+            continue
+        line = re.sub(r"^\d{1,2}[.)]?\s+(?=[A-ZÇĞİÖŞÜ]{2,6}\s?-?\d{3})", "", line)
+        m = re.match(r"^([A-ZÇĞİÖŞÜ]{2,6})\s?-?(\d{3,4}[A-Z]?)\s+(.{3,120}?)(?:\s+(?:[ZSEC]|\d+(?:[.,+/-]\d+)*)){0,8}\s*$", line)
+        if not m:
+            continue
+        name = re.sub(r"(?:\s+(?:\d+(?:[.,+/-]\d+)*|[ZSEC]))+$", "", m[3]).strip(" -–:")
+        if len(name) < 3 or not re.search(r"[a-zçğıöşü]", name):
+            continue
+        code = f"{m[1]} {m[2]}"
+        nums = re.findall(r"\d+(?:[.,]\d+)?", line[m.end(3):])
+        items.append({"title": clean(f"{code} {name}")[:200], "code": code, "detail_url": "",
+                      "detail": f"AKTS: {nums[-1]}" if nums else "", "period": period,
+                      "quote": line[:500], "source_url": url, "type": "courses"})
+    unique = {}
+    for item in items:
+        unique.setdefault((fold(item["title"]), fold(item["period"])), item)
+    return list(unique.values())[:2000] if len(unique) >= 5 else []
+
+
+def _row_courses(sel, url: str) -> list[dict]:
+    """Başlık satırı tanınmayan tablolar için yedek: her tablo satırı ve dönem başlığı bir metin satırı olur,
+    satır başında ders kodu olanlar ders sayılır (_pdf_courses ile aynı kural)."""
+    lines = []
+    for node in sel.css("h2, h3, h4, h5, caption, tr, li"):
+        cells = node.xpath("./th|./td")
+        text = " ".join(clean(c.get_all_text(separator=" ")) for c in cells) if cells else clean(node.get_all_text(separator=" "))
+        if text:
+            lines.append(text)
+    return _pdf_courses("\n".join(lines), url) if lines else []
+
+
 def _course_period(value: str) -> str:
     match = re.search(r"\b([1-9]|1[0-2])\s*[.\-]?\s*(?:donem|yariyil|semester|term)\b", fold(value))
     if not match:
@@ -209,8 +426,10 @@ def _catalog(body, url: str) -> list[dict]:
     period = ""
     base = body.css("base::attr(href)").get() or url
     proliz_details = "progCourseDetails.aspx?curCourse=" in body.get()
+    columns = {}
     for table in body.css("table"):
-        columns = {}
+        # Başlık satırı yalnız ilk dönem tablosunda olabilir: sonraki tablolar aynı sütun düzenini kullanır
+        # (satırlar yine ders kodu kalıbıyla doğrulanır).
         prior = table.xpath("preceding::*[self::h2 or self::h3 or self::h4][1]")
         if prior:
             period = _course_period(clean(prior[0].get_all_text(separator=" "))) or period
@@ -459,12 +678,12 @@ def _page(html: str, url: str, domain: str):
     heading = clean(heading + " " + " ".join(n.get_all_text(separator=" ") for n in [*selected, *context]))
     return {"url": url, "title": title, "heading": heading, "text": text, "links": links,
             "language": (sel.css("html::attr(lang)").get() or "")[:2],
-            "blocks": _body_blocks(html), "course_items": _catalog(sel, url)}
+            "blocks": _body_blocks(html), "course_items": _catalog(sel, url) or _row_courses(sel, url)}
 
 
 def _candidate(link: dict, page: dict, section: str, faculty: str, department: str) -> int | None:
     label = fold(link["title"])
-    if re.search(r"\.(zip|docx?|xlsx?|jpg|jpeg|png|gif|mp4)(?:\?|$)", link["url"], re.I):
+    if re.search(r"\.(zip|rar|7z|tar|gz|docx?|xlsx?|pptx?|jpg|jpeg|png|gif|mp4)(?:\?|$)", link["url"], re.I):
         return None
     if section != "courses":
         parsed = urlsplit(link["url"])
@@ -513,8 +732,8 @@ def _candidate(link: dict, page: dict, section: str, faculty: str, department: s
     in_group = section in link["groups"]
     if link["groups"] and not in_group:
         return None  # No unrelated student category is fetched as a discovery shortcut.
-    dep_match = bool(department) and _matches(link["title"], department)
-    fac_match = bool(faculty) and _matches(link["title"], faculty)
+    dep_match = bool(department) and (_matches(link["title"], department) or _slug_matches(link["url"], department))
+    fac_match = bool(faculty) and (_matches(link["title"], faculty) or _slug_matches(link["url"], faculty))
     if dep_match and faculty and link.get("faculty_context") and not _matches(link["faculty_context"], faculty):
         return None
     unit_link = section == "courses" and (dep_match or fac_match)
@@ -528,7 +747,22 @@ def _candidate(link: dict, page: dict, section: str, faculty: str, department: s
             return None
     language = _language(link["title"])
     language_score = (20 if language == (_language(department) or "tr") else -20 if language else 0) if dep_match else 0
+    route = fold(link["title"] + " " + _slug(link["url"]) + " " + urlsplit(link["url"]).query.replace("_", " "))
     course_score = 30 if in_group and re.search(r"mufredat|curriculum|akts|ects", label) else 20 if in_group and re.search(r"icerik|content", label) else 0
+    if section == "courses":
+        # Ders listesini taşıyan sayfa adları (sisteme özel değil): öğretim programı/planı, ders planı, müfredat.
+        if re.search(r"ogretim ?(?:programi|plani|planlari)|ders ?(?:plani|planlari|programi)|program ?yapisi|course ?(?:plan|structure|list)|curriculum|mufredat", route):
+            course_score += 60
+        # Aynı sistemdeki tanıtım sayfaları ders listesi vermez: derece, üst kademe, amaç, yeterlilik, diploma eki.
+        if re.search(r"ust ?derece|ustdereceprogramagecis|kazanilan derece|amac|hedef|yeterlilik|ogrenme cikti|diploma|kabul kosul|degerlendirme", route):
+            course_score -= 50
+        # Haftalık ders saatleri ve sınav programı ders listesi değildir.
+        if re.search(r"haftalik|ders saatleri|sinav programi|sinav takvimi|akademik takvim|ders kayit|staj|arsiv", route):
+            course_score -= 60
+        # Aynı planın yılları varsa en yenisi önce; çok eski yıllar geri (ör. 2003-2004 arşivi).
+        years = [int(y) for y in re.findall(r"(?<!\d)(20[0-4]\d)(?!\d)", route)]
+        if years:
+            course_score += max(-40, min(25, (max(years) - time.localtime().tm_year + 6) * 4))
     if re.search(r"progCourses\.aspx", link["url"], re.I) and page.get("department_verified"):
         return 400
     if re.search(r"unitSelection\.aspx", link["url"], re.I) and re.fullmatch(r"lisans|on lisans", label):
@@ -599,6 +833,71 @@ def _retain_links(result: dict, pages: list[dict], section: str, faculty: str, d
     result["groups"][section]["links"] = [{"title": link["title"], "url": link["url"]} for link in links[:24]]
 
 
+async def _hedged(client, url: str, limit: int) -> tuple[bytes, str, str]:
+    """Sayfayı httpx ile okur; 2.5 sn içinde dönmezse aynı adres Scrapling (tarayıcı kimliğiyle) de istenir,
+    önce başarılı dönen kullanılır. Hızlı sitelerde ikinci istek hiç atılmaz."""
+    first = asyncio.create_task(read_public(client, url, limit))
+    done, _ = await asyncio.wait({first}, timeout=2.5)
+    if done or re.search(r"\.pdf($|\?)", url, re.I):
+        return await first
+
+    async def scrapling():
+        from .net import fetch_static
+        from .org_assets import public_url
+        if not await public_url(url):
+            raise ValueError("Public http(s) URL required")
+        page = await fetch_static(url, timeout=15)
+        if page.status >= 400 or not page.html:
+            raise ValueError(f"HTTP {page.status}")
+        return page.html.encode("utf-8"), "text/html", page.url
+
+    second = asyncio.create_task(scrapling())
+    pending, error = {first, second}, None
+    try:
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if task.exception() is None:
+                    return task.result()
+                error = task.exception()
+        raise error or ValueError("Sayfa okunamadı")
+    finally:
+        for task in pending:
+            task.cancel()
+
+
+async def _render_race(url: str, domain: str) -> tuple[str, str] | None:
+    """JS ile çizilen sayfa: Scrapling tarayıcısı ve REA aynı anda; aynı alan adında, metni dolu ilk sonuç."""
+    from . import rea
+    from .net import fetch_stealth
+
+    async def via_rea():
+        cap = await rea.recon(url, settle_ms=1200)
+        return cap.dom, cap.final_url or url
+
+    async def via_scrapling():
+        page = await fetch_stealth(url)
+        return page.html, page.url
+
+    tasks = {asyncio.create_task(via_rea()), asyncio.create_task(via_scrapling())}
+    try:
+        async with asyncio.timeout(20):
+            while tasks:
+                done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if task.exception() is not None:
+                        continue
+                    dom, final = task.result()
+                    if dom and len(dom) > 2000 and registrable(urlsplit(final).hostname or "") == domain:
+                        return dom, final
+    except (TimeoutError, asyncio.TimeoutError):
+        pass
+    finally:
+        for task in tasks:
+            task.cancel()
+    return None
+
+
 async def _collect(uid: str, llm, section: str, faculty: str, department: str) -> dict:
     old = _load(uid, section, faculty, department) or _read_cache(CACHE / f"{_key(uid, section, faculty, department)}.json")
     result = {"version": CACHE_VERSION, "collection_version": COLLECTION_VERSION,
@@ -606,9 +905,23 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
               "groups": _groups(section), "checked_at": time.time(), "pages_read": 0, "home": "",
               "status": "partial", "errors": [], "cached": False}
     pages, seen = [], set()
+    progress_key = _key(uid, section, faculty, department)
+    missing = False
+
+    steps: list[str] = []
+
+    def report(step: str, done: str = ""):
+        """Arayüz için ara durum: o anki adım + okunan sayfaların başlıkları (sırayla belirir)."""
+        if done and (not steps or steps[-1] != done):
+            steps.append(done)
+        PROGRESS[progress_key] = {"groups": result["groups"], "pages_read": len(pages), "step": step, "steps": steps[-12:],
+                                  "errors": result["errors"], "checked_at": result["checked_at"], "partial": True}
+
+    report("Kurum sitesi açılıyor…")
+    alias_task = asyncio.create_task(_learn_aliases(llm, [faculty, department]))  # site açılırken
     try:
         async with asyncio.timeout(DEADLINE):
-            async with _LIMIT:
+            async with _LIMIT(progress_key in URGENT_KEYS):
                 home = await university_home(uid)
             result["home"] = home
             if not home:
@@ -616,21 +929,27 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
             domain = registrable(urlsplit(home).hostname or "")
             async with public_client(timeout=12, headers={"User-Agent": USER_AGENT, "Accept-Language": "tr"}) as client:
                 async def read(url, *, is_home=False, parent=None, link=None):
-                    async with _LIMIT:
+                    async with _LIMIT(progress_key in URGENT_KEYS):
                         try:
-                            fetch = fetch_home_page if is_home else read_public
-                            raw, mime, final = await fetch(client, url, 8_000_000 if section == "courses" else 4_000_000)
+                            limit = 8_000_000 if section == "courses" else 4_000_000
+                            if is_home:
+                                raw, mime, final = await fetch_home_page(client, url, limit)
+                            else:
+                                raw, mime, final = await _hedged(client, url, limit)
                             if registrable(urlsplit(final).hostname or "") != domain:
                                 return None
                             if mime == "application/pdf" or raw.startswith(b"%PDF"):
                                 def pdf_text():
                                     from pypdf import PdfReader
                                     pdf = PdfReader(io.BytesIO(raw))
-                                    return clean(" ".join(p.extract_text() or "" for p in pdf.pages[:20]))[:26000]
+                                    return "\n".join(p.extract_text() or "" for p in pdf.pages[:20])
                                 try:
-                                    text = await asyncio.wait_for(asyncio.to_thread(pdf_text), 8)
-                                    return _scope({"url": final, "title": "Kurum belgesi", "heading": text[:700],
-                                                   "text": text, "links": []}, faculty, department, parent, link)
+                                    lines = await asyncio.wait_for(asyncio.to_thread(pdf_text), 8)
+                                    text = clean(lines)[:26000]
+                                    title = (link or {}).get("title") or "Kurum belgesi"
+                                    return _scope({"url": final, "title": title, "heading": text[:700],
+                                                   "text": text, "links": [], "course_items": _pdf_courses(lines, final)},
+                                                  faculty, department, parent, link)
                                 except Exception:
                                     return None  # Görüntü PDF'si veya okunamayan belge bağlantı olarak kalır.
                             if "html" not in mime:
@@ -641,39 +960,125 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                                 html = raw.decode("windows-1254", errors="replace")
                             page = _page(html, final, domain)
                             if (section == "courses" and not page["course_items"] and len(page["text"]) < 300
-                                    and re.search(r"bologna|ects|bilgipaketi|curriculum", final, re.I)):
-                                from . import rea
-                                try:
-                                    capture = await asyncio.wait_for(rea.recon(final, settle_ms=1200), 18)
-                                    if capture.dom and registrable(urlsplit(capture.final_url or final).hostname or "") == domain:
-                                        page = _page(capture.dom, capture.final_url or final, domain)
-                                except Exception:
-                                    pass
-                            return _scope(page, faculty, department, parent, link)
+                                    and len(page.get("links") or []) < 25
+                                    and re.search(r"bologna|ects|akts|bilgi.?paket|curriculum|m[üu]fredat|ders|program",
+                                                  f"{final} {(link or {}).get('title', '')}", re.I)):
+                                # JS ile dolan sayfa: tarayıcıda çizim; Scrapling ve REA yarışır, önce dolu gelen kazanır.
+                                rendered = await _render_race(final, domain)
+                                if rendered:
+                                    page = _page(rendered[0], rendered[1], domain)
+                            page = _scope(page, faculty, department, parent, link)
+                            if parent:
+                                page["via"] = parent["url"]
+                            label = clean(page.get("title") or page.get("heading") or "")[:70] or urlsplit(final).path[:70]
+                            mark = " · bölüm sayfası" if page.get("department_verified") else ""
+                            report(f"{label} okundu…", f"{label}{mark}{' · ' + str(len(page['course_items'])) + ' ders' if page.get('course_items') else ''}")
+                            return page
                         except (httpx.HTTPError, ValueError, OSError):
                             return None
-                first = await read(home, is_home=True)
+                search, guessed = None, None
+                home_task = asyncio.create_task(read(home, is_home=True))
+                hub_task = (asyncio.gather(*(read(url) for url in _hubs(uid)[:3]))
+                            if section == "courses" and department else None)
+                if section == "courses" and department:
+                    from .websearch import site_results_race
+
+                    def start_search():
+                        # Arama motorları aynı anda (ddgs, Google, Brave); ana sayfa okunurken çalışır. İngilizce yayın
+                        # yapan sitelerde bölümün İngilizce adıyla da aranır; iki arama paralel, sonuçlar birleşir.
+                        queries = [f"{department} ders müfredatı"]
+                        if english := (ALIASES.get(fold(department)) or [""])[0]:
+                            queries.append(f"{english} curriculum courses")
+
+                        async def both():
+                            found = await asyncio.gather(*(site_results_race(home, q, k=4) for q in queries), return_exceptions=True)
+                            rows, seen = [], set()
+                            for part in found:
+                                for row in part if isinstance(part, list) else []:
+                                    if row.get("url") not in seen:
+                                        seen.add(row.get("url"))
+                                        rows.append(row)
+                            return rows[:6]
+                        return asyncio.create_task(asyncio.wait_for(both(), 20))
+                    guess = _pattern_url(uid, department)  # bu sitede (herhangi bir fakültede) öğrenilmiş adres kalıbı
+                    if progress_key in URGENT_KEYS or not guess:
+                        # Kullanıcı bekliyor: tarif, arama ve liste sayfaları aynı anda; önce doğrulanan kazanır.
+                        search = start_search()
+                    if guess:
+                        guessed = await read(guess)
+                    if not search and not (guessed and guessed.get("course_items") and _scope_matches(guessed, faculty, department)):
+                        search = start_search()  # arka plan: tarif tutmadıysa arama (motorları gereksiz yormaz)
+                first = await home_task
+                try:  # İngilizce adlar sayfalar puanlanmadan önce hazır olsun (en çok birkaç saniye)
+                    await asyncio.wait_for(asyncio.shield(alias_task), 8)
+                except Exception:
+                    pass
                 if not first:
+                    if search:
+                        search.cancel()
                     raise ValueError("Kurum sitesi şu anda okunamıyor; tekrar deneyebilirsiniz.")
                 pages.append(first)
                 result["home"] = first["url"]
                 seen.add(_url_key(home))
                 seen.add(_url_key(first["url"]))
+                if guessed:
+                    pages.append(guessed)
+                    seen.add(_url_key(guessed["url"]))
+                if hub_task:
+                    hub_pages = [hub for hub in await hub_task if hub]
+                    for hub in hub_pages:
+                        if _url_key(hub["url"]) not in seen:
+                            pages.append(hub)
+                            seen.add(_url_key(hub["url"]))
+                    # Üniversitenin bütün programlarını listeleyen sayfada (en az 3 fakülte başlığı) bölüm adı hiç
+                    # geçmiyorsa program sitede yayımlanmıyor: 18 sayfa gezmeden dur.
+                    whole = [h for h in hub_pages if len(re.findall(r"\bfakultesi\b", fold(h["text"]))) >= 3]
+                    listed = any(_matches(h["text"], department) or any(
+                        _matches(l["title"], department) or _slug_matches(l["url"], department) for l in h["links"])
+                        for h in hub_pages)
+                    if whole and not listed and not (guessed and guessed.get("course_items")):
+                        # Listede yok: tam gezinti yerine arama + kısa gezinti (4 sayfa / 15 sn). Bir şey bulunursa
+                        # gösterilir; bulunmazsa "listede yok" denir. Ad farkı yüzünden yanlış "yok" demeyi önler.
+                        missing = whole[0]["url"]
+                        report("Bölüm program listesinde görünmüyor; kısa arama yapılıyor…", "Program listesinde bölüm adı yok")
+                report(f"{len(pages)} sayfa okundu…")
                 # The page budget includes failed attempts. Keep the working
                 # course route unchanged; other categories can reach office >
                 # programme > conditions/agreements, without a whole-site crawl.
-                if section == "courses" and department:
-                    from .websearch import site_results
-                    try:
-                        found = await asyncio.wait_for(site_results(home, f'"{department}" ders müfredat', k=4, providers=("ddgs",)), 10)
-                        for hit in found:
-                            first["links"].append({"title": hit.get("title") or department, "url": hit["url"], "groups": ["courses"], "language": ""})
-                    except Exception:
-                        pass
                 attempted = 1
-                page_limit = 18 if section == "courses" else MAX_PAGES
-                fetch_until = time.monotonic() + (65 if section == "courses" else 45)
+                async def use_search(wait: float):
+                    """Arama sonucu geldiyse sayfalarını paralel oku. Gezinti aramayı beklemez: en çok `wait` sn."""
+                    nonlocal search, attempted
+                    if not search:
+                        return
+                    if not search.done():
+                        await asyncio.wait({search}, timeout=wait)
+                        if not search.done():
+                            return
+                    try:
+                        found = search.result()
+                    except (Exception, asyncio.CancelledError):
+                        found = []
+                    search = None
+                    hits = []
+                    for hit in found:
+                        if _url_key(hit["url"]) in seen:
+                            continue
+                        seen.add(_url_key(hit["url"]))
+                        hits.append({"title": hit.get("title") or department, "url": hit["url"], "groups": ["courses"], "language": ""})
+                    if hits:
+                        attempted += len(hits)
+                        pages.extend(p for p in await asyncio.gather(*(read(h["url"], parent=first, link=h) for h in hits)) if p)
+                        seen.update(_url_key(p["url"]) for p in pages)
+
+                report("Arama sonuçları bekleniyor…")
+                await use_search(3)
+                page_limit = (attempted + 4) if missing else 18 if section == "courses" else MAX_PAGES
+                fetch_until = time.monotonic() + (15 if missing else 65 if section == "courses" else 45)
                 while attempted < page_limit and time.monotonic() < fetch_until:
+                    await use_search(0)  # arama gezinti sürerken bittiyse sonuçları şimdi eklenir
+                    if section == "courses" and any(p.get("course_items") and _scope_matches(p, faculty, department) for p in pages):
+                        break  # arama sonucundan ders tablosu geldiyse gezinmeye gerek yok
                     candidates = {}
                     for page in pages:
                         for link in page["links"]:
@@ -694,16 +1099,38 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
                         read(url, parent=candidates[url][1], link=candidates[url][2]) for url in choices)) if p)
                     seen.update(_url_key(p["url"]) for p in pages)
                     _retain_facts(result, pages, section, faculty, department)
+                    report(f"{len(pages)} sayfa okundu…")
                     # A verified catalogue already contains the requested list;
                     # do not spend the remaining budget on another language's programme.
                     if section == "courses" and any(p.get("course_items") and _scope_matches(p, faculty, department) for p in pages):
                         break
+                if search:
+                    search.cancel()  # gezinti bitti, geç kalan arama beklenmez
                 _retain_facts(result, pages, section, faculty, department)
                 _retain_links(result, pages, section, faculty, department)
+                if missing and not result["groups"][section]["items"]:
+                    # Hata değil bilgi: üniversite bu programın ders planını yayımlamamış (liste sayfasında adı yok).
+                    result["missing_note"] = ("Bu bölüm üniversitenin ders bilgi paketindeki (AKTS/Bologna) program listesinde yok; "
+                                              "ders planı henüz yayımlanmamış görünüyor.")
+                    result["groups"][section]["links"] = [{"title": "Üniversitenin lisans program listesi", "url": missing}]
+                else:
+                    missing = False
             result["pages_read"] = len(pages)
             scoped = bool(faculty or department)
             evidence_pages = [i for i, page in enumerate(pages) if not scoped or _scope_matches(page, faculty, department)]
-            if scoped and not evidence_pages:
+            if section == "courses" and department:
+                source = next((p for p in pages if p.get("course_items") and _scope_matches(p, faculty, department)), None)
+                if source:
+                    _learn_pattern(uid, department, source["url"])
+                    # Hatırlanan sayfa bölüme özel olmamalı: bölüm sayfalarını (ör. Bologna program sayfası) geçip
+                    # bölüm bağlantısını taşıyan liste sayfasına (lisans program listesi) kadar geri çıkılır.
+                    by_url = {_url_key(p["url"]): p for p in pages}
+                    via = source.get("via")
+                    while via and by_url.get(_url_key(via), {}).get("department_verified"):
+                        via = by_url[_url_key(via)].get("via")
+                    if via and _url_key(via) != _url_key(result["home"]):
+                        _remember(uid, hub=via)
+            if scoped and not evidence_pages and not missing:
                 result["errors"].append("Seçilen fakülte/bölümün bilgileri resmî sayfa metninde doğrulanamadı; program veya ders içeriği varsayılmadı.")
             if section == "courses":
                 known = {(fold(item["title"]), fold(item.get("period", ""))) for item in result["groups"][section]["items"]}
@@ -811,26 +1238,33 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str) -
     return result
 
 
-async def get(uid: str, llm, refresh: bool = False, section: str | None = None,
+async def get(uid: str, llm, refresh: bool = False, section: str | None = None, background: bool = False,
               faculty: str = "", department: str = "") -> dict:
     faculty, department = clean(faculty), clean(department)
     if section is None:
         return _manifest(uid, faculty, department)
     if section not in GROUPS:
         raise ValueError("Geçersiz öğrenci bilgisi kategorisi.")
+    note = ""
+    if section == "courses":
+        department, note = _scoped(faculty, department)
     saved = _load(uid, section, faculty, department)
     # Kayıtlı bilgiler kullanıcı açıkça yenileyene kadar tekrar taranmaz.
     if saved and not refresh:
-        return {**saved, "cached": True}
+        return {**saved, "cached": True, "program_note": note}
     key = _key(uid, section, faculty, department)
+    if not background:
+        URGENT_KEYS.add(key)  # arka planda sürüyorsa da öne alınır
     task = TASKS.get(key)
     if task is None:
         task = TASKS[key] = asyncio.create_task(_collect(uid, llm, section, faculty, department))
         def done(completed):
             if TASKS.get(key) is completed:
                 TASKS.pop(key, None)
+                PROGRESS.pop(key, None)
+                URGENT_KEYS.discard(key)
         task.add_done_callback(done)
-    return await asyncio.shield(task)
+    return {**await asyncio.shield(task), "program_note": note}
 
 
 # ------------------------------------------------------------------ bağlantı önizlemesi (bağlantının içeriği)
@@ -1050,7 +1484,7 @@ def _panel_text(html: str) -> str:
     return "\n".join(out)[:4000]
 
 
-async def program(uid: str, url: str) -> dict:
+async def program(uid: str, url: str, key: str = "") -> dict:
     """OIBS Bologna program sayfaları (profil, istihdam, üst kademe, amaç, derece) — yalnız kurumun alan adı."""
     home = await university_home(uid)
     if not home:
@@ -1069,9 +1503,21 @@ async def program(uid: str, url: str) -> dict:
     try:
         saved = json.loads(path.read_text(encoding="utf-8"))
         if time.time() - saved.get("ts", 0) < PREVIEW_TTL:
-            return saved["data"]
+            data = saved["data"]
+            return {**data, "sections": [x for x in data["sections"] if x["key"] == key]} if key else data
     except (OSError, ValueError, KeyError):
         pass
+    pages = [p for p in PROGRAM_PAGES if not key or p[0] == key]
+    if key:
+        # Tek kart: arayüz beş kartı ayrı ayrı ister, her biri gelince yerine oturur.
+        part = path.with_name(path.stem + f"-{key}.json")
+        try:
+            saved = json.loads(part.read_text(encoding="utf-8"))
+            if time.time() - saved.get("ts", 0) < PREVIEW_TTL:
+                return saved["data"]
+        except (OSError, ValueError, KeyError):
+            pass
+        path = part
     sections = []
     async with public_client(timeout=12, headers={"User-Agent": USER_AGENT, "Accept-Language": "tr"}) as client:
         async def one(key, page, label):
@@ -1088,7 +1534,7 @@ async def program(uid: str, url: str) -> dict:
                 text = raw.decode("windows-1254", errors="replace")
             body = await asyncio.to_thread(_panel_text, text)
             return {"key": key, "heading": label, "text": body, "url": target} if len(body) >= 15 else None
-        found = await asyncio.gather(*(one(*p) for p in PROGRAM_PAGES))
+        found = await asyncio.gather(*(one(*p) for p in pages))
     sections = [s for s in found if s]
     data = {"url": url, "sections": sections, "supported": True}
     if sections:

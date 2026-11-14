@@ -7,6 +7,7 @@ yalnız seçilen fakültenin önbellekteki kadrosu için ve kişi başı 30 gün
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import hashlib
 import html
 import re
@@ -156,20 +157,20 @@ async def _wikidata(client, qid: str) -> dict:
 # ------------------------------------------------------------------ YÖK Akademik kadro sayıları
 async def _yok_staff(uni: dict) -> dict:
     """Üniversitenin aktif akademisyen sayısı ve unvan dağılımı (YÖK API; unvan başına tek küçük istek)."""
+    order = {label: i for i, (_, label) in enumerate(TITLES)}
+    people = yokdir._stale("unistaff-" + yokdir.uni_id(uni["name"]))
+    if people:  # eski toplu kayıt varsa sayılar ondan (ağsız)
+        counts = Counter(p.get("title") or "" for p in people)
+        rows = [{"title": t, "count": n} for t, n in counts.items() if t]
+        return {"total": len(people), "titles": sorted(rows, key=lambda r: order.get(r["title"], 9))}
+    # Yalnız toplam: tek küçük istek (eskiden unvan başına bir istek, üniversite açılışında ~12 istek → IP engeli).
     async with yokdir._client() as client:
-        base = {"page": 1, "length": 1, "birimId": uni["birim_id"], "birimId_matchMode": "equals", **yokdir.ACTIVE}
-        titles = await yokdir.api(client, "/genel/kadro-unvan/name-value-list") or []
-
-        async def total(**extra):
-            d = await yokdir.api(client, "/akademisyen/list", **base, **extra)
-            return (d or {}).get("totalElements")
-        grand, *counts = await asyncio.gather(total(), *(total(kadroUnvanId=t["value"], kadroUnvanId_matchMode="equals") for t in titles))
+        d = await yokdir.api(client, "/akademisyen/list", page=1, length=1, birimId=uni["birim_id"],
+                             birimId_matchMode="equals", **yokdir.ACTIVE)
+    grand = (d or {}).get("totalElements")
     if grand is None:
         raise ValueError("YÖK arama sonucu okunamadı")
-    order = {label: i for i, (_, label) in enumerate(TITLES)}
-    rows = [{"title": yokdir.YOK_TITLES.get(t["label"], yokdir.tr_title(t["label"])), "count": n}
-            for t, n in zip(titles, counts) if n]
-    return {"total": grand, "titles": sorted(rows, key=lambda r: order.get(r["title"], 9))}
+    return {"total": grand, "titles": []}
 
 
 _STAFF_TASKS: dict[str, asyncio.Task] = {}
@@ -332,6 +333,10 @@ def _with_staff(out: dict) -> dict:
 ROLE_RE = re.compile(r"dekan|bolum baskan|rektor|mudur|anabilim dali baskan|enstitu", re.I)
 
 
+def _roles_cached(person: dict) -> bool:
+    return yokdir._load(f"role2-{person['yok_id']}", ROLE_TTL) is not None
+
+
 async def _person_roles(client, person: dict, university: str) -> list[dict]:
     """YÖK idari görevleri (API). Bitiş tarihi olmayan görev sürüyor sayılır; yalnız bu üniversitedeki görevler."""
     yok_id = person["yok_id"]
@@ -354,8 +359,9 @@ async def _person_roles(client, person: dict, university: str) -> list[dict]:
     return roles
 
 
-async def faculty_roles(uid: str, faculty_raw: str) -> dict | None:
-    """Fakültenin önbellekteki kadrosu için süren idari görevler. Kadro önbellekte yoksa YÖK taranmaz."""
+async def faculty_roles(uid: str, faculty_raw: str, fetch: bool = False) -> dict | None:
+    """Fakültenin önbellekteki kadrosu için süren idari görevler. Varsayılan yalnız kayıtlı görevler (YÖK'e istek
+    atılmaz); fetch=True kullanıcı açıkça isteyince en çok 20 kişi, tek tek ve sırayla sorulur."""
     uni = await yokdir._university(uid)
     if not uni:
         return None
@@ -364,7 +370,7 @@ async def faculty_roles(uid: str, faculty_raw: str) -> dict | None:
         return {"roles": {}, "dean": None, "heads": {}, "checked": 0, "cached": False}
     rank = {"Prof. Dr.": 0, "Doç. Dr.": 1, "Dr. Öğr. Üyesi": 2}
     pool = sorted((p for p in people if p.get("yok_id") and p.get("url") and p.get("title") in rank),
-                  key=lambda p: rank[p["title"]])[:80]
+                  key=lambda p: rank[p["title"]])[:20 if fetch else 80]
     roles: dict[str, list[dict]] = {}
     queue = list(pool)
 
@@ -372,6 +378,8 @@ async def faculty_roles(uid: str, faculty_raw: str) -> dict | None:
         async with yokdir._client() as client:
             while queue:
                 p = queue.pop(0)
+                if not fetch and not _roles_cached(p):
+                    continue
                 try:
                     found = await _person_roles(client, p, uni["raw"])
                 except (httpx.HTTPError, ValueError):
@@ -379,7 +387,7 @@ async def faculty_roles(uid: str, faculty_raw: str) -> dict | None:
                 found = [x for x in found if ROLE_RE.search(fold(x["role"]))]
                 if found:
                     roles[p["yok_id"]] = found
-    await asyncio.gather(*(worker() for _ in range(4)))
+    await asyncio.gather(*(worker() for _ in range(1 if fetch else 4)))
     by_id = {p["yok_id"]: p for p in pool}
     dean, heads = None, {}
     fac_key = fold(faculty_raw)

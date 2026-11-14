@@ -21,15 +21,19 @@ from .config import ROOT
 from .discover import registrable, tr_title
 from .sources import YOK_TITLES
 from .text import clean, fold, name_score, name_tokens
-from .yok_rate import HOOKS as RATE_HOOKS, RATE_GAP, RATE_PER_MIN, throttle, throttle_sync  # noqa: F401  tüm yok.gov.tr istekleri
+from .yok_rate import URGENT, HOOKS as RATE_HOOKS, RATE_GAP, RATE_PER_MIN, throttle, throttle_sync  # noqa: F401  tüm yok.gov.tr istekleri
 
 BASE = "https://akademik.yok.gov.tr"
 API = f"{BASE}/api"
 DIR = ROOT / "data" / "yok"
 TTL = 7 * 24 * 3600
 LIST_TTL = 24 * 3600  # üniversite listesi: şifreli kimlikler dönemsel
-PAGE = 500
+PAGE = 100            # sayfa başına kişi (eskiden 500: kısa sürede çok büyük yanıt → IP engeli)
 MAX_PEOPLE = 12000
+STAFF_TTL = 182 * 24 * 3600  # akademisyenler 6 ay saklanır (yenile ile erken tazelenir)
+UNIT_TTL = 365 * 24 * 3600  # fakülte ve bölüm listeleri 1 yıl saklanır (yenile ile erken tazelenir)
+STAFF_PAGE_GAP = 3.0  # aynı listenin sayfaları arasında bekleme (ortak hız sınırına ek)
+_BULK = asyncio.Lock()  # aynı anda tek kadro çekimi
 FREE_MAIL = {"gmail.com", "hotmail.com", "yahoo.com", "outlook.com", "yandex.com", "icloud.com", "live.com", "msn.com",
              "windowslive.com", "mynet.com", "hotmail.com.tr", "yahoo.com.tr"}
 TITLE_RANK = {"Prof. Dr.": 0, "Doç. Dr.": 1, "Dr. Öğr. Üyesi": 2, "Öğr. Gör.": 3, "Arş. Gör.": 4}
@@ -68,6 +72,14 @@ def _load(name: str, ttl: int = TTL):
         if time.time() - d.get("ts", 0) < ttl:
             return d["data"]
     return None
+
+
+def _stale(name: str):
+    """Süresi dolmuş olsa da önbellekteki kayıt (YÖK'e ulaşılamadığında sayfa boş kalmasın); yoksa None."""
+    try:
+        return _load(name, 10 ** 10)
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 def _save(name: str, data):
@@ -109,8 +121,11 @@ async def api(client, path: str, **params):
     if paused():
         raise httpx.ConnectError("YÖK Akademik şu an yanıt vermiyor; bir süre sonra yeniden denenecek.")
     try:
-        async with _GATE:
+        if URGENT.get():  # kullanıcının beklediği küçük istek: arka plan taramalarının eşzamanlılık sırasını beklemez
             r = await client.get(API + path, params=params)
+        else:
+            async with _GATE:
+                r = await client.get(API + path, params=params)
     except (httpx.TimeoutException, httpx.ConnectError) as exc:
         _trip(type(exc).__name__)
         raise
@@ -175,28 +190,56 @@ def _person(row: dict) -> dict:
         "scopus_id": row.get("scopusId") or "", "researcher_id": row.get("researcherId") or ""}
 
 
-async def uni_people(client, uni: dict) -> list[dict]:
-    """Üniversitenin bütün aktif akademisyenleri (7 gün önbellek); 500'lük sayfalarla."""
-    key = "unistaff-" + uni_id(uni["name"])
-    cached = _load(key)
-    if cached is not None:
-        return cached
+def _unique(rows: list[dict]) -> list[dict]:
+    uniq: dict[str, dict] = {}
+    for r in rows:
+        p = _person(r)
+        uniq.setdefault(p["yok_id"] or p["name"], p)
+    return list(uniq.values())
+
+
+async def _pages(client, **filters) -> list[dict]:
+    """Listeyi küçük sayfalarla, sayfalar arası bekleyerek okur; ilk hatada durur (sigorta api() içinde)."""
     rows, page = [], 1
     while len(rows) < MAX_PEOPLE:
-        d = await api(client, "/akademisyen/list", page=page, length=PAGE, birimId=uni["birim_id"], birimId_matchMode="equals", **ACTIVE)
+        if page > 1:
+            await asyncio.sleep(STAFF_PAGE_GAP)
+        d = await api(client, "/akademisyen/list", page=page, length=PAGE, **filters, **ACTIVE)
         batch = (d or {}).get("data") or []
         rows += batch
         if not batch or page >= ((d or {}).get("totalPages") or 1):
             break
         page += 1
-    uniq: dict[str, dict] = {}
-    for r in rows:
-        p = _person(r)
-        uniq.setdefault(p["yok_id"] or p["name"], p)
-    people = list(uniq.values())
-    if people:
-        _save(key, people)
-    return people
+    return rows
+
+
+async def faculty_rows(client, uni: dict, faculty_name: str) -> list[dict] | None:
+    """Yalnız bu fakültenin kadrosu (fakulteAd süzgeci): fakülte başına çoğunlukla 1 istek. Süzgecin gerçekten
+    çalıştığı ilk yanıtta denetlenir (gelen herkes bu fakülteden mi); çalışmıyorsa bir daha denenmez → None."""
+    if _load("_faculty_filter", STAFF_TTL) is False:
+        return None
+    want = _unit_tokens(faculty_name)
+    async with _BULK:
+        first = await api(client, "/akademisyen/list", page=1, length=PAGE, birimId=uni["birim_id"], birimId_matchMode="equals",
+                          fakulteAd=faculty_name, fakulteAd_matchMode="contains", **ACTIVE)
+        batch = (first or {}).get("data") or []
+        faculties = {clean(r.get("fakulteAd") or "") for r in batch} - {""}
+        if batch and any(_jaccard(want, _unit_tokens(f)) < 0.6 for f in faculties):
+            _save("_faculty_filter", False)  # süzgeç yok sayılıyor: tüm üniversite geliyor
+            return None
+        if not batch:
+            return []
+        _save("_faculty_filter", True)
+        rows, pages = list(batch), (first or {}).get("totalPages") or 1
+        for page in range(2, min(pages, MAX_PEOPLE // PAGE) + 1):
+            await asyncio.sleep(STAFF_PAGE_GAP)
+            d = await api(client, "/akademisyen/list", page=page, length=PAGE, birimId=uni["birim_id"], birimId_matchMode="equals",
+                          fakulteAd=faculty_name, fakulteAd_matchMode="contains", **ACTIVE)
+            more = (d or {}).get("data") or []
+            if not more:
+                break
+            rows += more
+    return _unique(rows)
 
 
 async def faculty_staff(uni_names: list[str], faculty_name: str) -> dict | None:
@@ -210,17 +253,42 @@ async def faculty_staff(uni_names: list[str], faculty_name: str) -> dict | None:
             if not uni:
                 return None
             pkey = people_key(uni["name"], faculty_name)
-            people = _load(pkey)
+            people = _load(pkey, STAFF_TTL)
             if people is None:
-                everyone = await uni_people(client, uni)
+                stale = False
+                try:
+                    # Önce yalnız bu fakülte (küçük istek); süzgeç çalışmıyorsa ya da boşsa üniversite listesi.
+                    own = await faculty_rows(client, uni, faculty_name)
+                    if own:
+                        _save(pkey, own)
+                        return {"university": uni["name"], "faculty": own[0]["faculty"], "people": own}
+                    if own == [] and _load("_faculty_filter", STAFF_TTL) is True:
+                        return None  # süzgeç çalışıyor ama bu adla kimse yok: tüm üniversiteyi çekmeye değmez
+                    # Tüm üniversitenin kadrosu artık çekilmez (IP engelinin kaynağı): yalnız eski kayıt varsa
+                    # ondan ayıklanır; yoksa None → çağıran kurum sitesindeki kadroya düşer.
+                    everyone = _stale("unistaff-" + uni_id(uni["name"]))
+                    if everyone is None:
+                        return None
+                except httpx.HTTPError:
+                    # YÖK yanıt vermiyor: eski kayıt varsa onu göster (yeni istek atılmaz).
+                    people = _stale(pkey)
+                    if people is None:
+                        everyone = _stale("unistaff-" + uni_id(uni["name"]))
+                        if everyone is None:
+                            raise
+                        stale = True
+                if people is not None:
+                    return {"university": uni["name"], "faculty": people[0]["faculty"], "people": people, "stale": True} if people else None
                 groups: dict[str, list] = {}
                 for p in everyone:
                     groups.setdefault(p["faculty"], []).append(p)
                 fac = max(groups, key=lambda f: _jaccard(want, _unit_tokens(f)), default=None)
                 if not fac or _jaccard(want, _unit_tokens(fac)) < 0.6:
-                    return None
+                    # YÖK'e ulaşıldı ama bu birime (ör. uygulama ve araştırma merkezi) kayıtlı kimse yok: hata değil.
+                    return {"university": uni["name"], "faculty": faculty_name, "people": [], "empty": True}
                 people = groups[fac]
-                _save(pkey, people)
+                if not stale:  # eski kayıttan türetilen liste taze gibi saklanmaz
+                    _save(pkey, people)
         except httpx.HTTPError:
             return None
     if not people:
@@ -341,16 +409,157 @@ async def university_detail(uid: str) -> dict | None:
     uni = await _university(uid)
     if not uni:
         return None
-    async with _client() as client:
-        items = _load(f"fac2-{uid}")
+    error = ""
+    token = URGENT.set(True)  # sayfa açılışı: kadro sayıları gibi arka plan isteklerinin önüne geçer
+    try:
+        return await _university_detail(uid, uni)
+    finally:
+        URGENT.reset(token)
+
+
+async def _university_detail(uid: str, uni: dict) -> dict:
+    error = ""
+    async with _client(12) as client:
+        items = _load(f"fac2-{uid}", UNIT_TTL)
         if items is None:
-            units = await api(client, "/genel/birim-list", listVal=2, q=uni["birim_id"]) or []
-            items = [clean(u["label"]) for u in units if u.get("label")]
-            if items:
-                _save(f"fac2-{uid}", items)
-        home = await _home_of(client, uni)
-    return {"id": uid, "name": uni["name"], "raw": uni["raw"], "home": home,
+            try:
+                units = await api(client, "/genel/birim-list", listVal=2, q=uni["birim_id"]) or []
+                items = [clean(u["label"]) for u in units if u.get("label")]
+                if items:
+                    _save(f"fac2-{uid}", items)
+            except httpx.HTTPError:
+                # YÖK'e ulaşılamıyor: sayfa yine açılır (öğrenci bakışı kurum sitesinden okur); fakülteler eski kayıttan.
+                items = _stale(f"fac2-{uid}") or []
+                error = ("YÖK Akademik'e şu an ulaşılamıyor; fakülteler son kayıttan gösteriliyor." if items else
+                         "YÖK Akademik'e şu an ulaşılamıyor; fakülte listesi alınamadı. Öğrenci bakışındaki genel başlıklar çalışır.")
+        home = await _home_of(client, uni) or _stale(f"home-{uid}") or ""
+    return {"id": uid, "name": uni["name"], "raw": uni["raw"], "home": home, "yok_error": error,
             "items": [{"name": display_uni(f), "raw": f} for f in items]}
+
+
+async def _faculty_units(uid: str, faculty_raw: str, refresh: bool = False, urgent: bool = True) -> dict[str, str] | None:
+    """Fakültenin bölümleri {okunur ad: YÖK birim kimliği}; kadro çekmeden en çok iki küçük istek. Kimlikler
+    1 yıl saklanır; kimlik eskirse department_staff tazeler. None: fakülte bulunamadı ya da YÖK'e ulaşılamadı."""
+    key = "deps4-" + hashlib.sha1(f"{uid}|{_key(faculty_raw)}".encode()).hexdigest()[:14]
+    cached = None if refresh else _load(key, UNIT_TTL)
+    if cached is not None:
+        return cached
+    uni = await _university(uid)
+    if not uni:
+        return None
+    token = URGENT.set(urgent)  # tıklanan fakülte arka plan isteklerinin önüne geçer; iş bitince eski haline döner
+    try:
+        async with _client(12) as client:
+            units = None if refresh else _load(f"units3-{uid}", UNIT_TTL)
+            if units is None:
+                rows = await api(client, "/genel/birim-list", listVal=2, q=uni["birim_id"]) or []
+                units = {clean(u["label"]): u.get("value") for u in rows if u.get("label") and u.get("value")}
+                if units:
+                    _save(f"units3-{uid}", units)
+            want = _key(faculty_raw)
+            fid = next((v for label, v in units.items() if _key(label) == want), None)
+            if not fid:
+                return None
+            rows = await api(client, "/genel/birim-list", listVal=3, q=fid) or []
+    except (httpx.HTTPError, ValueError):
+        return _stale(key)
+    finally:
+        URGENT.reset(token)
+    out, links = {}, {}
+    for u in rows:
+        if u.get("label"):
+            name = display_uni(re.sub(r"\s*B[ÖO]L[ÜU]M[ÜU]$", "", clean(u["label"]), flags=re.I))
+            out.setdefault(name, u.get("value") or "")
+            # YÖK satırında bölümün sitesi varsa (alan adı değişebilir: http ile başlayan ilk alan) saklanır.
+            link = next((v for v in u.values() if isinstance(v, str) and re.match(r"https?://", v)), "")
+            if link:
+                links[name] = link
+    if out:
+        _save(key, out)
+        if links:
+            _save(key + "-links", links)
+    return out or None
+
+
+def cached_departments(uid: str, faculty_raw: str, uni: dict | None = None) -> list[str] | None:
+    """YÖK'e ulaşılamazken: daha önce kaydedilmiş kadrodan (fakülte ya da üniversite listesi, süresi geçmiş olsa da)
+    bu fakültenin bölüm adları. Ağa çıkmaz."""
+    key = "deps4-" + hashlib.sha1(f"{uid}|{_key(faculty_raw)}".encode()).hexdigest()[:14]
+    old = _stale(key)
+    if old:
+        return sorted(old, key=fold)
+    people = None
+    if uni:
+        people = _stale(people_key(uni["name"], faculty_raw))
+    if not people:
+        want = _unit_tokens(faculty_raw)
+        everyone = _stale("unistaff-" + uid) or []
+        people = [p for p in everyone if _jaccard(want, _unit_tokens(p.get("faculty") or "")) >= 0.6]
+    names = {display_uni(re.sub(r"\s*B[ÖO]L[ÜU]M[ÜU]$", "", p.get("department") or "")) for p in people or []} - {""}
+    return sorted(names, key=fold) or None
+
+
+def department_links(uid: str, faculty_raw: str) -> dict[str, str]:
+    """YÖK birim listesinde gelen bölüm siteleri (varsa); ağa çıkmaz."""
+    key = "deps4-" + hashlib.sha1(f"{uid}|{_key(faculty_raw)}".encode()).hexdigest()[:14]
+    return _load(key + "-links", UNIT_TTL) or {}
+
+
+async def faculty_departments(uid: str, faculty_raw: str, refresh: bool = False, urgent: bool = True) -> list[str] | None:
+    """Fakültenin bölüm adları (kadro çekilmez)."""
+    units = await _faculty_units(uid, faculty_raw, refresh, urgent)
+    return sorted(units, key=fold) if units else None
+
+
+async def department_staff(uid: str, faculty_raw: str, department: str, urgent: bool = True,
+                           refresh: bool = False, _retry: bool = True) -> list[dict] | None:
+    """Yalnız bu bölümün aktif kadrosu: bölümün YÖK birim kimliğiyle süzülmüş liste (çoğunlukla tek istek),
+    30 gün saklanır. Süzgecin gerçekten bölümle sınırladığı ilk yanıtta denetlenir; sınırlamıyorsa bir daha
+    denenmez ve None döner (çağıran fakülte kadrosuna düşer). None: YÖK'e ulaşılamadı / bölüm yok."""
+    key = "depstaff-" + hashlib.sha1(f"{uid}|{_key(faculty_raw)}|{_key(department)}".encode()).hexdigest()[:14]
+    cached = None if refresh else _load(key, STAFF_TTL)
+    if cached is not None:
+        return cached
+    if _load("_department_filter", STAFF_TTL) is False:
+        return None
+    units = await _faculty_units(uid, faculty_raw, refresh=refresh and _retry) or {}
+    want = _unit_tokens(department)
+    name = max(units, key=lambda n: _jaccard(want, _unit_tokens(n)), default=None)
+    if not name or not units.get(name) or _jaccard(want, _unit_tokens(name)) < 0.6:
+        return None
+    token = URGENT.set(urgent)
+    rows, page = [], 1
+    try:
+        async with _client(15) as client:
+            while True:
+                d = await api(client, "/akademisyen/list", page=page, length=PAGE, birimId=units[name],
+                              birimId_matchMode="equals", **ACTIVE)
+                batch = (d or {}).get("data") or []
+                if page == 1 and batch:
+                    deps = {clean(r.get("bolumAd") or "") for r in batch} - {""}
+                    if any(_jaccard(want, _unit_tokens(x)) < 0.6 for x in deps):
+                        _save("_department_filter", False)  # süzgeç yok sayılıyor: başka bölümler de geliyor
+                        return None
+                    _save("_department_filter", True)
+                rows += batch
+                if not batch or page >= ((d or {}).get("totalPages") or 1) or len(rows) >= MAX_PEOPLE:
+                    break
+                page += 1
+                await asyncio.sleep(STAFF_PAGE_GAP)
+    except httpx.HTTPStatusError as exc:
+        if page == 1 and exc.response is not None and 400 <= exc.response.status_code < 500 and exc.response.status_code != 429:
+            _save("_department_filter", False)  # YÖK bu süzgeci kabul etmiyor: her tıklamada yeniden denenmez
+        return _stale(key)
+    except (httpx.HTTPError, ValueError):
+        return _stale(key)
+    finally:
+        URGENT.reset(token)
+    if not rows and _retry:
+        # Saklı birim kimliği eskimiş olabilir: kimlikleri bir kez tazeleyip yeniden dene.
+        return await department_staff(uid, faculty_raw, department, urgent, refresh=True, _retry=False)
+    people = _unique(rows)
+    _save(key, people)
+    return people
 
 
 def public_person(p: dict, university: str = "") -> dict:

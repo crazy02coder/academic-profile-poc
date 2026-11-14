@@ -136,10 +136,11 @@ const YOK_SEEN = new Map();
 const yokAttrs = (a) => `data-yok-name="${esc(a.name)}" data-yok-inst="${esc(a.lookup_institution || a.institution || "")}"${a.yok_checked || a.title ? ` data-yok-done="1"` : ""}`;
 const yokTitle = (a) => `<span class="t-adv-title">${esc(a.title || (a.yok_checked ? "Unvan YÖK'te eşleşmedi" : "Unvan bilinmiyor"))}</span>`;
 const thesisChip = (a) => a.theses != null ? `<span class="chip blue" data-yok-thesis-chip>${fmtNum(a.theses)} tez yönetti${a.theses_recent ? ` · ${a.theses_recent} son 5 yılda` : ""}${a.theses_phd ? ` · ${a.theses_phd} doktora` : ""}</span>` : "";
-const yokGetBtn = `<button class="btn sm ghost" type="button" data-yok-get>${icon("download")}YÖK bilgisini getir</button>`;
-const yokThesesBtn = `<button class="btn sm ghost" type="button" data-yok-theses>${icon("cap")}Tez geçmişi</button>`;
+// icon() app.js'te tanımlı ve bu dosyadan sonra yüklenir: şablonlar yükleme anında değil, çağrıldığında üretilir.
+const yokGetBtn = () => `<button class="btn sm ghost" type="button" data-yok-get>${icon("download")}YÖK bilgisini getir</button>`;
+const yokThesesBtn = () => `<button class="btn sm ghost" type="button" data-yok-theses>${icon("cap")}Tez geçmişi</button>`;
 const yokButtons = (a) => `${a.yok_url ? `<a class="btn sm" href="${esc(a.yok_url)}" target="_blank" rel="noopener" data-yok-link>${icon("external")}YÖK Akademik</a>` : ""}
-  ${!(a.yok_checked || a.title) ? yokGetBtn : a.theses == null && a.yok_url ? yokThesesBtn : ""}`;
+  ${!(a.yok_checked || a.title) ? yokGetBtn() : a.theses == null && a.yok_url ? yokThesesBtn() : ""}`;
 
 function tPager(list, size, onPage) {
   const cards = [...list.children];
@@ -162,7 +163,7 @@ function applyYok(card, d) {
   const actions = $(".t-adv-actions", card);
   if (actions && d.url && !$("[data-yok-link]", card)) $("a", actions)?.insertAdjacentHTML("afterend", `<a class="btn sm" href="${esc(d.url)}" target="_blank" rel="noopener" data-yok-link>${icon("external")}YÖK Akademik</a>`);
   if (!d.error) $("[data-yok-get]", card)?.remove();
-  if (!d.error && d.yok_id && d.theses == null && actions && !$("[data-yok-theses]", card)) actions.insertAdjacentHTML("beforeend", yokThesesBtn);
+  if (!d.error && d.yok_id && d.theses == null && actions && !$("[data-yok-theses]", card)) actions.insertAdjacentHTML("beforeend", yokThesesBtn());
   if (!d.error && !d.yok_id) $("[data-yok-theses]", card)?.remove();
   if (d.theses != null) {
     $("[data-yok-theses]", card)?.remove();

@@ -235,6 +235,24 @@ async def site_results(domain_url: str, query: str, log=None, k: int = 6,
     return []
 
 
+async def site_results_race(domain_url: str, query: str, log=None, k: int = 6) -> list[dict]:
+    """site_results gibi, ama motorlar sırayla değil aynı anda sorulur; hedef siteden sonuç veren ilk motor kullanılır.
+    Diğerleri iptal edilmez (yarıda kesilen tarayıcı oturumu bırakmamak için); sonuçları önbelleğe yazılır."""
+    root = registrable(urlparse(domain_url).hostname or "")
+    if not root or not query.strip() or k <= 0:
+        return []
+    q = f"site:{root} {' '.join(query.split())}"
+    tasks = [asyncio.create_task(_provider(provider, q, log)) for provider in provider_order()]
+    for done in asyncio.as_completed(tasks):
+        try:
+            rows = _site_rows(await done, root)
+        except Exception:
+            continue
+        if rows:
+            return rank_results(rows, query)[:k]
+    return []
+
+
 async def site_search(domain_url: str, query: str, log=None, k: int = 6,
                       *, providers: tuple[str, ...] | None = None) -> list[str]:
     return [r["url"] for r in await site_results(domain_url, query, log, k, providers=providers)]

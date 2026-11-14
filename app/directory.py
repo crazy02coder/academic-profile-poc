@@ -39,8 +39,9 @@ ROLE_RX = re.compile(r"\s(dekan|rekt[öo]r|m[üu]d[üu]r|b[öo]l[üu]m ba[şs]ka
                      r"sekreter|head\b|dean\b|chair\b|director\b|vice\b)", re.I)
 HUB_RX = re.compile(r"fak[üu]lteler|akademik birim|birimler|akademik$|academic units|faculties|schools|"
                     r"b[öo]l[üu]mler|departments|programlar", re.I)
-STAFF_RX = re.compile(r"akademik kadro|akademik personel|[öo][ğg]retim (?:[üu]yeleri|elemanlar[ıi]|kadrosu)|"
-                      r"kadro|academic staff|faculty members|our people|people|personel", re.I)
+STAFF_RX = re.compile(r"akademik kadro|akademik personel|[öo][ğg]retim (?:[üu]yeleri|elemanlar[ıi]|kadrosu|g[öo]revlileri)|"
+                      r"kadro|academic staff|faculty members|our people|people|personel|"
+                      r"^\s*(?:faculty|staff|academics?|instructors|full[- ]time faculty)\s*$", re.I)  # İngilizce menü: yalnız "Faculty"
 NOISE_RX = re.compile(r"haber|duyuru|etkinlik|news|event|announce|y[öo]netmelik|y[öo]nerge|form|ihale|takvim|"
                       r"mezun|alumni|kurul|toplant|tan[ıi]t[ıi]m|video|galeri|gallery|ileti[şs]im|contact|"
                       r"\.pdf$|\.docx?$|\.xlsx?$", re.I)
@@ -395,6 +396,29 @@ async def staff(unit_url: str, llm=None, refresh: bool = False) -> dict:
     unit["staff"] = _entry(best, page=best_url, method=method, v=STAFF_V)
     save(store)
     return unit["staff"]
+
+
+async def site_people(unit_url: str) -> list[dict]:
+    """Birimin kendi sayfasındaki kişiler (ad, unvan, fotoğraf, profil bağlantısı) — YÖK'e istek atmaz.
+    Birim sayfası ve altındaki en çok 3 kadro sayfası okunur; 30 gün saklanır."""
+    domain = registrable(urlparse(unit_url).hostname or "")
+    store = load(domain)
+    unit = store["units"].setdefault(unit_url, {})
+    if _fresh(unit.get("site_people"), STAFF_V):
+        return unit["site_people"]["items"]
+    sel, base = await _page(unit_url)
+    candidates = [(sel, base)]
+    path = urlparse(base).path.rstrip("/")
+    links = [a for a in _anchors(sel, base) if STAFF_RX.search(a["name"]) and not NOISE_RX.search(a["name"])]
+    links.sort(key=lambda a: (not urlparse(a["url"]).path.startswith(path or "/"),
+                              not re.search(r"akademik|academic|[öo][ğg]retim", a["name"], re.I)))
+    for res in await asyncio.gather(*(_page(a["url"]) for a in links[:3]), return_exceptions=True):
+        if not isinstance(res, Exception):
+            candidates.append(res)
+    best = max((_people(s, u) for s, u in candidates), key=len, default=[])
+    unit["site_people"] = _entry(best, v=STAFF_V)
+    save(store)
+    return best
 
 
 def _unit_context(store: dict, unit_url: str) -> tuple[str, str]:

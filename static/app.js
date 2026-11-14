@@ -2221,6 +2221,10 @@ function uniFactsHtml(d, people) {
     <div class="uf-panes"><div class="uf-pane on">${overview}</div><div class="uf-pane">${scale}</div><div class="uf-pane">${research}</div></div>`;
 }
 function openUniPeek(card, id, name, people) {
+  // Kart açılırken üniversite sayfasının parçaları sunucuda arka planda hazırlanır (fakülteler, site, öğrenci özeti):
+  // sayfaya geçince beklemeden açılır.
+  api(`/api/universities/${encodeURIComponent(id)}`, { quiet: true }).catch(() => {});
+  api(`/api/universities/${encodeURIComponent(id)}/student`, { quiet: true }).catch(() => {});
   const html = `<div class="peek-cover uni">${organizationLogo("universities", id, name, "peek-logo xl")}</div>
     <div class="peek-head center"><div class="peek-id"><h3>${esc(name)}</h3></div></div>
     <div class="uf-host"><div class="uf-stats">${["öğrenci", "akademisyen", "fakülte", "bölüm", "yayın", "h-index"].map((l) => `<div><b class="sk-num"></b><span>${l}</span></div>`).join("")}</div>
@@ -2288,7 +2292,9 @@ document.addEventListener("click", (e) => {
 // =================================================================== AKADEMİSYENLER
 const existingChat = (p) => S.chats.find((c) => fold(c.name) === fold(p.name)
   && (!c.institution || fold(c.institution).includes(fold(p.university)) || fold(p.university).includes(fold(c.institution))));
-const startFromYok = (p) => startJob(p.university, p.name, () => post("/api/jobs", { name: p.name, yok_url: p.url, university: p.university, department: p.department || p.faculty || "", email: p.email || "" }));
+const startFromYok = (p) => p.source === "openalex"
+  ? (p.site ? startJob(p.site, p.name) : newPersonModal("", p.name))  // YÖK yokken: kurum sitesinden, açık kaynaklarla
+  : startJob(p.university, p.name, () => post("/api/jobs", { name: p.name, yok_url: p.url, university: p.university, department: p.department || p.faculty || "", email: p.email || "" }));
 
 async function viewPeople(q = "") {
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Akademisyenler" }]);
@@ -2337,16 +2343,16 @@ async function viewPeople(q = "") {
 async function searchPeople(q) {
   const box = $("#pResults");
   box.innerHTML = `<div class="card list-card result-card"><div class="loading-line"><span class="spinner"></span>YÖK Akademik'te aranıyor…</div>${skeleton(2)}</div>`;
-  let items;
-  try { ({ items } = await api(`/api/people/search?q=${encodeURIComponent(q)}`)); }
+  let items, source = "yok", notice = "";
+  try { ({ items, source = "yok", notice = "" } = await api(`/api/people/search?q=${encodeURIComponent(q)}`)); }
   catch (e) { box.innerHTML = `<div class="notice err result-card">${icon("info")}<div>${esc(e.message)}</div></div>`; hydrateIcons(box); return; }
   if (!box.isConnected) return;
   S.candidates = items;
-  box.innerHTML = items.length ? `<div class="card list-card result-card"><div class="lc-head"><h3>YÖK'te bulunanlar</h3><span class="count">${items.length}</span></div>
+  box.innerHTML = (notice ? `<div class="notice warn result-card">${icon("info")}<div>${esc(notice)}</div></div>` : "") + (items.length ? `<div class="card list-card result-card"><div class="lc-head"><h3>${source === "openalex" ? "OpenAlex'te bulunanlar" : "YÖK'te bulunanlar"}</h3><span class="count">${items.length}</span></div>
       <div class="stagger">${items.map(candidateRow).join("")}</div></div>`
     : `<div class="card result-card">${emptyState("search", `“${q}” YÖK'te bulunamadı`, "Yazımı kontrol edin. Akademisyen YÖK'te yoksa kurum sitesinin bağlantısıyla başlatabilirsiniz; aradığınız bir konuysa Konular'a bakın.",
       `<div class="actions" style="justify-content:center;margin-top:14px"><button class="btn sm" type="button" data-byurl="${esc(q)}">${icon("globe")}Site bağlantısıyla başlat</button>
-       <a class="btn sm" href="#/ara?q=${encodeURIComponent(q)}">${icon("book")}Konu olarak ara</a></div>`)}</div>`;
+       <a class="btn sm" href="#/ara?q=${encodeURIComponent(q)}">${icon("book")}Konu olarak ara</a></div>`)}</div>`);
   hydrateIcons(box);
 }
 
@@ -2550,6 +2556,7 @@ async function viewUni(uid) {
     if (S.uni !== d || !facultyColumn.isConnected) return;
   }
   renderUni();
+  if (d.data.yok_error) $(".col-body", facultyColumn)?.insertAdjacentHTML("afterbegin", `<div class="notice warn"><div>${esc(d.data.yok_error)}</div></div>`);
   $$("[data-audience]").forEach((button) => { button.onclick = () => setUniversityAudience(button.dataset.audience); });
   setUniversityAudience(d.audience || "overview");
   if (d.facData) { renderYokDeps(); if (d.dep != null) renderYokStaff(); if (d.fac != null) loadYokRoles(d, d.data.items[d.fac].raw); }
@@ -2849,12 +2856,15 @@ function studentSectionResult(data, section) {
   const group = data.groups?.[section] || { items: [], links: [] };
   const date = (value) => value ? new Date(value * 1000).toLocaleDateString("tr-TR") : "—";
   const previous = (group.items?.length || group.links?.length) && group.previously_checked_at;
-  const links = (section === "courses" ? [] : group.links || []).filter((l) => safeUrl(l.url) && !/^(türkçe|turkce|english|ingilizce|tr|en)$/i.test((l.title || "").trim()) && (section !== "work_travel" || /work.?(and|&)?.?travel|\bwat\b/i.test(`${l.title} ${l.url}`)));
+  // Derslerde madde yoksa yalnız ders planı/müfredat adlı bağlantılar gösterilir (haber, kalite belgesi, arşiv değil).
+  const planLink = (l) => /öğretim planı|ogretim plani|ders planı|ders plani|müfredat|mufredat|curriculum|course plan|ders içerik|ders icerik|bilgi paketi|program listesi/i.test(`${l.title} ${l.url}`) && !/\.(rar|zip|7z)$/i.test(l.url);
+  const links = (section === "courses" ? (group.items?.length ? [] : (group.links || []).filter(planLink)) : group.links || []).filter((l) => safeUrl(l.url) && !/^(türkçe|turkce|english|ingilizce|tr|en)$/i.test((l.title || "").trim()) && (section !== "work_travel" || /work.?(and|&)?.?travel|\bwat\b/i.test(`${l.title} ${l.url}`)));
   const hasItems = Boolean(group.items?.length);
   const empty = !hasItems && !links.length
-    ? `<div class="sv-empty">${icon("info")}<div><b>${data.errors?.length ? "Bu bilgi şu an alınamadı" : section === "work_travel" ? "Üniversitenin sitesinde Work and Travel sayfası yok" : "Resmî sayfalarda bu başlıkta bilgi bulunamadı"}</b><p>${data.errors?.length ? "Kurum sitesi geç yanıt vermiş olabilir; yeniden tarayabilirsin." : section === "work_travel" ? "Work and Travel genellikle özel ajanslarla yürütülür; üniversite yalnız duyuru yayımlıyorsa burada görünür. Uluslararası ofis sayfaları Erasmus başlığında." : "Kurum bu konuyu sitesinde yayımlamıyor olabilir. Asistana sorarak diğer sayfalara da baktırabilirsin."}</p></div></div>` : "";
+    ? `<div class="sv-empty">${icon("info")}<div><b>${data.partial ? "Aranıyor…" : data.missing_note ? "Ders planı yayımlanmamış" : section === "courses" && data.errors?.length ? "Bu bölüm için ders içeriği bulunamadı" : data.errors?.length ? "Bu bilgi şu an alınamadı" : section === "work_travel" ? "Üniversitenin sitesinde Work and Travel sayfası yok" : "Resmî sayfalarda bu başlıkta bilgi bulunamadı"}</b><p>${data.partial ? "Bulunanlar geldikçe burada görünecek." : data.missing_note ? esc(data.missing_note) : section === "courses" && data.errors?.length ? "Yukarıdaki nota bakın; istersen yeniden tarayabilirsin." : data.errors?.length ? "Kurum sitesi geç yanıt vermiş olabilir; yeniden tarayabilirsin." : section === "work_travel" ? "Work and Travel genellikle özel ajanslarla yürütülür; üniversite yalnız duyuru yayımlıyorsa burada görünür. Uluslararası ofis sayfaları Erasmus başlığında." : "Kurum bu konuyu sitesinde yayımlamıyor olabilir. Asistana sorarak diğer sayfalara da baktırabilirsin."}</p></div></div>` : "";
   return `<div class="student-section-meta"><span>${previous ? "Önceki kayıt" : "Son kontrol"}: ${date(previous || data.checked_at)} · ${fmtNum(data.pages_read || 0)} sayfa okundu</span><button class="btn sm" type="button" data-student-refresh>${icon("refresh")}Yeniden tara</button></div>
-    ${data.errors?.length ? `<div class="notice warn"><div>${data.errors.map(esc).join(" ")}</div></div>` : ""}
+    ${data.program_note ? `<div class="notice"><div>${esc(data.program_note)}</div></div>` : ""}
+    ${data.errors?.length && !data.partial ? `<div class="notice warn"><div>${data.errors.map(esc).join(" ")}</div></div>` : ""}
     ${hasItems ? studentItems(group, section) : ""}${empty}
     ${links.length && group.format !== "course_catalog" ? `<div class="sv-group"><div class="sv-group-head"><b>${hasItems ? "İlgili resmî sayfalar" : "Resmî sayfalarda bulunanlar"}</b><span>${links.length} sayfa</span></div>
       <div class="sv-previews">${links.slice(0, hasItems ? 4 : 8).map(linkPreviewCard).join("")}</div>
@@ -2920,10 +2930,16 @@ async function loadStudentSection(details, d, refresh = false) {
   };
   if (d.studentResults.has(key) && !refresh && !d.studentPending.has(key)) { draw(d.studentResults.get(key)); return; }
   if (d.studentResults.has(key)) draw(d.studentResults.get(key));
-  else box.innerHTML = "";
+  else box.innerHTML = studentSkeleton(section);  // sonucun iskeleti hemen; veri geldikçe dolar
   $("[data-student-refresh]", box)?.setAttribute("disabled", "");
   if (!$(".student-loading", box)) box.insertAdjacentHTML("afterbegin", `<div class="loading-line student-loading" role="status"><span class="spinner"></span>${esc(department || STUDENT_SECTIONS.find(([id]) => id === section)?.[1] || "Seçilen bilgiler")} alınıyor…</div>`);
+  d.studentClicks = (d.studentClicks || 0) + 1;  // arka plan hazırlığı bu sürerken bekler
   let pending = d.studentPending.get(key);
+  if (pending && d.studentBackground?.has(key)) {
+    // Arka planda sürüyor: aynı istek önceliksiz gitmişti; tıklanınca öne alınır (sunucu aynı taramaya bağlanır).
+    d.studentBackground.delete(key);
+    pending = null;
+  }
   if (!pending) {
     const query = new URLSearchParams({ section });
     if (faculty) query.set("faculty", faculty);
@@ -2932,37 +2948,64 @@ async function loadStudentSection(details, d, refresh = false) {
     pending = api(`/api/universities/${encodeURIComponent(d.id)}/student?${query}`, { quiet: true });
     d.studentPending.set(key, pending);
   }
-  try { const data = await pending; d.studentResults.set(key, data); draw(data); }
+  // Beklerken sunucudaki süren toplamanın bulduğu maddeler iskeletteki yerlerine yerleşir (ağa yeni istek atılmaz).
+  let live = true, shown = 0;
+  const poll = async () => {
+    while (live && S.uni === d && details.isConnected) {
+      await new Promise((r) => setTimeout(r, 600));
+      if (!live) break;
+      const query = new URLSearchParams({ section, faculty, department });
+      const p = await api(`/api/universities/${encodeURIComponent(d.id)}/student/progress?${query}`, { quiet: true }).catch(() => null);
+      if (!live || !p?.partial) continue;
+      const count = p.groups?.[section]?.items?.length || 0;
+      if (count > shown) { fillStudentSkeleton(details, box, p, section, d); shown = count; }
+    }
+  };
+  poll();
+  try {
+    const data = await pending; live = false; d.studentResults.set(key, data);
+    if (S.uni === d && details.isConnected && (data.groups?.[section]?.items?.length || 0) > shown && !$(".student-section-meta", box)) await fillStudentSkeleton(details, box, data, section, d);
+    draw(data);
+  }
   catch (error) {
+    live = false;
     if (S.uni !== d || !details.isConnected) return;
     if (d.studentResults.has(key)) draw(d.studentResults.get(key)); else box.innerHTML = "";
     box.insertAdjacentHTML("afterbegin", `<div class="notice warn"><div>${esc(error.message)} <button class="link" data-student-retry type="button">Tekrar dene</button></div></div>`);
     $("[data-student-retry]", box).onclick = () => loadStudentSection(details, d, true);
-  } finally { if (d.studentPending.get(key) === pending) d.studentPending.delete(key); }
+  } finally { d.studentClicks -= 1; if (d.studentPending.get(key) === pending) d.studentPending.delete(key); }
 }
 function renderStudentFaculties(details, d) {
   const box = $(":scope > .student-content", details);
   const faculties = d.data.items.map((fac, i) => ({ fac, i })).filter(({ fac }) => /fakulte|yuksekokul|faculty|school/.test(fold(fac.name)) && !/meslek|enstitu|lisansustu|graduate/.test(fold(fac.name)));
-  box.innerHTML = faculties.length ? `<p class="student-hint">Bir fakülte seçerek bölümlerini aç.</p><div class="student-tree">${faculties.map(({ fac, i }) => `<details class="student-accordion student-branch" data-student-faculty="${i}"><summary><span class="student-summary-icon">${icon("building")}</span><span><b>${esc(fac.name)}</b></span>${icon("chevron")}</summary><div class="student-content"></div></details>`).join("")}</div>` : '<p class="student-missing">YÖK dizininde lisans fakültesi veya yüksekokulu bulunamadı.</p>';
+  box.innerHTML = faculties.length ? `<p class="student-hint">Bir fakülte seçerek bölümlerini aç.</p><div class="student-tree">${faculties.map(({ fac, i }) => `<details class="student-accordion student-branch" data-student-faculty="${i}"><summary><span class="student-summary-icon">${icon("building")}</span><span><b>${esc(fac.name)}</b></span>${icon("chevron")}</summary><div class="student-content"></div></details>`).join("")}</div>` : '<p class="student-missing">Fakülte listesi şu an YÖK, üniversite sitesi ve Vikipedi’den alınamadı; sayfayı biraz sonra yenileyin.</p>';
   $$("[data-student-faculty]", box).forEach((entry) => entry.addEventListener("toggle", () => { if (entry.open) loadStudentFaculty(entry, d); }));
   bindStudentAccordions(box, d);
 }
-async function loadStudentFaculty(details, d) {
-  if (S.uni !== d || !details.isConnected || details.dataset.ready) return;
+async function loadStudentFaculty(details, d, refresh = false) {
+  if (S.uni !== d || !details.isConnected || (details.dataset.ready && !refresh)) return;
   const faculty = d.data.items[Number(details.dataset.studentFaculty)], box = $(":scope > .student-content", details);
   if (!faculty) return;
   studentState(d);
-  if (d.facData && d.data.items[d.fac]?.raw === faculty.raw) d.studentFaculties.set(faculty.raw, d.facData);
+  if (!refresh && d.facData && d.data.items[d.fac]?.raw === faculty.raw) d.studentFaculties.set(faculty.raw, d.facData);
+  if (refresh) { d.studentFaculties.delete(faculty.raw); d.studentFacultyPending.delete(faculty.raw); delete details.dataset.ready; }
   let data = d.studentFaculties.get(faculty.raw);
   if (!data) {
     box.innerHTML = '<div class="loading-line" role="status"><span class="spinner"></span>Seçilen fakültenin bölümleri alınıyor…</div>';
     let pending = d.studentFacultyPending.get(faculty.raw);
     if (!pending) {
-      pending = api(`/api/universities/${encodeURIComponent(d.id)}/faculty?name=${encodeURIComponent(faculty.raw)}&metrics=false`, { quiet: true });
+      // Bölümler kadrodan bağımsız ve hızlı gelir (YÖK birim listesi, olmazsa kurum sitesi); kadro yalnız açılınca.
+      pending = api(`/api/universities/${encodeURIComponent(d.id)}/departments?faculty=${encodeURIComponent(faculty.raw)}${refresh ? "&refresh=true" : ""}`, { quiet: true });
       d.studentFacultyPending.set(faculty.raw, pending);
     }
     try { data = await pending; d.studentFaculties.set(faculty.raw, data); }
     catch (error) {
+      try { data = await siteDepartments(d, faculty.raw); d.studentFaculties.set(faculty.raw, data); }
+      catch { data = null; d.studentSiteError = error; }
+    }
+    finally { if (d.studentFacultyPending.get(faculty.raw) === pending) d.studentFacultyPending.delete(faculty.raw); }
+    if (!data) {
+      const error = d.studentSiteError;
       if (S.uni === d && details.isConnected) {
         updateStudentContent(details, () => {
           box.innerHTML = `<div class="notice warn"><div>${esc(error.message)} <button class="link" type="button" data-faculty-retry>Tekrar dene</button></div></div>`;
@@ -2970,26 +3013,192 @@ async function loadStudentFaculty(details, d) {
         $("[data-faculty-retry]", box).onclick = () => loadStudentFaculty(details, d);
       }
       return;
-    } finally { if (d.studentFacultyPending.get(faculty.raw) === pending) d.studentFacultyPending.delete(faculty.raw); }
+    }
   }
+  prefetchStudentFaculties(d);
+  addSiteLinks(d, faculty.raw, data);
   if (S.uni !== d || !details.isConnected) return;
   details.dataset.ready = "1";
   updateStudentContent(details, () => {
-    box.innerHTML = `<div class="student-tree">${data.departments.map((dep, i) => `<details class="student-accordion student-branch" data-student-department="${i}"><summary><span class="student-summary-icon">${icon("grid")}</span><span><b>${esc(dep.name)}</b><small>${fmtNum(dep.count)} akademisyen · YÖK Akademik</small></span>${icon("chevron")}</summary><div class="student-content"></div></details>`).join("") || '<p class="student-missing">Bu fakülte için bölüm bilgisi bulunamadı.</p>'}</div>`;
+    box.innerHTML = `<div class="student-tree">${data.departments.map((dep, i) => `<details class="student-accordion student-branch" data-student-department="${i}"><summary><span class="student-summary-icon">${icon("grid")}</span><span><b>${esc(dep.name)}</b><small>${dep.count == null ? "Program ve ders içeriği" : `${fmtNum(dep.count)} akademisyen · YÖK Akademik`}</small></span>${icon("chevron")}</summary><div class="student-content"></div></details>`).join("") || '<p class="student-missing">Bu fakülte için bölüm bilgisi bulunamadı.</p>'}</div><div class="student-section-meta"><span>Bölüm listesi 1 yıl saklanır</span><button class="btn sm" type="button" data-faculty-refresh>${icon("refresh")}Bölümleri yenile</button></div>`;
   });
+  $("[data-faculty-refresh]", box).onclick = () => loadStudentFaculty(details, d, true);
+  prefetchStudentCourses(d, faculty.raw, data.departments.map((dep) => dep.name));
   $$("[data-student-department]", box).forEach((entry) => entry.addEventListener("toggle", () => {
     if (!entry.open || entry.dataset.ready) return;
     entry.dataset.ready = "1";
     const dep = data.departments[Number(entry.dataset.studentDepartment)], target = $(":scope > .student-content", entry);
+    if (!data.people && data.source === "yok") departmentStaff(d, faculty.raw, dep.name).catch(() => {});  // tıklanan bölüm öncelikli
     target.innerHTML = `<section class="department-courses" data-student-section="courses" data-faculty="${esc(faculty.raw)}" data-department="${esc(dep.name)}"><div class="student-content"></div></section>`
-      + `<details class="student-accordion student-branch" data-student-staff><summary><span class="student-summary-icon">${icon("users")}</span><span><b>Akademik kadro</b><small>${fmtNum(dep.count)} akademisyen</small></span>${icon("chevron")}</summary><div class="student-content"></div></details>`;
+      + `<details class="student-accordion student-branch" data-student-staff><summary><span class="student-summary-icon">${icon("users")}</span><span><b>Akademik kadro</b><small>${dep.count == null ? "YÖK Akademik" : `${fmtNum(dep.count)} akademisyen`}</small></span>${icon("chevron")}</summary><div class="student-content"></div></details>`;
     loadStudentSection($(".department-courses", target), d);
     const staff = $("[data-student-staff]", target);
-    staff.addEventListener("toggle", () => { if (staff.open && !staff.dataset.ready) { staff.dataset.ready = "1"; renderStudentStaff($(":scope > .student-content", staff), data.people.filter((p) => p.department === dep.key), d); } });
+    staff.addEventListener("toggle", () => { if (staff.open && !staff.dataset.ready) { staff.dataset.ready = "1"; studentStaffBox($(":scope > .student-content", staff), data, faculty.raw, dep, d); } });
     bindStudentAccordions(target, d);
   }));
   bindStudentAccordions(box, d);
 }
+// YÖK'e yalnız tıklanan fakülte için gidilir. Diğer fakültelerin bölümleri (ve bağlantıları) arka planda
+// üniversitenin kendi sitesinden okunur: fakülte yapısı bir kez öğrenilir, kalanlar aynı tariften üç paralel
+// istekle gelir. YÖK'e arka planda istek atılmaz.
+function siteDepartments(d, facultyRaw) {
+  d.studentSiteDeps ||= new Map();
+  let pending = d.studentSiteDeps.get(facultyRaw);
+  if (!pending) {
+    pending = api(`/api/universities/${encodeURIComponent(d.id)}/site-departments?faculty=${encodeURIComponent(facultyRaw)}`, { quiet: true });
+    pending.catch(() => { if (d.studentSiteDeps.get(facultyRaw) === pending) d.studentSiteDeps.delete(facultyRaw); });
+    d.studentSiteDeps.set(facultyRaw, pending);
+  }
+  return pending;
+}
+async function prefetchStudentFaculties(d) {
+  if (d.studentFacultiesPrefetch) return;
+  d.studentFacultiesPrefetch = true;
+  const queue = [...(d.data.items || [])];
+  const work = async () => {
+    while (S.uni === d && queue.length) {
+      const faculty = queue.shift();
+      try { await siteDepartments(d, faculty.raw); } catch { /* tıklanınca YÖK'ten gelir */ }
+    }
+  };
+  await Promise.all([work(), work(), work()]);
+}
+// YÖK'ten gelen bölümlere siteden okunan bağlantılar eklenir (ad eşleşmesiyle; YÖK'e istek yok).
+async function addSiteLinks(d, facultyRaw, data) {
+  if (data.source !== "yok") return;
+  try {
+    const site = await siteDepartments(d, facultyRaw);
+    const want = new Map(site.departments.filter((x) => x.url).map((x) => [nameKey(x.name), x.url]));
+    data.departments.forEach((dep) => { if (!dep.url) dep.url = want.get(nameKey(dep.name)) || ""; });
+    data.faculty_url ||= site.faculty_url;
+  } catch { /* bağlantısız da çalışır */ }
+}
+// Bölüm kadrosu: yalnız o bölüm (YÖK bölüm süzgeci, çoğunlukla tek küçük istek); aynı bölüm için tek istek.
+function departmentStaff(d, facultyRaw, depName, background = false, refresh = false) {
+  d.studentStaffPending ||= new Map();
+  const key = JSON.stringify([facultyRaw, depName]);
+  let pending = refresh ? null : d.studentStaffPending.get(key);
+  if (!pending) {
+    pending = api(`/api/universities/${encodeURIComponent(d.id)}/department-staff?${new URLSearchParams({ faculty: facultyRaw, department: depName, background: background ? "true" : "false", refresh: refresh ? "true" : "false" })}`, { quiet: true });
+    pending.catch(() => { if (d.studentStaffPending.get(key) === pending) d.studentStaffPending.delete(key); });
+    d.studentStaffPending.set(key, pending);
+  }
+  return pending;
+}
+// "Akademik kadro" açılınca: bölümün kadrosu (genelde önceden hazır); YÖK'ten gelmezse bölüm sitesi.
+async function studentStaffBox(host, data, facultyRaw, dep, d, refresh = false) {
+  if (data.staff_error && !data.people) { siteStaff(host, dep, d); return; }
+  let people = data.people && !refresh ? data.people.filter((p) => nameKey(p.department) === nameKey(dep.key)) : null;
+  if (!people) {
+    host.innerHTML = '<div class="loading-line" role="status"><span class="spinner"></span>Bölümün akademik kadrosu alınıyor…</div>';
+    let notice = "";
+    try { const r = await departmentStaff(d, facultyRaw, dep.name, false, refresh); people = r.people; notice = r.notice || ""; }
+    catch { if (host.isConnected) siteStaff(host, dep, d); return; }
+    if (!host.isConnected) return;
+    renderStudentStaff(host, people, d);
+    if (notice) host.insertAdjacentHTML("afterbegin", `<div class="notice"><div>${esc(notice)}</div></div>`);
+  } else renderStudentStaff(host, people, d);
+  host.insertAdjacentHTML("beforeend", `<div class="student-section-meta"><span>Kadro 6 ay saklanır</span><button class="btn sm" type="button" data-staff-reload>${icon("refresh")}Kadroyu yenile</button></div>`);
+  $("[data-staff-reload]", host).onclick = () => { if (data.people) data.people = null; studentStaffBox(host, data, facultyRaw, dep, d, true); };
+  addSitePhotos(host, people, facultyRaw, dep.name, d);
+}
+// Fakülte açılınca bölümlerin ders içeriği arka planda hazırlanır: ilk bölüm tek başına (site adres kalıbını
+// öğrensin, kardeşler aramasız gelsin), sonra üç işçiyle paralel. Tıklanan bölüm sunucuda sıranın önüne geçer.
+async function prefetchStudentCourses(d, faculty, names) {
+  d.studentPrefetched ||= new Set();
+  d.studentBackground ||= new Set();
+  d.studentQueue ||= [];
+  for (const name of names) {
+    const key = JSON.stringify(["courses", faculty, name]);
+    if (d.studentPrefetched.has(key) || d.studentResults.has(key) || d.studentPending.has(key)) continue;
+    d.studentPrefetched.add(key);
+    d.studentQueue.push([faculty, name]);
+  }
+  // Üniversite başına üç işçi: açılan bütün fakültelerin bölümleri tek kuyruktan, aynı anda en çok üç tarama.
+  d.studentWorkers ||= 0;
+  const work = async () => {
+    d.studentWorkers += 1;
+    try {
+      while (S.uni === d && d.studentQueue.length) {
+        const [fac, name] = d.studentQueue.shift();
+        const key = JSON.stringify(["courses", fac, name]);
+        if (d.studentResults.has(key) || d.studentPending.has(key)) continue;
+        const pending = api(`/api/universities/${encodeURIComponent(d.id)}/student?${new URLSearchParams({ section: "courses", faculty: fac, department: name, background: "true" })}`, { quiet: true });
+        d.studentPending.set(key, pending);
+        d.studentBackground.add(key);
+        try { const r = await pending; if (!d.studentResults.has(key)) d.studentResults.set(key, r); } catch { /* tıklanınca yeniden denenir */ }
+        finally { if (d.studentPending.get(key) === pending) d.studentPending.delete(key); d.studentBackground.delete(key); }
+        while (d.studentWorkers < 3 && d.studentQueue.length) work();  // ilk sonuçtan sonra üç işçiye çık
+      }
+    } finally { d.studentWorkers -= 1; }
+  };
+  if (!d.studentWorkers && d.studentQueue.length) work();
+}
+// YÖK kadrosu alınamadığında bölümün kendi sayfasından kadro (ad, unvan, profil fotoğrafı); YÖK'e istek atmaz.
+async function siteStaff(box, dep, d) {
+  const fail = `<div class="notice warn"><div>Kadro YÖK Akademik'ten şu an alınamadı${dep.url ? ", bölüm sayfasında da kadro listesi bulunamadı" : ""}. Bölüm ve ders içeriği etkilenmez.</div></div>`;
+  if (!dep.url) { box.innerHTML = fail; return; }
+  box.innerHTML = '<div class="loading-line" role="status"><span class="spinner"></span>Kadro bölümün sitesinden okunuyor…</div>';
+  try {
+    const data = await api("/api/directory/staff", { method: "POST", body: JSON.stringify({ url: dep.url }), quiet: true });
+    if (!box.isConnected) return;
+    if (!data.items?.length) { box.innerHTML = fail; return; }
+    renderStudentStaff(box, data.items.map((p) => ({ ...p, site_url: p.url })), d);
+    box.insertAdjacentHTML("afterbegin", `<p class="student-hint">YÖK'e ulaşılamadığı için kadro bölümün sitesinden gösteriliyor.</p>`);
+  } catch { if (box.isConnected) box.innerHTML = fail; }
+}
+// Sonucun iskeleti: ders içeriğinde müfredat kartı ve dönem kartları, diğer başlıklarda bilgi kartları (gri, parlayan).
+function studentSkeleton(section) {
+  const bar = (w = "") => `<span class="sk-line${w}"></span>`;
+  if (section === "courses") return `<div class="student-catalog sk-catalog"><p class="student-hint">Müfredat hazırlanıyor…</p>${
+    Array.from({ length: 8 }, (_, i) => `<div class="student-term sk-term"><b>${i + 1}. dönem</b>${bar(" short")}</div>`).join("")}</div>`;
+  return `<div class="sk-cards">${Array.from({ length: 3 }, () => `<div class="sk-card">${bar()}${bar(" short")}${bar()}</div>`).join("")}</div>`;
+}
+// Bulunan maddeler iskeletteki yerlerine tek tek, dışarıdan sıçrayarak oturur.
+async function fillStudentSkeleton(details, box, data, section, d) {
+  const tmp = document.createElement("div");
+  tmp.innerHTML = studentSectionResult(data, section);
+  if (section === "courses") {
+    const terms = $$(".student-term", tmp), catalog = $(".sk-catalog", box);
+    if (!catalog || !terms.length) return;
+    const hint = $(".student-hint", tmp);
+    if (hint) $(".student-hint", catalog).textContent = hint.textContent;
+    for (const [i, term] of terms.entries()) {
+      const label = fold($("summary b", term)?.textContent || "");
+      if ($$(".student-term:not(.sk-term)", catalog).some((t) => fold($("summary b", t)?.textContent || "") === label)) continue;
+      const slot = $$(".sk-term", catalog).find((t) => fold($("b", t).textContent) === label) || $(".sk-term", catalog);
+      updateStudentContent(details, () => { if (slot) slot.replaceWith(term); else catalog.append(term); });
+      flyIn(term, i % 2 ? 1 : -1);
+      await new Promise((r) => setTimeout(r, 110));
+    }
+    bindCourseDetails(box, d);
+    return;
+  }
+  const items = $$(".sv-group, .sv-item", tmp), host = $(".sk-cards", box);
+  if (!host) return;
+  updateStudentContent(details, () => { host.classList.remove("sk-cards"); host.innerHTML = ""; items.forEach((el) => host.append(el)); });
+  items.forEach((el, i) => setTimeout(() => flyIn(el, i % 2 ? 1 : -1), i * 90));
+}
+// YÖK kadrosuna fotoğraf: kişinin fakülte/bölüm sayfasındaki kartından, ad eşleşmesiyle (YÖK'e istek atmaz).
+async function addSitePhotos(box, people, faculty, department, d) {
+  if (!people.length || people.every((p) => p.photo)) return;
+  try {
+    const r = await api(`/api/universities/${encodeURIComponent(d.id)}/site-photos?${new URLSearchParams({ faculty, department })}`, { quiet: true });
+    const site = Object.entries(r.photos || {}).map(([name, photo]) => ({ key: nameKey(name), photo, url: r.urls?.[name] || "" }));
+    if (!site.length || !box.isConnected) return;
+    $$(".student-person", box).forEach((card, i) => {
+      const person = people[i], hit = person && !person.photo && site.find((s) => s.key === nameKey(person.name));
+      const img = hit && safeImg(hit.photo);
+      if (!img) return;
+      const av = $(".av", card);
+      if (!av || $("img", av)) return;
+      av.insertAdjacentHTML("beforeend", `<img src="${esc(img)}" alt="" loading="lazy" onerror="this.remove()">`);
+      flyIn(av, 0);
+    });
+  } catch { /* fotoğraf yoksa baş harfler kalır */ }
+}
+// Ad karşılaştırma anahtarı: unvanlar atılır, harf/aksan duyarsız, kelime sırası önemsiz.
+const nameKey = (name) => fold(name || "").replace(/\b(prof|doc|dr|ogr|uyesi|gor|ars|arastirma|gorevlisi|ogretim|yrd|uzm)\b/g, " ").split(/\s+/).filter(Boolean).sort().join(" ");
 function renderStudentStaff(box, people, d) {
   box.innerHTML = `<div class="student-staff">${people.map((person) => {
     const saved = existingChat({ name: person.name, university: d.data.name });
@@ -3036,7 +3245,10 @@ async function selectYokFaculty(i) {
   try {
     const data = await api(`/api/universities/${encodeURIComponent(d.id)}/faculty?name=${encodeURIComponent(fac.raw)}`);
     if (!active()) return;
-    d.facData = data; renderYokDeps(); loadYokRoles(d, fac.raw);
+    if (!data.people.length) { body.innerHTML = `<div class="col-empty">Bu birimde akademisyen kaydı bulunamadı (YÖK Akademik ve üniversite sitesi).</div>`; return; }
+    d.facData = data; renderYokDeps();
+    if (data.source === "site") body.insertAdjacentHTML("afterbegin", `<div class="col-empty">${esc(data.notice)}</div>`);
+    else loadYokRoles(d, fac.raw);
   } catch (e) { if (active()) body.innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; }
 }
 // Dekan / bölüm başkanı: YÖK "İdari Görevler" (yalnız süren görevler); ilk açılış birkaç saniye, sonra önbellek
@@ -4902,23 +5114,45 @@ function programChips(text) {
   const parts = text.replace(/\s+vb\.?\s*(gibi)?.*$/i, "").split(/\s*[,;•\n]\s*/).map((x) => x.trim()).filter((x) => x.length > 2 && x.length < 60);
   return parts.length >= 3 && parts.length <= 40 ? parts : null;
 }
+// Program kartları ayrı ayrı istenir; her biri verisi gelince kendi yerine dışarıdan sıçrayarak oturur.
+const PROGRAM_CARDS = [["employment", "Mezunların iş alanları"], ["profile", "Program profili"], ["further", "Üst kademeye geçiş"], ["degree", "Kazanılan derece"], ["goals", "Amaç ve hedefler"]];
 async function loadProgramProfile(box, d) {
   const host = $("[data-program-url]", box);
-  if (!host) return;
-  host.innerHTML = '<div class="loading-line"><span class="spinner"></span>Program profili ve mezun iş alanları alınıyor…</div>';
-  try {
-    const p = await api(`/api/universities/${encodeURIComponent(d.id)}/student/program?url=${encodeURIComponent(host.dataset.programUrl)}`, { quiet: true });
-    if (!host.isConnected) return;
-    if (!p.sections?.length) { host.hidden = true; return; }
-    const order = ["employment", "profile", "further", "degree", "goals"], secs = [...p.sections].sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
-    host.innerHTML = `<div class="prog-head">${icon("cap")}<div><h4>Program profili</h4><p>Bölüm seçerken: mezunlar nerede çalışıyor, program ne kazandırıyor?</p></div></div>
-      <div class="prog-secs">${secs.map((s, i) => { const chips = s.key === "employment" && programChips(s.text);
-        return `<section class="prog-sec ${s.key}${i === 0 ? " lead" : ""}"><h5>${esc(s.heading)}</h5>${chips ? `<div class="chips">${chips.map((c) => `<span class="chip teal">${esc(c)}</span>`).join("")}</div>` : `<p class="${s.text.length > 420 ? "clamp" : ""}">${esc(s.text)}</p>${s.text.length > 420 ? '<button class="link" type="button" data-prog-more>Devamını göster</button>' : ""}`}
-          <a class="source-link" href="${esc(safeUrl(s.url))}" target="_blank" rel="noopener">${icon("external")}Kaynak</a></section>`; }).join("")}</div>`;
-    hydrateIcons(host);
-    $$("[data-prog-more]", host).forEach((b) => b.onclick = () => { const t = b.previousElementSibling; const shut = t.classList.toggle("clamp"); b.textContent = shut ? "Devamını göster" : "Daralt"; });
-    if (!calmMotion()) $$(".prog-sec", host).forEach((el, i) => el.animate([{ opacity: 0, transform: "translateY(8px)" }, { opacity: 1, transform: "none" }], { duration: 300, delay: i * 50, easing: EASE, fill: "backwards" }));
-  } catch { host.hidden = true; }
+  if (!host || host.dataset.loaded) return;
+  host.dataset.loaded = "1";
+  const url = host.dataset.programUrl;
+  host.innerHTML = `<div class="prog-head">${icon("cap")}<div><h4>Program profili</h4><p>Bölüm seçerken: mezunlar nerede çalışıyor, program ne kazandırıyor?</p></div></div>
+    <div class="prog-secs">${PROGRAM_CARDS.map(([key], i) => `<section class="prog-sec ${key}${i === 0 ? " lead" : ""} prog-wait" data-prog-key="${key}"><div class="sk-line"></div><div class="sk-line short"></div></section>`).join("")}</div>`;
+  hydrateIcons(host);
+  let got = 0;
+  await Promise.all(PROGRAM_CARDS.map(async ([key], i) => {
+    const slot = $(`[data-prog-key="${key}"]`, host);
+    try {
+      const p = await api(`/api/universities/${encodeURIComponent(d.id)}/student/program?url=${encodeURIComponent(url)}&key=${key}`, { quiet: true });
+      const s = p.sections?.[0];
+      if (!slot?.isConnected) return;
+      if (!s) { slot.remove(); return; }
+      got += 1;
+      const chips = key === "employment" && programChips(s.text);
+      slot.classList.remove("prog-wait");
+      slot.innerHTML = `<h5>${esc(s.heading)}</h5>${chips ? `<div class="chips">${chips.map((c) => `<span class="chip teal">${esc(c)}</span>`).join("")}</div>` : `<p class="${s.text.length > 420 ? "clamp" : ""}">${esc(s.text)}</p>${s.text.length > 420 ? '<button class="link" type="button" data-prog-more>Devamını göster</button>' : ""}`}
+        <a class="source-link" href="${esc(safeUrl(s.url))}" target="_blank" rel="noopener">${icon("external")}Kaynak</a>`;
+      hydrateIcons(slot);
+      const more = $("[data-prog-more]", slot);
+      if (more) more.onclick = () => { const t = more.previousElementSibling; const shut = t.classList.toggle("clamp"); more.textContent = shut ? "Devamını göster" : "Daralt"; };
+      flyIn(slot, i % 2 ? 1 : -1);
+    } catch { slot?.remove(); }
+  }));
+  if (!got && host.isConnected) host.hidden = true;
+}
+// Ekranın dışından gelip yerine sıçrayarak oturma (hareket azaltılmışsa yalnız belirme).
+function flyIn(el, side = 1) {
+  if (calmMotion()) { el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200 }); return; }
+  el.animate([
+    { opacity: 0, transform: `translate(${side * 120}px, 40px) scale(.92)` },
+    { opacity: 1, transform: "translate(0, -8px) scale(1.02)", offset: .6 },
+    { transform: "translate(0, 3px) scale(.995)", offset: .8 },
+    { opacity: 1, transform: "none" }], { duration: 650, easing: "cubic-bezier(.2,.8,.3,1)" });
 }
 
 function bindCourseDetails(root, d) {

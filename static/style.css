@@ -2392,3 +2392,20 @@ html.page-vt.tx-perspective.tx-back::view-transition-new(page) { z-index: 1; ani
   .sa-bar { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .tome-3d, .bc-plate, .sa-item { transition: none; } }
+
+/* Öğrenci bakışı: arama sürerken gelen maddeler hafif sıçrayarak belirir */
+@keyframes svPop { 0% { opacity: 0; transform: translateY(8px) scale(.97); } 60% { opacity: 1; transform: translateY(-2px) scale(1.01); } 100% { opacity: 1; transform: none; } }
+.sv-pop { animation: svPop .38s cubic-bezier(.2,.8,.3,1.2) both; }
+@media (prefers-reduced-motion: reduce) { .sv-pop { animation: none; } }
+.sv-steps { list-style: none; margin: 6px 0 10px; padding: 0; display: grid; gap: 4px; font-size: 13px; color: var(--muted, #667085); }
+.sv-steps li { display: flex; align-items: center; gap: 6px; }
+.sv-steps li svg { width: 14px; height: 14px; color: var(--ok, #12b76a); flex: none; }
+.prog-sec.prog-wait { min-height: 110px; display: grid; align-content: start; gap: 10px; }
+.prog-sec.prog-wait .sk-line { height: 12px; border-radius: 6px; background: linear-gradient(90deg, var(--line, #eaecf0) 25%, var(--surface-2, #f2f4f7) 50%, var(--line, #eaecf0) 75%); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+.prog-sec.prog-wait .sk-line.short { width: 60%; }
+.sk-line { display: block; height: 12px; border-radius: 6px; background: linear-gradient(90deg, var(--line, #eaecf0) 25%, var(--surface-2, #f2f4f7) 50%, var(--line, #eaecf0) 75%); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+.sk-line.short { width: 40%; }
+.student-term.sk-term { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 22px; color: var(--muted, #98a2b3); }
+.student-term.sk-term .sk-line { width: 70px; }
+.sk-cards { display: grid; gap: 12px; }
+.sk-card { display: grid; gap: 10px; padding: 18px; border: 1px solid var(--line, #eaecf0); border-radius: 14px; }
