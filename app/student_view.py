@@ -186,7 +186,8 @@ _EN_TR = {
 }
 _EN_RX = re.compile(r"\b(?:" + "|".join(sorted(map(re.escape, _EN_TR), key=len, reverse=True)) + r")\b")
 # Aynı kökün ekli biçimleri tek biçime: mühendisliği/mühendislik, bilimi/bilimleri, eğitimi/eğitim.
-_TR_STEM = ((r"\bmuhendisligi\b", "muhendislik"), (r"\bbilimi\b", "bilimleri"), (r"\begitimi\b", "egitim"),
+_TR_STEM = ((r"\bmakina\b", "makine"),  # aynı bölümün iki yazımı (YÖK "Makine", bazı siteler "Makina")
+            (r"\bmuhendisligi\b", "muhendislik"), (r"\bbilimi\b", "bilimleri"), (r"\begitimi\b", "egitim"),
             (r"\bmimarligi\b", "mimarlik"), (r"\byonetimi\b", "yonetim"), (r"\btasarimi\b", "tasarim"))
 
 
@@ -505,6 +506,7 @@ INDEX_TTL = 45 * 24 * 3600
 INDEX_MAX_LINKS = 4000
 STRONG_TABLE = 8  # "dolu ders tablosu": doğrulanmış sayfada en az bu kadar ders varsa süren diğer okumalar beklenmez
 _INDEX: dict[str, dict] = {}
+_MOVED: dict[str, str] = {}  # eski alan adı → kurumun yönlendiği yeni ana sayfa (sunucu açıkken hatırlanır)
 _INDEX_DIRTY: set[str] = set()
 _UNIT_LINK = re.compile(r"\b(?:fakultesi|fakulte|faculty|yuksekokulu|yuksekokul|school|college|konservatuvari|konservatuvar)\b")
 # Lisans ders planı olmayan programlar (_NOT_PLAN'dan farkı: "undergraduate" lisansüstü sayılmaz, seçmeli elenmez).
@@ -1556,6 +1558,8 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
             result["home"] = home
             if not home:
                 raise ValueError("Kurumun resmî site bağlantısı bulunamadı.")
+            home = _MOVED.get(registrable(urlsplit(home).hostname or ""), home)  # kurum alan adını değiştirmişse yenisi
+            result["home"] = home
             domain = registrable(urlsplit(home).hostname or "")
             async with public_client(timeout=12, headers={"User-Agent": USER_AGENT, "Accept-Language": "tr"}) as client, \
                     _reaper(spawned):
@@ -1603,9 +1607,18 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                             _INFLIGHT.pop(key, None)
 
                 async def read(url, *, is_home=False, parent=None, link=None):
+                    nonlocal domain, home
                     async with _LIMIT(urgent()):
                         try:
                             raw, mime, final = await fetch_shared(url, is_home)
+                            moved = registrable(urlsplit(final).hostname or "")
+                            if is_home and moved and moved != domain:
+                                # Kurumun kayıtlı ana sayfası başka alan adına yönleniyor (boun.edu.tr → bogazici.edu.tr):
+                                # kurum taşınmıştır; tarama yeni alan adıyla sürer, sonraki taramalar oradan başlar.
+                                trace.append(f"kurum alan adı değişmiş: {domain} → {moved}"[:220])
+                                _MOVED[domain] = final
+                                domain, home = moved, final
+                                result["home"] = home
                             if registrable(urlsplit(final).hostname or "") != domain:
                                 trace.append(f"başka alan adına yönlendi: {url} → {final}"[:220])
                                 return None
@@ -2088,7 +2101,9 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                     # Ortak liste sayfası bölüme özel olmamalı: bölüm sayfalarını (ör. Bologna program sayfası) geçip
                     # bölüm bağlantısını taşıyan liste sayfasına (lisans program listesi) kadar geri çıkılır.
                     via = source.get("via")
-                    while via and by_url.get(_url_key(via), {}).get("department_verified"):
+                    walked: set[str] = set()  # iki sayfa birbirini gösterebilir (bağlantı ana sayfaya geri yönlenince): döngü kesilir
+                    while via and _url_key(via) not in walked and by_url.get(_url_key(via), {}).get("department_verified"):
+                        walked.add(_url_key(via))
                         via = by_url[_url_key(via)].get("via")
                     via_host = urlsplit(via or "").hostname or ""
                     if (via and _url_key(via) != _url_key(result["home"])

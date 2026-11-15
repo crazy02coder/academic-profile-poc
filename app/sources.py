@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from urllib.parse import quote, urljoin, urlparse
 
 import httpx
@@ -96,8 +97,34 @@ async def openalex_institution(client, profile: Profile) -> dict | None:
                                             i.get("works_count") or 0))
 
 
+# Toplu taramada ORCID'leri bilinen kişilerin OpenAlex yazar kayıtları tek istekte (50'şer) alınır; kişi başına
+# yazar araması yapılmaz. {orcid: yazar kaydı}
+OPENALEX_AUTHOR_HINTS: dict[str, dict] = {}
+
+
+async def openalex_prefetch_authors(orcids: list[str]) -> int:
+    """ORCID listesindeki yazarları OpenAlex'ten 50'şerlik gruplarla alıp ipucu tablosuna koyar. Bulunan sayısı döner."""
+    todo = sorted({o for o in orcids if re.fullmatch(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]", o or "") and o not in OPENALEX_AUTHOR_HINTS})
+    found = 0
+    try:
+        async with _client() as client:
+            for i in range(0, len(todo), 50):
+                r = await client.get(f"{OPENALEX}/authors", params={"filter": "orcid:" + "|".join(todo[i:i + 50]),
+                                                                  "per-page": 50, **OPENALEX_PARAMS})
+                for author in (r.json().get("results", []) if r.status_code == 200 else []):
+                    oid = (author.get("orcid") or "").rsplit("/", 1)[-1]
+                    if oid:
+                        OPENALEX_AUTHOR_HINTS[oid] = author
+                        found += 1
+    except (httpx.HTTPError, ValueError):
+        pass
+    return found
+
+
 async def openalex_author(client, profile: Profile, log) -> dict | None:
     orcid = profile.links.get("orcid")
+    if orcid and orcid in OPENALEX_AUTHOR_HINTS:
+        return OPENALEX_AUTHOR_HINTS[orcid]
     if orcid:
         r = await client.get(f"{OPENALEX}/authors", params={"filter": f"orcid:{orcid}", **OPENALEX_PARAMS})
         res = r.json().get("results", []) if r.status_code == 200 else []
@@ -539,17 +566,44 @@ async def _yok_find(client, name: str, institution: str, emit) -> str:
     return scored[0][1]
 
 
-async def _yok_publications(client, guid: str, profile_url: str, emit) -> list[dict]:
-    types = await _yok_rows(client, "/yayin/ana/tur/list")
-    wanted = [(t["value"], YOK_PUB_TYPES[t["label"]], t["label"]) for t in types if t.get("label") in YOK_PUB_TYPES]
-    lists = await asyncio.gather(*[_yok_rows(client, "/yayin/list", authorGuidId=guid, yayinAnaTurId=v, page=1, length=1000)
-                                   for v, _k, _l in wanted], return_exceptions=True)
+_YOK_TYPES_CACHE: dict = {"at": 0.0, "rows": []}
+
+
+def _yok_kind(row: dict) -> str:
+    """Türsüz (tek istekli) listede yayının türü alt tür adından: bildiri/poster → bildiri, kitap/bölüm → kitap,
+    hakemlik/editörlük → "" (yayın sayılmaz), kalanı (SCI, SSCI, TR Dizin, hakemli dergi…) makale."""
+    label = fold(row.get("yayinTuruAdi") or "")
+    if re.search(r"hakemli[kg]|editor", label):  # "hakemli dergi" makaledir; "hakemlik/hakemliği" ve editörlük değildir
+        return ""
+    if re.search(r"bildiri|poster|sunum|kongre|sempozyum|konferans", label):
+        return "proceedings"
+    if re.search(r"kitap|ansiklopedi|bolum", label) or (row.get("isbn") and not row.get("issn") and not row.get("endeksAdi")):
+        return "book"
+    return "article"
+
+
+async def _yok_publications(client, guid: str, profile_url: str, emit, fast: bool = False) -> list[dict]:
+    """fast=True (toplu tarama): bütün yayınlar tek istekle, tür alt tür adından çıkarılır. Aksi halde her ana tür
+    (makale, bildiri, kitap) ayrı istenir; tür listesi süreç boyunca bir kez alınır."""
+    if fast:
+        wanted = [("", "", "yayın")]
+        lists = [await _yok_rows(client, "/yayin/list", authorGuidId=guid, page=1, length=1000)]
+    else:
+        if not _YOK_TYPES_CACHE["rows"] or time.time() - _YOK_TYPES_CACHE["at"] > 24 * 3600:
+            _YOK_TYPES_CACHE.update(rows=await _yok_rows(client, "/yayin/ana/tur/list"), at=time.time())
+        types = _YOK_TYPES_CACHE["rows"]
+        wanted = [(t["value"], YOK_PUB_TYPES[t["label"]], t["label"]) for t in types if t.get("label") in YOK_PUB_TYPES]
+        lists = await asyncio.gather(*[_yok_rows(client, "/yayin/list", authorGuidId=guid, yayinAnaTurId=v, page=1, length=1000)
+                                       for v, _k, _l in wanted], return_exceptions=True)
     out = []
-    for (_v, kind, label), rows in zip(wanted, lists):
+    for (_v, kind_of_list, label), rows in zip(wanted, lists):
         if isinstance(rows, BaseException):
             emit(f"YÖK {_cap(label)} okunamadı ({type(rows).__name__}).")
             continue
         for r in rows:
+            kind = kind_of_list or _yok_kind(r)
+            if not kind:
+                continue
             doi = doi_key(r.get("doi") or "")
             pages = "-".join(x for x in (r.get("ilkSayfa"), r.get("sonSayfa")) if x)
             out.append(record(
@@ -559,12 +613,12 @@ async def _yok_publications(client, guid: str, profile_url: str, emit) -> list[d
                 url=f"https://doi.org/{doi}" if doi else profile_url, type=kind,
                 volume=r.get("cilt") or "", issue=r.get("sayi") or "", pages=pages,
                 labels=[x for x in [clean(r.get("yayinTuruAdi") or ""), "Uluslararası" if str(r.get("kapsam")) == "1" else ""] if x]))
-        emit(f"YÖK {_cap(label)}: {sum(1 for x in out if x['type'] == kind)} kayıt.")
+        emit(f"YÖK {_cap(label)}: {len(out) if fast else sum(1 for x in out if x['type'] == kind_of_list)} kayıt.")
     return out
 
 
 async def yok_profile_api(name: str, institution: str, link: str, emit, sections: set[str] | None = None,
-                          publications: bool = True) -> dict:
+                          publications: bool = True, fast: bool = False) -> dict:
     """YÖK Akademik'in herkese açık JSON API'si: kimlik, görev/öğrenim, bölümler, birlikte çalışılanlar ve yayınlar.
 
     Tarayıcı ve REA gerekmez; istekler yokdir.api üzerinden en fazla üç eşzamanlı çağrıyla sınırlanır.
@@ -604,7 +658,7 @@ async def yok_profile_api(name: str, institution: str, link: str, emit, sections
             jobs["collaborators"] = (f"/akademisyen/birlikte/calisanlar/{guid}", {})
         tasks = [_yok_rows(client, path, **params) for path, params in jobs.values()]
         if publications:
-            tasks.append(_yok_publications(client, guid, url, emit))
+            tasks.append(_yok_publications(client, guid, url, emit, fast))
         got = await asyncio.gather(*tasks, return_exceptions=True)
         data = {}
         for key, rows in zip(jobs, got):
@@ -790,7 +844,8 @@ def yok_detail_sync(paper: dict, profile_url: str, emit) -> dict:
     return out
 
 
-async def yok_works(profile: Profile, log, *, sections: set[str] | None = None, publications: bool = True) -> tuple[list[dict], dict | None]:
+async def yok_works(profile: Profile, log, *, sections: set[str] | None = None, publications: bool = True,
+                    fast: bool = False) -> tuple[list[dict], dict | None]:
     pending: list = []
 
     def emit(msg: str):
@@ -798,7 +853,7 @@ async def yok_works(profile: Profile, log, *, sections: set[str] | None = None, 
 
     try:
         res = await yok_profile_api(profile.name or profile.query_name, profile.get("institution", ""),
-                                    profile.links.get("yok", ""), emit, sections, publications)
+                                    profile.links.get("yok", ""), emit, sections, publications, fast)
     except httpx.HTTPError as exc:
         emit(f"YÖK'e ulaşılamadı ({type(exc).__name__}).")
         res = {}

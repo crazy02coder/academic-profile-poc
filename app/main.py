@@ -34,7 +34,8 @@ from .dedup import resolve
 from .discover import Profile, llm_enrich, locate, registrable
 from . import ai_settings
 from .llm import LLM, list_models
-from .sources import crossref_works, openalex_by_doi, openalex_works, orcid_works, scholar_works, yok_works
+from .sources import (crossref_works, openalex_by_doi, openalex_prefetch_authors, openalex_works, orcid_works,
+                      scholar_works, yok_works)
 import httpx
 
 from . import directory, firms, industry, library, patents, profile_refresh, publication_status, quartiles, trsources, unit_publications, wiki_units, wos, wos_enrichment, wos_verification, yokdir
@@ -89,6 +90,9 @@ class JobIn(BaseModel):
     university: str = Field(default="", max_length=200)
     department: str = Field(default="", max_length=200)
     email: str = Field(default="", max_length=200)
+    # Fakülte/bölüm yayın taraması: yalnız yayın kaynakları (site taraması, Scholar, tezler, özgeçmiş ayrıntıları yok).
+    light: bool = False
+    orcid: str = Field(default="", max_length=30)  # YÖK listesinden bilinen ORCID (kişi araması yapılmaz)
 
 
 class ChatIn(BaseModel):
@@ -273,12 +277,17 @@ async def pipeline(job: dict, data: JobIn):
     # Profil çıkarma kullanıcının beklediği iştir: YÖK istekleri arka plan taramalarının önüne geçer ve dakikalık
     # bütçenin tamamını kullanabilir (toplam hız sınırı değişmez).
     from .yok_rate import URGENT
-    URGENT.set(True)
+    light = bool(getattr(data, "light", False))
+    URGENT.set(not light)  # toplu tarama arka plan işidir: kullanıcının tıkladığı isteklerin önüne geçmez
 
     async def log(step: str, status: str, message: str):
         _emit(job, {"type": "log", "step": step, "status": status, "message": message})
 
-    llm = await LLM().probe()
+    async def _nothing():
+        return [], None
+
+    # Toplu taramada model her kişi için yeniden yoklanmaz (5 dakikalık ortak kayıt); hafif mod modeli zaten kullanmaz.
+    llm = await _llm() if light else await LLM().probe()
     job["llm"] = llm
     await log("scrape", "running", f"Ortam: REA {'✓' if rea.available() else '✗'} · "
                                    f"Chromium {'✓' if chromium_executable() else '✗'} · LLM: {llm.label()}")
@@ -286,9 +295,11 @@ async def pipeline(job: dict, data: JobIn):
         report: dict = {}
         yok_rea = None
         name = re.sub(r"^[\s\"“”'‘’]+|[\s\"“”'‘’]+$", "", data.name)
-        if data.yok_url and not data.url:
+        if data.yok_url and not data.url and not light:
             data = data.model_copy(update={"url": await yokdir.person_site(data.university, data.email)})
         profile, report = await _locate(data, name, log, llm)
+        if light and data.orcid:
+            profile.links.setdefault("orcid", data.orcid)  # YÖK listesinden: kişi eşleştirmesi baştan kesin
         await log("scrape", "done" if profile.found else "warning",
                   f"{profile.name or data.name} · {profile.get('title', 'unvan ?')} · "
                   f"{profile.get('department', 'bölüm ?')}")
@@ -313,10 +324,11 @@ async def pipeline(job: dict, data: JobIn):
         # YÖK'ü beklemeyenler hemen başlar: Scholar ve Tez Merkezi yalnız adı kullanır; TR Dizin ve OpenAIRE sayfaları
         # şimdi çeker, kişiyle eşleştirmeyi YÖK'ün netleştirdiği ad/ORCID gelince (identity_ready) yapar.
         identity_ready = asyncio.Event()
-        scholar_task = asyncio.create_task(scholar_works(profile, log))
+        # Hafif modda Scholar (tarayıcı, yavaş) ve Tez Merkezi çalışmaz: fakülte yayın listesi için gerekmez.
+        scholar_task = asyncio.create_task(_nothing() if light else scholar_works(profile, log))
         early = [asyncio.create_task(trsources.trdizin_works(profile, log, identity_ready)),
                  asyncio.create_task(trsources.openaire_works(profile, log, identity_ready)),
-                 asyncio.create_task(trsources.tez_works(profile, log, details=False))]
+                 asyncio.create_task(_nothing() if light else trsources.tez_works(profile, log, details=False))]
         scholar_task.add_done_callback(announce("Scholar"))
         for label, task in zip(("TR Dizin", "OpenAIRE", "Tez Merkezi"), early):
             task.add_done_callback(announce(label))
@@ -325,7 +337,8 @@ async def pipeline(job: dict, data: JobIn):
         await log("yok", "running", "YÖK Akademik: Scrapling StealthySession açılıyor, REA CDP ile bağlanacak.")
         yok_records = []
         try:
-            yok_records, yok_rea = await asyncio.wait_for(yok_works(profile, log), timeout=150)
+            # Hafif mod: YÖK'ten yalnız kimlik ve yayın listesi (görev, öğrenim, dersler, projeler istenmez).
+            yok_records, yok_rea = await asyncio.wait_for(yok_works(profile, log, sections=set() if light else None, fast=light), timeout=150)
             await log("yok", "done", f"YÖK: {len(yok_records)} kayıt.")
         except Exception as exc:  # noqa: BLE001
             yok_records = []
@@ -346,7 +359,7 @@ async def pipeline(job: dict, data: JobIn):
                                                       orcid_works(profile, log))]
         for label, task in zip(("OpenAlex", "Crossref", "ORCID"), api_tasks):
             task.add_done_callback(announce(label))
-        tasks = await asyncio.gather(*api_tasks, scholar_task, *early, llm_enrich(profile, llm, log),
+        tasks = await asyncio.gather(*api_tasks, scholar_task, *early, _nothing() if light else llm_enrich(profile, llm, log),
                                      return_exceptions=True)
         tasks = tasks[:len(labels)]
         records = list(yok_records)
@@ -379,7 +392,7 @@ async def pipeline(job: dict, data: JobIn):
         await log("publications", "done", f"{len(records)} ham kayıt toplandı.")
 
         await log("dedup", "running", "Dil tespiti (langdetect + Türkçe karakter sezgisi), DOI/başlık/çapraz dil eşleştirme…")
-        papers, stats = await resolve(records, profile.name or profile.query_name, llm, log)
+        papers, stats = await resolve(records, profile.name or profile.query_name, None if light else llm, log)
         await log("dedup", "done", f"{stats['raw']} ham kayıt → {stats['unique']} benzersiz yayın "
                                    f"(DOI {stats['doi']}, birebir başlık {stats['exact']}, bulanık {stats['fuzzy']}, "
                                    f"TR↔EN {stats['cross_lang']}).")
@@ -426,6 +439,8 @@ async def pipeline(job: dict, data: JobIn):
             await log("verify", "done", f"Sanayi iş birlikleri: {len(result['industry'])} firma "
                                         f"({sum(e['official'] for e in result['industry'])} resmi Ar-Ge/Tasarım Merkezi).")
         result["input"] = data.model_dump()
+        if light:
+            result["light"] = True  # yalnız yayınlar toplandı; tam profil için kişi sayfasından yenilenir
         # Yenileme, daha önce doğrulanan WoS yayınlarını ve kaynaklarını kaybetmez.
         if cached_wos := wos_enrichment.cached(prof, allow_stale=True):
             if cached_wos.get("records"):
@@ -455,8 +470,9 @@ async def pipeline(job: dict, data: JobIn):
         publication_status.annotate(result.get("publications") or [])
         job["result"] = result
         history_store.save_result(result["job_id"], result)
-        _spawn_tez_details(result["job_id"])
-        _spawn_site_photo(result["job_id"])
+        if not light:
+            _spawn_tez_details(result["job_id"])
+            _spawn_site_photo(result["job_id"])
         # Yalnız kullanıcının başlattığı tam toplama sırasında WoS işi oluştur.
         # Kayıtlı profilin açılması artık salt durum okumasıdır.
         if job.get("wos", True):
@@ -1201,6 +1217,9 @@ def _start_unit_collection(people: list[dict], institution: str, domain: str, un
     async def collect(person, institution, domain, *, on_update=None):
         return await _collect_unit_person(person, institution, domain, on_update=on_update, refresh=refresh)
 
+    # ORCID'leri bilinen kişilerin OpenAlex yazar kayıtları baştan, toplu alınır (kişi başına yazar araması yapılmaz).
+    hints = asyncio.create_task(openalex_prefetch_authors([p.get("orcid") or "" for p in people]))
+    hints.add_done_callback(lambda t: t.cancelled() or t.exception())
     return unit_publications.start(people, institution, domain, unit, collect, refresh=refresh)
 
 
@@ -1237,14 +1256,16 @@ async def _collect_unit_person(person: dict, institution: str, domain: str, *, o
                     started = await refresh_job(result["job_id"], wos=False)
                 else:
                     yok_url = identity["links"].get("yok") or ""
-                    url = person.get("site_url") or (person.get("url") if not yok_url else "") or ""
+                    # YÖK kimliği olan kişi hafif modda toplanır: kurum sitesi taranmaz, yalnız yayın kaynakları çalışır.
+                    light = bool(yok_url)
+                    url = "" if light else (person.get("site_url") or person.get("url") or "")
                     if not url and not yok_url and domain:
                         url = f"https://{domain}/"
                     if not url and not yok_url:
                         raise RuntimeError("Kişinin profil veya kurum bağlantısı bulunamadı.")
                     data = JobIn(name=person["name"], url=url, yok_url=yok_url,
                                  university=identity["institution"], department=person.get("department") or "",
-                                 email=person.get("email") or "")
+                                 email=person.get("email") or "", light=light, orcid=(person.get("orcid") or "")[:30])
                     started = _start(data, wos=False)
                 running = JOBS[started["id"]]
             await asyncio.shield(running["task"])

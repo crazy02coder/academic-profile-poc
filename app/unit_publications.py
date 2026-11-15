@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 from .config import ROOT
 from .text import doi_key, fold, title_key
 
-CONCURRENCY = 2
+CONCURRENCY = 5  # hafif modda kişi başına iş küçük; YÖK istekleri yine ortak hız sınırından geçer
 CACHE_VERSION = 1
 CACHE_DIR = ROOT / 'data' / 'unit_publications'
 _LOG = logging.getLogger(__name__)
