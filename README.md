@@ -107,6 +107,8 @@ Seçili bölümün ders tablosu veya ders kodu/adı/açıklaması içeren katalo
 
 **Veri geldikçe yerleşme:** Gelen dönemler ve kartlar pencerenin dışından, üç boyutlu olarak (önden, derinleşerek) gelip yerlerine konur; uçuşu öğenin bütün pencerenin üstündeki kopyası yapar, gerçek öğe iniş anında görünür. "Hareketi azalt" ayarında yalnız belirir.
 
+**Yapısı bilinen kurumlar (`app/catalogs/`):** Ders bilgi paketi düzeni bilinen üniversitelerde ders planı keşif yapılmadan, bilinen adreslerden doğrudan okunur (arama motoru, tahmin ve model çağrısı yok). Sıra: hazır veri seti → kurumun modülü → genel keşif; "Yeniden tara" modülü olan kurumda modülü çalıştırır. Her kurum bir dosyadır (`programs`, `courses`, `detail`); Proliz OBS kullanan kurumlar ortak `proliz.py` okuyucusunu paylaşır. Program listesi ve ders içerikleri 30 gün diskte tutulur; ders planı gelince derslerin içerikleri arka planda önceden indirilir.
+
 Öğrenci rehberi keşfinde kategoriye uygun ofis, dil merkezi ve ayrıntı sayfaları önceliklendirilir; alt alan adında “erasmus” yazması tüm sayfaları aynı derecede ilgili yapmaz. Eski sürümün yalnız takvimden oluşan veya içeriksiz kaydı, ilgili başlık tekrar açıldığında yeni okuyucuyla bir kez yükseltilir. Başarılı ders katalogları korunur. Ücretin kaynakta yazan dönemi alıntıda saklanır; başka döneme ait tanıtım duyurusu bu ücreti güncel yapmaz.
 
 ---
