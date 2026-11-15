@@ -3048,6 +3048,12 @@ async def get(uid: str, llm, refresh: bool = False, section: str | None = None, 
     # Kayıtlı bilgiler kullanıcı açıkça yenileyene kadar tekrar taranmaz.
     if saved and not refresh:
         return {**saved, "cached": True, **extra}
+    if section == "courses" and department:
+        # Ders bilgi paketi yapısı bilinen kurum (app/catalogs): ders planı keşif yapılmadan, bilinen adreslerden okunur.
+        # Modül bölümü bulamazsa ya da site yanıt vermezse aşağıdaki genel keşif sürer.
+        direct = await _site_module(uid, faculty, department, refresh)
+        if direct:
+            return {**direct, **extra}
     key = _key(uid, section, faculty, department)
     background = background and section == "courses" and bool(department)
     if background and key not in TASKS:
@@ -3143,6 +3149,53 @@ async def _dataset(uid: str, faculty: str, department: str) -> tuple:
                  "checked_at": found.get("generated") or 0, "pages_read": 0, "home": home, "status": "dataset", "errors": [],
                  "cached": True}
     return ready, unit, known
+
+
+_MODULE_TASKS: dict[str, asyncio.Task] = {}
+MODULE_DEADLINE = 45  # sn; bilinen adreslerden okuma bundan uzun sürüyorsa site yanıt vermiyordur, genel keşfe geçilir
+
+
+async def _site_module(uid: str, faculty: str, department: str, refresh: bool) -> dict | None:
+    """Kurumun ders bilgi paketi modülü (app/catalogs) varsa bölümün ders planını oradan okur ve kayıtlı tarama sonucu
+    biçiminde saklar; yoksa ya da okunamazsa None. Aynı bölüm için eşzamanlı istekler (ön yükleme + tıklama) tek okumayı
+    paylaşır. Ders planı gelince derslerin içerikleri arka planda önceden indirilir."""
+    from . import catalogs
+    try:
+        home = await university_home(uid)
+    except Exception:  # noqa: BLE001
+        return None
+    home = _MOVED.get(registrable(urlsplit(home or "").hostname or ""), home)
+    if not home or not catalogs.has(home):
+        return None
+    key = _key(uid, "courses", faculty, department)
+    task = _MODULE_TASKS.get(key)
+    if task is None:
+        async def run():
+            started = time.time()
+            found = await asyncio.wait_for(catalogs.lookup(home, faculty, department, refresh), MODULE_DEADLINE)
+            if not found:
+                return None
+            result = {"version": CACHE_VERSION, "collection_version": COLLECTION_VERSION, "uid": uid, "section": "courses",
+                      "faculty": faculty, "department": department, "groups": {"courses": found["group"]},
+                      "checked_at": time.time(), "pages_read": found["requests"], "home": home, "status": "ok",
+                      "errors": [], "cached": False, "seconds": round(time.time() - started, 1)}
+            CACHE.mkdir(parents=True, exist_ok=True)
+            path = CACHE / f"{key}.json"
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(result, ensure_ascii=False))
+            tmp.replace(path)
+            catalogs.warm(home, found["group"]["items"])
+            return result
+        task = _MODULE_TASKS[key] = asyncio.create_task(run())
+        task.add_done_callback(lambda done: _MODULE_TASKS.pop(key, None) if _MODULE_TASKS.get(key) is done else None)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — modül yardımcıdır; hata genel keşfi engellemez
+        logging.getLogger(__name__).info("ders bilgi paketi modülü: %s / %s okunamadı (%s: %s)", uid, department,
+                                         type(exc).__name__, str(exc)[:160])
+        return None
 
 
 # ------------------------------------------------------------------ bağlantı önizlemesi (bağlantının içeriği)
@@ -3245,6 +3298,13 @@ async def preview(uid: str, url: str) -> dict:
     target = _url_key(url)
     if urlsplit(target).scheme not in {"http", "https"} or registrable(urlsplit(target).hostname or "") != domain:
         raise ValueError("Yalnız kurumun resmî sitesindeki bağlantılar önizlenir.")
+    try:
+        # Ders bilgi paketi yapısı bilinen kurum: ders sayfasını kurumun modülü okur (diskten ya da tek istekle).
+        from . import catalogs
+        if known := await asyncio.wait_for(catalogs.course_detail(home, url), 20):
+            return known
+    except Exception:  # noqa: BLE001 — modül okuyamazsa genel önizleme sürer
+        pass
     path = CACHE / f"preview4-{hashlib.sha256(target.encode()).hexdigest()[:24]}.json"
     try:
         saved = json.loads(path.read_text(encoding="utf-8"))
