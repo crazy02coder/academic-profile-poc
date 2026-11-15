@@ -398,6 +398,8 @@ Hepsi isteğe bağlı ortam değişkenleri:
 | `OPENALEX_MAILTO` | `akademik-iz@example.org` | OpenAlex isteklerindeki iletişim adresi |
 | `EPO_KEY` / `EPO_SECRET` | — | Patentler (EPO OPS) |
 | `CRAWL_MAX_PAGES` / `_DEPTH` / `_CONCURRENCY` | `90` / `3` / `8` | Tarama sınırları |
+| `SERPER_API_KEY` | — | Varsa Serper.dev (Google sonuçları) ilk arama sağlayıcısı olur |
+| `GOOGLE_CSE_KEY`, `GOOGLE_CSE_CX` | — | İkisi de varsa Google Custom Search JSON API kullanılır (anahtar + arama motoru kimliği) |
 | `BRAVE_API_KEY` | — | Varsa resmi Brave Search API kullanılır |
 | `DDGS_BACKEND` | `brave,duckduckgo,google` | `ddgs` motor sırası |
 | `GOOGLE_SEARCH_ENABLED` | `1` | Google sonuç sayfası araması |

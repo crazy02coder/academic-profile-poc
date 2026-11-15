@@ -28,7 +28,7 @@ MIN_GAP = 0.5
 # kısıtlıyor (6 sn arayla 2. istek 429; 10 sn arayla 3 istek geçti, 2026-11-15): istekler sıraya girer, 10 sn arayla.
 GAPS = {"brave_page": 10.0}
 SLOTS = {"brave_page": 1}
-PROVIDER_TIMEOUTS = {"ddgs": 7, "brave_api": 5, "google": 14, "brave_page": 7}
+PROVIDER_TIMEOUTS = {"serper": 6, "google_cse": 6, "ddgs": 7, "brave_api": 5, "google": 14, "brave_page": 7}
 
 
 def rank_results(rows: list[dict], query: str) -> list[dict]:
@@ -172,6 +172,29 @@ async def _brave_api(query: str) -> list[dict]:
                 for x in response.json().get("web", {}).get("results", [])]
 
 
+async def _serper(query: str) -> list[dict]:
+    """Serper.dev (Google sonuçları, JSON). Anahtar: .env içinde SERPER_API_KEY. Hata iletisine anahtar yazılmaz."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        response = await client.post("https://google.serper.dev/search", json={"q": query, "num": 10, "gl": "tr", "hl": "tr"},
+                                     headers={"X-API-KEY": os.environ["SERPER_API_KEY"], "Content-Type": "application/json"})
+    if response.status_code >= 400:
+        raise RuntimeError(f"HTTP {response.status_code}")  # 429: istek sınırı; 400/403: kredi bitti ya da anahtar geçersiz
+    return [{"url": x.get("link", ""), "title": x.get("title", ""), "snippet": x.get("snippet", "")}
+            for x in response.json().get("organic", []) if isinstance(x, dict)]
+
+
+async def _google_cse(query: str) -> list[dict]:
+    """Google Custom Search JSON API. .env: GOOGLE_CSE_KEY (API anahtarı) ve GOOGLE_CSE_CX (arama motoru kimliği);
+    ikisi de yoksa bu sağlayıcı kullanılmaz. Anahtar sorgu parametresinde gittiği için hata iletisine adres yazılmaz."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        response = await client.get("https://www.googleapis.com/customsearch/v1", params={
+            "key": os.environ["GOOGLE_CSE_KEY"], "cx": os.environ["GOOGLE_CSE_CX"], "q": query, "num": 10})
+    if response.status_code >= 400:
+        raise RuntimeError(f"HTTP {response.status_code}")  # 429: günlük kota doldu
+    return [{"url": x.get("link", ""), "title": x.get("title", ""), "snippet": x.get("snippet", "")}
+            for x in response.json().get("items", []) if isinstance(x, dict)]
+
+
 async def _brave_page(query: str) -> list[dict]:
     from .net import _stealth_session
 
@@ -223,12 +246,12 @@ async def _provider(provider: str, query: str, log=None) -> list[dict]:
                         if provider == "google":
                             rows = await _google(query, log)
                         else:
-                            rows = await {"ddgs": _ddgs, "brave_api": _brave_api,
+                            rows = await {"serper": _serper, "google_cse": _google_cse, "ddgs": _ddgs, "brave_api": _brave_api,
                                           "brave_page": _brave_page}[provider](query)
             except Exception as exc:  # bir motor diğer motorları devre dışı bırakmaz
                 # Google bot kontrolü saatlerce sürer; her aramada yeniden denemek ~5 sn kaybettirir. İstek sınırı (429)
                 # IP başınadır ve dakikalarca sürer: motor 30 dk dinlendirilir (sınırı uzatmamak için).
-                limited = "429" in str(exc)
+                limited = any(code in str(exc) for code in ("HTTP 429", "HTTP 402", "HTTP 403"))  # istek sınırı ya da biten kota
                 state["blocked_until"] = time.monotonic() + (3600 if type(exc).__name__ == "GoogleBlocked"
                                                              else 1800 if limited else 60)
                 _usage(provider, f"HATA {type(exc).__name__}: {str(exc)[:80]}", query, limited)
@@ -249,7 +272,9 @@ async def _provider(provider: str, query: str, log=None) -> list[dict]:
 
 
 def provider_order() -> tuple[str, ...]:
-    providers = ("ddgs",) + (("brave_api",) if os.getenv("BRAVE_API_KEY") else ())
+    # Anahtarlı arama servisleri (tarayıcı gerektirmez, engellenmez) önce; anahtar yoksa listeye girmezler.
+    providers = (("serper",) if os.getenv("SERPER_API_KEY") else ())         + (("google_cse",) if os.getenv("GOOGLE_CSE_KEY") and os.getenv("GOOGLE_CSE_CX") else ())
+    providers += ("ddgs",) + (("brave_api",) if os.getenv("BRAVE_API_KEY") else ())
     if os.getenv("GOOGLE_SEARCH_ENABLED", "1").lower() not in ("0", "false", "off"):
         providers += ("google",)
     return providers + ("brave_page",)
