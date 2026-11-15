@@ -24,6 +24,10 @@ _STATE: dict = {"loop": None, "providers": {}, "queries": {}}
 CACHE_TTL = 3600
 EMPTY_TTL = 30
 MIN_GAP = 0.5
+# Motor başına iki istek arası en az süre ve aynı anda en çok istek. Brave arama sayfası hızlı ardışık istekte IP'yi
+# kısıtlıyor (6 sn arayla 2. istek 429; 10 sn arayla 3 istek geçti, 2026-11-15): istekler sıraya girer, 10 sn arayla.
+GAPS = {"brave_page": 10.0}
+SLOTS = {"brave_page": 1}
 PROVIDER_TIMEOUTS = {"ddgs": 7, "brave_api": 5, "google": 14, "brave_page": 7}
 
 
@@ -49,12 +53,33 @@ def rank_results(rows: list[dict], query: str) -> list[dict]:
     return [row for _, _, row in sorted(scored, key=lambda item: (item[0], item[1]))]
 
 
+_SENT: dict[str, list[float]] = {}  # motor başına gerçekten gönderilen isteklerin zamanları (sunucu açıkken)
+
+
+def _usage(provider: str, outcome: str, query: str, limited: bool = False) -> None:
+    """Gönderilen her arama isteği data/job-log/search.log'a bir satır: motorun istek sınırını (kaç istekte 429
+    verdiği) sonradan ölçmek için. Satırda son 1/10/60 dakikada ve oturumda o motora giden istek sayısı yazar."""
+    now = time.time()
+    sent = _SENT.setdefault(provider, [])
+    sent.append(now)
+    window = {m: sum(1 for t in sent if now - t <= m * 60) for m in (1, 10, 60)}
+    try:
+        folder = ROOT / "data" / "job-log"
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / "search.log").open("a", encoding="utf-8") as out:
+            out.write("\t".join([time.strftime("%d.%m %H:%M:%S"), provider, ("SINIR " if limited else "") + outcome,
+                                  f"1dk={window[1]} 10dk={window[10]} 60dk={window[60]} oturum={len(sent)}",
+                                  " ".join(query.split())[:90]]) + "\n")
+    except OSError:
+        pass
+
+
 def _state(provider: str) -> dict:
     loop = asyncio.get_running_loop()
     if _STATE["loop"] is not loop:
         _STATE.update(loop=loop, providers={}, queries={})
     return _STATE["providers"].setdefault(
-        provider, {"blocked_until": 0.0, "last": 0.0, "gate": asyncio.Lock(), "slots": asyncio.Semaphore(2)})
+        provider, {"blocked_until": 0.0, "last": 0.0, "gate": asyncio.Lock(), "slots": asyncio.Semaphore(SLOTS.get(provider, 2))})
 
 
 def _site_rows(rows: list[dict], root: str) -> list[dict]:
@@ -154,7 +179,9 @@ async def _brave_page(query: str) -> list[dict]:
     response = await session.fetch(f"https://search.brave.com/search?q={quote(query)}&source=web",
                                    network_idle=False, wait=600, timeout=6000)
     if response.status >= 400:
-        raise RuntimeError(f"HTTP {response.status}")
+        headers = {str(k).lower(): v for k, v in (getattr(response, "headers", None) or {}).items()}
+        wait = headers.get("retry-after") or headers.get("x-ratelimit-reset") or ""
+        raise RuntimeError(f"HTTP {response.status}" + (f" (bekle: {wait})" if wait else ""))
     return [{"url": a.attrib.get("href", ""), "title": a.get_all_text(strip=True)[:160]}
             for a in response.css("a[href^='http']")]
 
@@ -181,26 +208,34 @@ async def _provider(provider: str, query: str, log=None) -> list[dict]:
                 return hit[1]
             if time.monotonic() < state["blocked_until"]:
                 return []
-            started = time.monotonic()
             try:
-                async with asyncio.timeout(PROVIDER_TIMEOUTS[provider]):
-                    async with state["slots"]:
-                        async with state["gate"]:
-                            wait = MIN_GAP - (time.monotonic() - state["last"])
-                            if wait > 0:
-                                await asyncio.sleep(wait)
-                            state["last"] = time.monotonic()
+                async with state["slots"]:
+                    # Sıra beklemesi motorun süre sınırına sayılmaz; süre sınırı yalnız isteğin kendisine uygulanır.
+                    async with state["gate"]:
+                        wait = GAPS.get(provider, MIN_GAP) - (time.monotonic() - state["last"])
+                        if wait > 0:
+                            await asyncio.sleep(wait)
+                        if time.monotonic() < state["blocked_until"]:
+                            return []  # beklerken başka bir istek 429 aldı: motor dinleniyor
+                        state["last"] = time.monotonic()
+                    started = time.monotonic()
+                    async with asyncio.timeout(PROVIDER_TIMEOUTS[provider]):
                         if provider == "google":
                             rows = await _google(query, log)
                         else:
                             rows = await {"ddgs": _ddgs, "brave_api": _brave_api,
                                           "brave_page": _brave_page}[provider](query)
             except Exception as exc:  # bir motor diğer motorları devre dışı bırakmaz
-                # Google bot kontrolü saatlerce sürer; her aramada yeniden denemek ~5 sn kaybettirir.
-                state["blocked_until"] = time.monotonic() + (3600 if type(exc).__name__ == "GoogleBlocked" else 60)
+                # Google bot kontrolü saatlerce sürer; her aramada yeniden denemek ~5 sn kaybettirir. İstek sınırı (429)
+                # IP başınadır ve dakikalarca sürer: motor 30 dk dinlendirilir (sınırı uzatmamak için).
+                limited = "429" in str(exc)
+                state["blocked_until"] = time.monotonic() + (3600 if type(exc).__name__ == "GoogleBlocked"
+                                                             else 1800 if limited else 60)
+                _usage(provider, f"HATA {type(exc).__name__}: {str(exc)[:80]}", query, limited)
                 if log:
                     await log(f"Arama · {provider}: {type(exc).__name__}: {str(exc)[:160]}; diğer yöntemlere geçiliyor.")
                 return []
+            _usage(provider, f"{len(rows)} sonuç", query)
             if len(_CACHE) >= 512:
                 _CACHE.pop(next(iter(_CACHE)))
             _CACHE[key] = (time.monotonic(), rows)

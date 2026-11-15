@@ -160,6 +160,32 @@ def department(domain: str, faculty: str, name: str) -> tuple[dict, dict] | None
     return _pick(everywhere, variant)
 
 
+def _faculty_site(uni: dict, fac: dict | None) -> str:
+    """Fakültenin sitesi: kayıtta varsa o; yoksa fakültedeki bölüm adreslerinin ortak kökü (aynı alt alan adı
+    fakulte.kurum.edu.tr ya da aynı ilk yol parçası kurum.edu.tr/fakulte/…). Kurumun ana sitesinin kökü sayılmaz."""
+    from urllib.parse import urlsplit
+    if not fac:
+        return ""
+    if isinstance(fac.get("url"), str) and fac["url"].startswith("http") and not re.search(r"\.(?:gif|png|jpe?g|svg|webp|css|js|pdf)(?:\?|$)", fac["url"], re.I):
+        return fac["url"]
+    urls = [d["url"] for d in fac.get("departments") or [] if isinstance(d, dict) and isinstance(d.get("url"), str) and d["url"].startswith("http")]
+    if len(urls) < 2:
+        return ""
+    parts = [urlsplit(u) for u in urls]
+    hosts = {p.hostname or "" for p in parts}
+    if len(hosts) != 1:
+        return ""
+    host = hosts.pop()
+    main = {urlsplit(uni.get("home") or "").hostname or "", "www." + (uni.get("domain") or "")}
+    scheme = parts[0].scheme
+    if host not in main and host != (uni.get("domain") or ""):
+        return f"{scheme}://{host}/"
+    heads = {(p.path.strip("/").split("/") or [""])[0] for p in parts}
+    if len(heads) == 1 and (head := heads.pop()):
+        return f"{scheme}://{host}/{head}/"
+    return ""
+
+
 def _stamp(uni: dict) -> float:
     try:
         return time.mktime(time.strptime(str(uni.get("generated_at") or ""), "%Y-%m-%d %H:%M:%S"))
@@ -175,9 +201,10 @@ def lookup(home: str, faculty: str, name: str) -> dict | None:
         return None
     fac = _faculty(uni, faculty)
     found = department(home, faculty, name)
+    site = _faculty_site(uni, fac)
     if not found:
-        return {"group": None, "generated": _stamp(uni),
-                "unit": {"dean": fac.get("dean"), "faculty": fac.get("name")} if fac and fac.get("dean") else None}
+        unit = {"dean": fac.get("dean"), "faculty": fac.get("name")} if fac and fac.get("dean") else {}
+        return {"group": None, "generated": _stamp(uni), "unit": {**unit, "faculty_url": site} if site else (unit or None)}
     owner, dept = found
     owner = owner if not owner.get("unassigned") else (fac or owner)
     source = dept.get("bologna_url") or dept.get("url") or uni.get("home") or ""
@@ -189,5 +216,6 @@ def lookup(home: str, faculty: str, name: str) -> dict | None:
                  "items": [{**c, "source_url": c.get("source_url") or source, "type": "courses"} for c in courses]}
     unit = {"faculty": None if owner.get("unassigned") else owner.get("name"), "dean": None if owner.get("unassigned") else owner.get("dean"),
             "department": dept.get("name"), "head": dept.get("head"), "careers": dept.get("careers"),
-            "url": dept.get("url") or "", "bologna_url": dept.get("bologna_url") or ""}
+            "url": dept.get("url") or "", "bologna_url": dept.get("bologna_url") or "",
+            "faculty_url": _faculty_site(uni, owner if not owner.get("unassigned") else fac)}
     return {"group": group, "unit": unit, "generated": _stamp(uni)}

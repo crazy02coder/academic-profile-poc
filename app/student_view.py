@@ -315,6 +315,49 @@ _CATALOG_HOST = re.compile(r"(?:[a-z]*ects|[a-z]*obs|oibs|ubs|ebs|ebp|bbs|dbp|si
 # Ders bilgi paketi / öğrenci bilgi sistemi için yaygın alt alan adları (ebp: eğitim bilgi paketi, bbs: Bologna bilgi
 # sistemi, dbp: ders bilgi paketi). Arama motoru sonuç vermediğinde kurumun alan adında bunlar yoklanır.
 CATALOG_NAMES = ("obs", "bologna", "ects", "akts", "bilgipaketi", "ebs", "ubs", "oibs", "ebp", "bbs", "dbp", "katalog", "catalog")
+# Ders planına çıkmayan giriş noktaları (her kurumda): oturum açma sayfaları ve kütüphane katalogları. Bunlar başlangıç
+# sayfası, yoklama sonucu ya da gezinti bağlantısı olarak kullanılmaz.
+_LOGIN_URL = re.compile(r"(?:^|[/?&=])(?:account/)?(?:login|log-in|logon|signin|sign-in|oturum-?ac|sso|cas/login|auth/realms)(?:[/.?&=#]|\.aspx|\.php|$)"
+                        r"|[?&]return_?url=", re.I)
+_LIBRARY_URL = re.compile(r"/client/[a-z]{2}_[A-Z]{2}/|/cgi-bin/koha|/opac(?:[/.?]|$)|yordam|/vufind|/primo|/discovery/search", re.I)
+_LIBRARY_WORDS = re.compile(r"\b(?:kutuphane\w*|library|libraries|opac|katalog tarama|kitap ara\w*)\b")
+
+
+# Fakülte alt alan adı tahmini için İngilizce kısaltmalar (kurumların yaygın kullandığı: eng.…, medicine.…, law.…).
+_FAC_EN = {"muhendislik": "eng", "tip": "medicine", "hukuk": "law", "fen": "science", "egitim": "education",
+           "eczacilik": "pharmacy", "dis hekimligi": "dentistry", "ziraat": "agri", "veteriner": "vetmed",
+           "mimarlik": "arch", "iletisim": "comm", "hemsirelik": "nursing", "ilahiyat": "divinity"}
+_FAC_STOP = {"ve", "and", "of", "fakultesi", "fakulte", "faculty", "yuksekokulu", "yuksekokul", "school"}
+
+
+def faculty_site_guesses(faculty: str, domain: str) -> list[str]:
+    """Fakülte sitesinin kurum alan adındaki olası alt alan adları, adından genel kuralla: adın baş harfleri + "f"
+    (Mühendislik Fakültesi → mf., İktisadi ve İdari Bilimler → iibf., Dil ve Tarih-Coğrafya → dtcf.), adın bitişik
+    yazımı (muhendislik., saglikbilimleri.) ve yaygın İngilizce kısaltma (eng., medicine.). Siteye özel kod değildir."""
+    words = [w for w in re.split(r"[^a-z0-9]+", fold(faculty)) if w]
+    core = [w for w in words if w not in _FAC_STOP]
+    if not core or not domain:
+        return []
+    names = ["".join(core), "".join(w[0] for w in core) + "f"]
+    key = " ".join(core)
+    names += [en for tr, en in _FAC_EN.items() if key == tr or key.startswith(tr + " ")][:1]
+    return [f"https://{name}.{domain}/" for name in dict.fromkeys(n for n in names if 2 <= len(n) <= 30)][:3]
+
+
+def _dead_url(url: str) -> bool:
+    """Giriş sayfası ya da kütüphane kataloğu adresi: ders planına götürmez."""
+    parts = urlsplit(url)
+    rest = parts.path + ("?" + parts.query if parts.query else "")
+    return bool(_LOGIN_URL.search(rest) or _LIBRARY_URL.search(rest) or (parts.hostname or "").startswith(("kutuphane.", "library.", "lib.")))
+
+
+def _dead_page(page: dict | None) -> bool:
+    """Okunan sayfa giriş formu (şifre alanı, az metin) ya da kütüphane kataloğu mu."""
+    if not page:
+        return True
+    if _dead_url(page.get("url", "")) or page.get("login"):
+        return True
+    return bool(_LIBRARY_WORDS.search(fold(f"{page.get('title', '')} {page.get('heading', '')}")))
 # Lisans ders planı olmayan sayfalar (çift anadal, yandal, lisansüstü, seçmeli listesi, Erasmus): tarif olarak öğrenilmez.
 _NOT_PLAN = re.compile(r"\bcap\b|cift ana ?dal|\byap\b|yan ?dal|double major|\bminor\b|lisansustu|yuksek lisans|doktora"
                        r"|graduate|master|\bphd\b|secmeli|elective|erasmus")
@@ -565,7 +608,7 @@ def _index(uid: str) -> dict:
         "off": saved.get("off") if isinstance(saved.get("off"), (int, float)) else 0,
         # Yaygın ders bilgi paketi adreslerinin en son yoklandığı an ve bulunan giriş sayfaları (bkz. probe_catalogs).
         "probed": saved.get("probed") if isinstance(saved.get("probed"), (int, float)) else 0,
-        "catalogs": [x for x in saved["catalogs"] if isinstance(x, str)][:6] if isinstance(saved.get("catalogs"), list) else [],
+        "catalogs": [x for x in saved["catalogs"] if isinstance(x, str) and not _dead_url(x)][:6] if isinstance(saved.get("catalogs"), list) else [],
     }
     return data
 
@@ -1127,7 +1170,7 @@ def _page(html: str, url: str, domain: str):
         if re.search(r"/oibs/bologna/?$", target, re.I):
             target = target.rstrip("/") + "/index.aspx"
         parsed = urlsplit(target)
-        if parsed.scheme not in {"http", "https"} or registrable(parsed.hostname or "") != domain:
+        if parsed.scheme not in {"http", "https"} or registrable(parsed.hostname or "") != domain or _dead_url(target):
             continue
         title = clean(a.get_all_text(separator=" ")) or a.attrib.get("title", "") or a.attrib.get("aria-label", "") or ("Program ders bilgisi" if a.tag == "iframe" else "")
         if not title or len(title) > 200:
@@ -1150,7 +1193,8 @@ def _page(html: str, url: str, domain: str):
     selected = sel.css("select option[selected]")
     context = sel.css(".breadcrumb, [aria-label='breadcrumb'], [id^='lblProgInfo']")
     heading = clean(heading + " " + " ".join(n.get_all_text(separator=" ") for n in [*selected, *context]))
-    return {"url": url, "title": title, "heading": heading, "text": text, "links": links,
+    login = bool(sel.css("input[type=password]")) and len(text) < 3000
+    return {"url": url, "title": title, "heading": heading, "text": text, "links": links, "login": login,
             "language": (sel.css("html::attr(lang)").get() or "")[:2],
             "blocks": _body_blocks(html), "course_items": _catalog(sel, url) or _row_courses(sel, url)}
 
@@ -1949,7 +1993,13 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         await asyncio.sleep(min(cooling, 5))
                     async with state["gate"]:
                         try:
-                            got = await download(url, is_home)
+                            try:
+                                got = await download(url, is_home)
+                            except httpx.ConnectError:
+                                # Bağlantı hiç kurulamadı: birçok kurumun birim sitesi yalnız http'den açılır (443 kapalı).
+                                if not url.startswith("https://"):
+                                    raise
+                                got = await download("http://" + url[len("https://"):], is_home)
                         except (httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError):
                             state["fails"] += 1
                             state["cool"] = time.time() + min(45, 6 * state["fails"])
@@ -2316,6 +2366,10 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         seeds += [fac_root + rel for rel in fac_paths]
                         tried.update(f"fac_path:{rel}" for rel in fac_paths)
                     seeds += [u for u in (dept_root, fac_root) if u]
+                    if not dept_root and not fac_root and faculty and mode != "recipe":
+                        # Ne bölüm ne fakülte sitesi biliniyor (ana sayfada birim bağlantısı yok): fakültenin olası alt
+                        # alan adları da başlangıç sayfasıdır; açılmayan adres sessizce atlanır.
+                        seeds += faculty_site_guesses(faculty, domain)
                     hubs = [h for h in _hubs(uid, only_trusted)[:3]
                             if not fac_root or urlsplit(h).hostname != urlsplit(fac_root).hostname]
                     seeds += hubs
@@ -2325,18 +2379,23 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         # Yaygın adreslerde bulunmuş ders bilgi paketi girişleri (bkz. probe_catalogs): liste sayfası tarifi
                         # çıkana kadar başlangıç sayfası olarak okunur (ortak liste sayfası sayılmaz).
                         seeds += [entry for entry in _index(uid)["catalogs"] if entry not in seeds][:2]
-                seeds = list(dict.fromkeys(seeds))[:8]
+                seeds = [u for u in dict.fromkeys(seeds) if not _dead_url(u)][:8]
                 hub_task = asyncio.create_task(read_all([read(url) for url in seeds])) if seeds else None
                 if hub_task is not None:
                     spawned.append(hub_task)
                 trace.append(f"mod: {mode}" + (" · tarif/tohum: " + ", ".join(seeds)[:200] if seeds else ""))
                 if section == "courses" and department and not direct_hit:
-                    from .websearch import site_results_race
+                    from .websearch import provider_order, site_results_race
 
                     def start_search():
-                        # Arama motorları aynı anda (ddgs, Google, Brave); ana sayfa okunurken çalışır. İngilizce yayın
+                        # Arama motorları (websearch.provider_order) ana sayfa okunurken çalışır. İngilizce yayın
                         # yapan sitelerde bölümün İngilizce adıyla da aranır; iki arama paralel, sonuçlar birleşir.
+                        # Sağlayıcı yoksa arama başlatılmaz (beklenecek bir şey yok). Arka plan ön yüklemesi arama motoruna
+                        # gitmez (motorların IP başına istek sınırı tıklamalara kalsın); tıklanınca tarama öne alınır ve
+                        # arama o zaman başlar.
                         nonlocal searched
+                        if not provider_order() or not urgent():
+                            return None
                         searched = True
                         if _SEARCH["off"] > time.time():
                             # Arama motorları art arda boş döndü (engel / istek sınırı): sonuç beklemek yalnız süre kaybettirir.
@@ -2586,7 +2645,8 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                     entries = []
                     for new in await read_all([knock(guess) for guess in guesses]):
                         # Her alt alan adını ana siteye yönlendiren kurumlarda yoklama ana sayfayı döndürür: sayılmaz.
-                        if (not new or _url_key(new["url"]) in known_keys
+                        # Giriş sayfasına yönlenen bilgi sistemi (obs.…/login) ve kütüphane kataloğu ders planı vermez.
+                        if (not new or _url_key(new["url"]) in known_keys or _dead_page(new)
                                 or not _CATALOG_HOST.match(urlsplit(new["url"]).hostname or "")):
                             continue
                         known_keys.add(_url_key(new["url"]))
@@ -2977,6 +3037,8 @@ async def get(uid: str, llm, refresh: bool = False, section: str | None = None, 
             ready, unit, known = None, None, ()
         if unit and unit.get("url") and not dept_url:
             dept_url = unit["url"]
+        if unit and unit.get("faculty_url") and not faculty_url:
+            faculty_url = unit["faculty_url"]  # veri setindeki kardeş bölümlerin ortak sitesi
     extra = {"program_note": note, **({"unit": unit} if unit else {})}
     if ready and not refresh:
         rows = ((saved or {}).get("groups") or {}).get(section) or {}

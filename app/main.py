@@ -26,7 +26,7 @@ from . import history as history_store
 from .chat import MODES, Knowledge, answer
 from .paper import detail as paper_detail
 import os
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlsplit
 
 from .config import ROOT, chromium_executable, redact
 from .text import detect_title, fold, word_match
@@ -718,6 +718,37 @@ async def analyze_job(jid: str):
     return analysis
 
 
+_PHOTO_RUNS: dict = {"mtime": None, "orcid": {}, "name": {}}
+
+
+def _photo_from_other_run(profile: dict, jid: str) -> list:
+    """Kayıtlı profiller arasında aynı ORCID'li (yoksa aynı adlı) ve fotoğrafı olan kaydın fotoğraf alanları. Dizin,
+    runs klasörü değişince yeniden kurulur."""
+    from .config import RUNS_DIR
+    try:
+        mtime = RUNS_DIR.stat().st_mtime
+    except OSError:
+        return []
+    if _PHOTO_RUNS["mtime"] != mtime:
+        by_orcid, by_name = {}, {}
+        for path in RUNS_DIR.glob("*.json"):
+            try:
+                other = (json.loads(path.read_text()).get("profile") or {})
+            except (OSError, ValueError):
+                continue
+            photos = [x for x in (other.get("photo"), (other.get("yok") or {}).get("photo")) if isinstance(x, str) and x]
+            if not photos:
+                continue
+            if other.get("orcid"):
+                by_orcid.setdefault(other["orcid"], photos)
+            if other.get("name"):
+                by_name.setdefault(fold(other["name"]), photos)
+        _PHOTO_RUNS.update(mtime=mtime, orcid=by_orcid, name=by_name)
+    if profile.get("orcid") and profile["orcid"] in _PHOTO_RUNS["orcid"]:
+        return _PHOTO_RUNS["orcid"][profile["orcid"]]
+    return _PHOTO_RUNS["name"].get(fold(profile.get("name") or ""), []) if not profile.get("orcid") else []
+
+
 @app.get("/api/jobs/{jid}/photo")
 async def job_photo(jid: str):
     """Serve the largest stored original portrait, without upscaling thumbnails."""
@@ -726,6 +757,11 @@ async def job_photo(jid: str):
     result = _result_for(jid)
     profile = (result or {}).get("profile") or {}
     candidates = [profile.get("photo"), (profile.get("yok") or {}).get("photo")]
+    if not any(isinstance(c, str) and c for c in candidates):
+        # Bu kayıtta fotoğraf yok (hafif modla yenilenmiş profil): aynı kişinin (ORCID ya da ad) başka kaydındaki fotoğraf.
+        other = await asyncio.to_thread(_photo_from_other_run, profile, jid)
+        if other:
+            candidates = other
     best = None
     for candidate in candidates:
         if not isinstance(candidate, str):
@@ -1738,13 +1774,52 @@ async def university_staff_counts(uid: str):
 
 
 @app.get("/api/universities/{uid}/roles")
-async def university_roles(uid: str, name: str = "", fetch: bool = False):
-    """Fakültede süren idari görevler (dekan, bölüm başkanı); yalnız önbellekteki kadro için."""
+async def university_roles(uid: str, name: str = "", fetch: bool = False, dep: list[str] = Query(default=[])):
+    """Fakültede süren idari görevler (dekan, bölüm başkanı); yalnız önbellekteki kadro için. YÖK kaydında olmayan
+    dekan ve bölüm başkanları hazır veri setinden (data/poc) tamamlanır; dep: fakültenin bölüm adları."""
     if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not name or len(name) > 200:
         raise HTTPException(422, "Geçersiz istek.")
     d = await uni_facts.faculty_roles(uid, name, fetch)  # varsayılan: yalnız kayıtlı görevler, YÖK'e istek yok
     if d is None:
         raise HTTPException(404, "Üniversite YÖK listesinde bulunamadı.")
+    try:
+        d = await _dataset_roles(uid, name, [x[:200] for x in dep[:80] if x], d)
+    except Exception:  # noqa: BLE001 — veri seti yardımcıdır
+        pass
+    return d
+
+
+def _person_case(text: str) -> str:
+    """"PROF.DR. İMAN ASKERBEYLİ" → "Prof. Dr. İman Askerbeyli" (büyük harfle yazılmış adlar)."""
+    text = re.sub(r"\.(?=\S)", ". ", " ".join(str(text).split()))
+    if text != text.upper():
+        return text
+    def word(w):
+        low = w.replace("I", "ı").replace("İ", "i").lower()
+        return (low[:1].replace("i", "İ").replace("ı", "I").upper() + low[1:]) if low else low
+    return " ".join(word(w) for w in text.split(" "))
+
+
+async def _dataset_roles(uid: str, faculty: str, deps: list[str], d: dict) -> dict:
+    from . import poc_dataset
+    if not poc_dataset.available():
+        return d
+    home = await org_assets.university_home(uid)
+    if not home:
+        return d
+    d = {**d, "heads": dict(d.get("heads") or {})}
+    if not d.get("dean"):
+        found = await asyncio.to_thread(poc_dataset.lookup, home, faculty, "")
+        dean = ((found or {}).get("unit") or {}).get("dean")
+        if dean:
+            d["dean"] = {"name": _person_case(dean), "title": "", "since": "", "source": "dataset"}
+    for name in deps:
+        if name in d["heads"]:
+            continue
+        found = await asyncio.to_thread(poc_dataset.department, home, faculty, name)
+        head = found and found[1].get("head")
+        if head:
+            d["heads"][name] = {"name": _person_case(head), "title": "", "since": "", "source": "dataset"}
     return d
 
 
@@ -1994,7 +2069,7 @@ def _name_slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", fold(yokdir.display_uni(name)).replace("ı", "i")).strip("-")
 
 
-async def _find_faculty_page(home: str, facs: list[dict], faculty: str) -> dict | None:
+async def _find_faculty_page(home: str, facs: list[dict], faculty: str, search: bool = True) -> dict | None:
     """Menüde olmayan fakültenin sayfası. 1) Tarif: kardeş fakültelerin adresi adlarının kalıbıysa
     (…/fakulteler/tip-fakultesi) aynı kalıpla adres kurulur. 2) Site içi arama (arama motorları aynı anda)."""
     from .net import fetch_smart
@@ -2011,6 +2086,34 @@ async def _find_faculty_page(home: str, facs: list[dict], faculty: str) -> dict 
             continue
         if page.status < 400 and page.html and _unit_score(faculty, re.sub(r"<[^>]+>", " ", page.html[:200000])) > 0:
             return {"name": yokdir.display_uni(faculty), "url": page.url or url}
+    # Menüde ve kalıpta yok (ana sayfada birim bağlantısı yok): fakültenin olası alt alan adları (mf., eng., muhendislik.).
+    # Her alt alan adını ana siteye yönlendiren kurumda ana sayfa döner: sayılmaz.
+    from .student_view import faculty_site_guesses
+    domain = registrable(urlsplit(home).hostname or "")
+    main_hosts = {urlsplit(home).hostname or "", domain, "www." + domain}
+
+    async def knock(url):
+        try:
+            page = await asyncio.wait_for(fetch_smart(url, allow_stealth=False), 8)
+        except Exception:
+            page = None
+        if (page is None or page.status >= 400 or not page.html) and url.startswith("https://"):
+            try:  # birim sitesi yalnız http'den açılıyor olabilir (443 kapalı)
+                page = await asyncio.wait_for(fetch_smart("http://" + url[len("https://"):], allow_stealth=False), 8)
+            except Exception:
+                return None
+        if page is None:
+            return None
+        host = urlsplit(page.url or url).hostname or ""
+        if (page.status >= 400 or not page.html or host in main_hosts or registrable(host) != domain
+                or _unit_score(faculty, re.sub(r"<[^>]+>", " ", page.html[:200000])) <= 0):
+            return None
+        return page.url or url
+    for found in await asyncio.gather(*(knock(u) for u in faculty_site_guesses(faculty, domain))):
+        if found:
+            return {"name": yokdir.display_uni(faculty), "url": found}
+    if not search:
+        return None  # arka plan ön yüklemesi arama motoruna gitmez
     try:
         from .websearch import site_results_race
         rows = await asyncio.wait_for(site_results_race(home, yokdir.display_uni(faculty), k=5), 20)
@@ -2023,7 +2126,7 @@ async def _find_faculty_page(home: str, facs: list[dict], faculty: str) -> dict 
 
 
 @app.get("/api/universities/{uid}/site-departments")
-async def university_site_departments(uid: str, faculty: str = Query(default="", max_length=200)):
+async def university_site_departments(uid: str, faculty: str = Query(default="", max_length=200), background: bool = False):
     """Öğrenci bakışı: fakültenin bölümleri üniversitenin kendi sitesinden (YÖK'e istek atmaz). YÖK kadrosu
     alınamadığında bölüm listesi bununla gelir; kadro yalnız "Akademik kadro" kutusunu etkiler."""
     if not re.fullmatch(r"[a-z0-9-]{1,120}", uid) or not faculty:
@@ -2036,7 +2139,7 @@ async def university_site_departments(uid: str, faculty: str = Query(default="",
     best = max(facs, key=lambda f: _unit_score(faculty, f["name"]), default=None)
     if not best or _unit_score(faculty, best["name"]) < 0.5:
         # Fakülte sitenin menüsünde yok: kardeş fakültelerin adres kalıbından tahmin, olmazsa site içi arama.
-        best = await _find_faculty_page(home, facs, faculty)
+        best = await _find_faculty_page(home, facs, faculty, search=not background)
         if not best:
             wiki = await _wiki_departments(uid, faculty)
             if wiki:

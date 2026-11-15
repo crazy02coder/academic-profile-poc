@@ -2837,7 +2837,7 @@ function datasetCourseHtml(item) {
 // Birim bilgisi (hazır veri setinden): fakültenin dekanı, bölüm başkanı ve mezunların iş alanları.
 function studentUnitHtml(unit) {
   if (!unit) return "";
-  const people = [["Dekan", unit.dean], ["Bölüm başkanı", unit.head]].filter(([, name]) => name);
+  const people = [];  // dekan ve bölüm başkanı akademisyen bakışındaki fakülte listesinde gösterilir
   const careers = Array.isArray(unit.careers) ? unit.careers.join(", ") : String(unit.careers || "");
   if (!people.length && !careers) return "";
   const chips = careers && programChips(careers);
@@ -2964,7 +2964,16 @@ async function loadStudentSection(details, d, refresh = false) {
       $$(".sv-rows li", input.closest(".sv-group")).forEach((li) => { li.hidden = Boolean(q) && !li.dataset.q.includes(q); });
     });
   };
-  if (d.studentResults.has(key) && !refresh && !d.studentPending.has(key)) { draw(d.studentResults.get(key)); return; }
+  if (d.studentResults.has(key) && !refresh && !d.studentPending.has(key)) {
+    // Hazır sonuç (önbellek, veri seti, arka plan) da her açılışta iskeletten uçarak yerleşir; sonra tam çizilir.
+    const data = d.studentResults.get(key);
+    if (data.groups?.[section]?.items?.length) {
+      box.innerHTML = studentSkeleton(section);
+      await fillStudentSkeleton(details, box, data, section, d);
+    }
+    draw(data);
+    return;
+  }
   if (d.studentResults.has(key)) draw(d.studentResults.get(key));
   else box.innerHTML = studentSkeleton(section);  // sonucun iskeleti hemen; veri geldikçe dolar
   $("[data-student-refresh]", box)?.setAttribute("disabled", "");
@@ -3066,12 +3075,9 @@ function renderStudentFaculties(details, d) {
     if (!entry.open || entry.dataset.ready) return;
     entry.dataset.ready = "1";
     const dep = data.departments[Number(entry.dataset.studentDepartment)], target = $(":scope > .student-content", entry);
-    if (!data.people && data.source === "yok") departmentStaff(d, faculty.raw, dep.name).catch(() => {});  // tıklanan bölüm öncelikli
-    target.innerHTML = `<section class="department-courses" data-student-section="courses" data-faculty="${esc(faculty.raw)}" data-department="${esc(dep.name)}"><div class="student-content"></div></section>`
-      + `<details class="student-accordion student-branch" data-student-staff><summary><span class="student-summary-icon">${icon("users")}</span><span><b>Akademik kadro</b><small>${dep.count == null ? "YÖK Akademik" : `${fmtNum(dep.count)} akademisyen`}</small></span>${icon("chevron")}</summary><div class="student-content"></div></details>`;
+    // Öğrenci bakışında yalnız program ve ders içeriği; akademik kadro akademisyen bakışındadır (YÖK'e kadro isteği atılmaz).
+    target.innerHTML = `<section class="department-courses" data-student-section="courses" data-faculty="${esc(faculty.raw)}" data-department="${esc(dep.name)}"><div class="student-content"></div></section>`;
     loadStudentSection($(".department-courses", target), d);
-    const staff = $("[data-student-staff]", target);
-    staff.addEventListener("toggle", () => { if (staff.open && !staff.dataset.ready) { staff.dataset.ready = "1"; studentStaffBox($(":scope > .student-content", staff), data, faculty.raw, dep, d); } });
     bindStudentAccordions(target, d);
   }));
   bindStudentAccordions(box, d);
@@ -3079,11 +3085,12 @@ function renderStudentFaculties(details, d) {
 // YÖK'e yalnız tıklanan fakülte için gidilir. Diğer fakültelerin bölümleri (ve bağlantıları) arka planda
 // üniversitenin kendi sitesinden okunur: fakülte yapısı bir kez öğrenilir, kalanlar aynı tariften üç paralel
 // istekle gelir. YÖK'e arka planda istek atılmaz.
-function siteDepartments(d, facultyRaw) {
+// background: ön yükleme (arama motoruna gidilmez); başarısız olursa önbellekten düşer, tıklamada aramalı yeniden istenir.
+function siteDepartments(d, facultyRaw, background = false) {
   d.studentSiteDeps ||= new Map();
   let pending = d.studentSiteDeps.get(facultyRaw);
   if (!pending) {
-    pending = api(`/api/universities/${encodeURIComponent(d.id)}/site-departments?faculty=${encodeURIComponent(facultyRaw)}`, { quiet: true });
+    pending = api(`/api/universities/${encodeURIComponent(d.id)}/site-departments?faculty=${encodeURIComponent(facultyRaw)}${background ? "&background=true" : ""}`, { quiet: true });
     pending.catch(() => { if (d.studentSiteDeps.get(facultyRaw) === pending) d.studentSiteDeps.delete(facultyRaw); });
     d.studentSiteDeps.set(facultyRaw, pending);
   }
@@ -3118,7 +3125,7 @@ async function prefetchStudentFaculties(d) {
     while (S.uni === d && queue.length) {
       const faculty = queue.shift();
       try {
-        const site = await siteDepartments(d, faculty.raw);
+        const site = await siteDepartments(d, faculty.raw, true);
         rememberUnitUrls(d, faculty.raw, site);
         // Tarif ilk bölümlerden öğrenilir; diğer fakültelerin bölümleri sıraya arkadan eklenir (tıklanan öne geçer).
         const yok = d.studentFaculties?.get(faculty.raw);
@@ -3132,7 +3139,7 @@ async function prefetchStudentFaculties(d) {
 async function addSiteLinks(d, facultyRaw, data) {
   if (data.source !== "yok") return;
   try {
-    const site = await siteDepartments(d, facultyRaw);
+    const site = await siteDepartments(d, facultyRaw, true);
     const want = new Map(site.departments.filter((x) => x.url).map((x) => [nameKey(x.name), x.url]));
     data.departments.forEach((dep) => { if (!dep.url) dep.url = want.get(nameKey(dep.name)) || ""; });
     data.faculty_url ||= site.faculty_url;
@@ -3379,7 +3386,7 @@ async function selectYokFaculty(i) {
     if (!data.people.length) { body.innerHTML = `<div class="col-empty">Bu birimde akademisyen kaydı bulunamadı (YÖK Akademik ve üniversite sitesi).</div>`; return; }
     d.facData = data; renderYokDeps();
     if (data.source === "site") body.insertAdjacentHTML("afterbegin", `<div class="col-empty">${esc(data.notice)}</div>`);
-    else loadYokRoles(d, fac.raw);
+    loadYokRoles(d, fac.raw);  // YÖK'te kayıtlı görev yoksa dekan/bölüm başkanı hazır veri setinden
   } catch (e) { if (active()) body.innerHTML = `<div class="col-empty">${esc(e.message)}</div>`; }
 }
 // Dekan / bölüm başkanı: YÖK "İdari Görevler" (yalnız süren görevler); ilk açılış birkaç saniye, sonra önbellek
@@ -3388,7 +3395,9 @@ async function loadYokRoles(d, facRaw) {
   d.roles = { fac: facRaw, data: null, loading: true };
   if ($("#colDep .fac-lead")) renderYokDeps();
   try {
-    const data = await api(`/api/universities/${encodeURIComponent(d.id)}/roles?name=${encodeURIComponent(facRaw)}`, { quiet: true });
+    const query = new URLSearchParams({ name: facRaw });
+    (d.facData?.departments || []).forEach((x) => query.append("dep", x.name));  // veri setindeki bölüm başkanları için
+    const data = await api(`/api/universities/${encodeURIComponent(d.id)}/roles?${query}`, { quiet: true });
     if (d.roles?.fac !== facRaw) return;
     d.roles = { fac: facRaw, data, loading: false };
   } catch { if (d.roles?.fac === facRaw) d.roles = { fac: facRaw, data: null, loading: false, failed: true }; }
@@ -3407,9 +3416,9 @@ function renderYokDeps() {
   const d = S.uni, f = d.facData;
   $("#colDepN").textContent = f.departments.length;
   const roles = d.roles?.fac === d.data.items[d.fac]?.raw ? d.roles : null, info = roles?.data;
-  const head = (name) => { const h = info?.heads?.[name]; return h ? `<span class="u-head">${icon("user")}Bölüm Başkanı: <b>${esc(`${h.title} ${h.name}`)}</b></span>` : ""; };
+  const head = (name) => { const h = info?.heads?.[name]; return h ? `<span class="u-head">${icon("user")}Bölüm Başkanı: <b>${esc(`${h.title || ""} ${h.name}`.trim())}</b></span>` : ""; };
   const lead = roles?.loading ? `<div class="fac-lead loading"><span class="spinner"></span>Dekan ve bölüm başkanları YÖK'ten okunuyor…</div>`
-    : info?.dean ? `<div class="fac-lead"><span class="fl-badge">Dekan</span><div><b>${esc(`${info.dean.title} ${info.dean.name}`)}</b><small>${esc(info.dean.since)}'den beri · YÖK İdari Görevler</small></div></div>`
+    : info?.dean ? `<div class="fac-lead"><span class="fl-badge">Dekan</span><div><b>${esc(`${info.dean.title || ""} ${info.dean.name}`.trim())}</b><small>${info.dean.since ? `${esc(info.dean.since)}'den beri · YÖK İdari Görevler` : "Hazır veri seti"}</small></div></div>`
     : info ? `<div class="fac-lead muted">Dekan bilgisi bu fakültenin YÖK profillerinde bulunamadı.</div>` : "";
   const row = (name, n, i, q) => `<div class="unit ${d.dep === i ? "active" : ""}" data-unit="ydep" data-i="${i}" style="--i:${Math.min(i + 1, 24)}" data-q="${esc(q)}">
     <div class="u-main"><b>${esc(name)}</b><span>${n} akademisyen</span>${i >= 0 ? head(name) : ""}</div>
