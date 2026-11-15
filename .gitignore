@@ -8,6 +8,7 @@ data/*
 !data/arge_merkezleri.json
 !data/journal_quartiles.sqlite
 !data/yok_university_logos.json
+!data/poc/
 .ai-settings.json
 .ai-settings.tmp
 .app-settings.json
