@@ -257,6 +257,14 @@ def pick(programs: list[dict], faculty: str, department: str) -> dict | None:
         # Yalnız dolgu kelimesi farkı ("Moleküler Biyoloji ve Genetik" ~ "Moleküler Biyoloji Genetik Bilimi").
         same = [row for row in rows if row[1] and (set(row[1].split()) ^ words) <= _FILLER and (set(row[1].split()) & words) - _FILLER]
     if not same:
+        # Tek programlı fakülte (Tıp, Hukuk, Diş Hekimliği): YÖK bölümü fakültenin adıyla verir, site programı başka
+        # adla yazar ("Tıp Doktorluğu", "Diş Programı (İngilizce)"). Fakültesinin adı bölümle aynı olan programlar,
+        # hepsi aynı programın dil varyantlarıysa (tek ad) seçilir.
+        inside = [(program, *unit_key(program.get("name") or "")) for program in programs
+                  if unit_key(program.get("faculty") or "")[0] == key]
+        if len({row[1] for row in inside}) == 1:
+            same = inside
+    if not same:
         return None
     fac = unit_key(faculty)[0] if faculty else ""
     inside = [row for row in same if fac and unit_key(row[0].get("faculty") or "")[0] == fac]
