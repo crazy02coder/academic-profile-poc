@@ -130,20 +130,36 @@ async def lookup(home: str, faculty: str, department: str, refresh: bool = False
         return None
     async with _open(mod, fresh=refresh) as http:
         rows = await _programs(mod, http)
-        program = base.pick(rows, faculty, department)
-        if program is None and (refresh or http.requests == 0):
+        found = base.candidates(rows, faculty, department)
+        if not found and (refresh or http.requests == 0):
             # Liste önbellekten geldi ve bölüm içinde yok: yeni açılmış program olabilir, liste bir kez yenilenir.
             rows = await _programs(mod, http, force=True)
-            program = base.pick(rows, faculty, department)
-        if program is None:
-            return None
-        items = [item for item in await mod.courses(http, program) if isinstance(item, dict) and item.get("title")]
+            found = base.candidates(rows, faculty, department)
+        program, items = None, []
+        # Tek aday kesin eşleşmedir. Aynı adlı program birden çok fakültedeyse (kurum fakülteyi bölmüş ya da taşımış)
+        # adaylar olasılık sırasıyla denenir; ders planı olan ilk aday alınır (eski kayıtların planı çoğu kez boştur).
+        for program in found[:3]:
+            items = [item for item in await mod.courses(http, program) if isinstance(item, dict) and item.get("title")]
+            if len(items) >= base.MIN_COURSES:
+                break
         requests = http.requests
-    if len(items) < base.MIN_COURSES:
+    if program is None or len(items) < base.MIN_COURSES:
         return None
+    items = _yearly(items)
     links = [{"title": "Ders bilgi paketi", "url": program["url"]}] if program.get("url") else []
     group = {"title": "Dersler ve içerikleri", "format": "course_catalog", "source": "catalog", "links": links, "items": items}
     return {"group": group, "program": program, "requests": requests}
+
+
+def _yearly(items: list[dict]) -> list[dict]:
+    """Yıllık okutulan programlar (Hukuk, Tıp): site yılları 1, 3, 5… numaralı dönem olarak verir. Dönemli derslerin
+    hepsi tek numaralıysa ve en az üç ayrı yıl varsa etiketler "1. sınıf dersleri", "2. sınıf dersleri"… yapılır."""
+    import re
+    numbers = {int(m[1]) for item in items if (m := re.fullmatch(r"(\d+)\. dönem", item.get("period") or ""))}
+    if len(numbers) < 3 or any(n % 2 == 0 for n in numbers):
+        return items
+    return [{**item, "period": f"{(int(m[1]) + 1) // 2}. sınıf dersleri"}
+            if (m := re.fullmatch(r"(\d+)\. dönem", item.get("period") or "")) else item for item in items]
 
 
 def _detail_path(url: str):

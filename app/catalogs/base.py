@@ -250,10 +250,18 @@ def pick(programs: list[dict], faculty: str, department: str) -> dict | None:
     """Program listesinden bölümü seçer. Ad anahtarı veri setiyle aynı kuraldadır (poc_dataset.unit_key: İngilizce
     program adları Türkçe karşılığına çevrilir, "(İngilizce)" gibi ekler varyanttır). Aynı ad birden çok fakültedeyse
     seçilen fakültedeki; birden çok varyant varsa istenen, istenmediyse işaretsiz olan seçilir. Emin olunamazsa None."""
+    found = candidates(programs, faculty, department)
+    return found[0] if len(found) == 1 else None
+
+
+def candidates(programs: list[dict], faculty: str, department: str) -> list[dict]:
+    """Bölümle eşleşen programlar, en olası önce. Tek sonuç kesin eşleşmedir. Birden çok sonuç, aynı adlı programın
+    birden çok fakültede bulunduğu ve seçilen fakültenin adının sitedeki adla tam tutmadığı durumdur (kurum fakülteyi
+    bölmüş ya da yeniden adlandırmış: "Fen-Edebiyat" → "Fen"); adaylar fakülte adının kelime örtüşmesine göre sıralanır."""
     from ..poc_dataset import unit_key
     key, variant = unit_key(department)
     if not key:
-        return None
+        return []
     words = set(key.split())
     rows = [(program, *unit_key(name)) for program in programs for name in _names(program)]
     same = [row for row in rows if row[1] == key]
@@ -269,7 +277,7 @@ def pick(programs: list[dict], faculty: str, department: str) -> dict | None:
         if len({row[1] for row in inside}) == 1:
             same = inside
     if not same:
-        return None
+        return []
     fac = unit_key(faculty)[0] if faculty else ""
     inside = [row for row in same if fac and unit_key(row[0].get("faculty") or "")[0] == fac]
     same = inside or same
@@ -279,8 +287,8 @@ def pick(programs: list[dict], faculty: str, department: str) -> dict | None:
     else:
         same = [row for row in same if not row[2]] or [row for row in same if row[2] in {"tr", "+io", "tr+io"}] or same
     found = list({id(row[0]): row[0] for row in same}.values())
-    if len(found) > 1 and not inside:
-        homes = {fold(p.get("faculty") or "") for p in found}
-        if len(homes) > 1:
-            return None  # aynı adlı program iki fakültede; hangisi olduğu bilinmiyor
-    return found[0] if found else None
+    if len(found) > 1 and not inside and len({fold(p.get("faculty") or "") for p in found}) > 1:
+        # Aynı adlı program birden çok fakültede ve fakülte adı tam tutmuyor: en çok ortak kelimesi olan fakülte önce.
+        wanted = set(fac.split()) - _FILLER
+        return sorted(found, key=lambda p: -len(wanted & set(unit_key(p.get("faculty") or "")[0].split())))
+    return found[:1]
