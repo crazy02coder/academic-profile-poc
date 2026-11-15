@@ -103,4 +103,40 @@ def save(provider: str, key: str = "", clear_key: bool = False, model: str = "",
 
 
 def secrets() -> list[str]:
-    return [p["key"] for p in (_load().get("providers") or {}).values() if p.get("key")]
+    keys = search()
+    return [p["key"] for p in (_load().get("providers") or {}).values() if p.get("key")] \
+        + [keys[name] for name in ("serper_key", "google_cse_key") if keys[name]]
+
+
+# ------------------------------------------------------------------ arama servisleri (Serper.dev, Google Custom Search)
+_SEARCH_ENV = {"serper_key": "SERPER_API_KEY", "google_cse_key": "GOOGLE_CSE_KEY", "google_cse_cx": "GOOGLE_CSE_CX"}
+
+
+def search() -> dict:
+    """Arama servisi anahtarları: Ayarlar sayfasında kaydedilen değer; yoksa ortam değişkeni (.env)."""
+    saved = _load().get("search")
+    saved = saved if isinstance(saved, dict) else {}
+    return {name: str(saved.get(name) or os.getenv(env, "") or "").strip() for name, env in _SEARCH_ENV.items()}
+
+
+def search_public() -> dict:
+    """Arayüze giden görünüm: anahtarların kendisi yok, yalnız kayıtlı olup olmadıkları. Arama motoru kimliği gizli değildir."""
+    keys = search()
+    return {"serper": bool(keys["serper_key"]), "google_cse": bool(keys["google_cse_key"]), "google_cse_cx": keys["google_cse_cx"]}
+
+
+def save_search(serper_key: str = "", google_cse_key: str = "", google_cse_cx: str | None = None, clear: tuple = ()) -> None:
+    """Boş bırakılan anahtar değişmez; silmek için adı clear içinde verilir. Kimlik (cx) verildiği gibi yazılır."""
+    data = _load()
+    entry = data.get("search") if isinstance(data.get("search"), dict) else {}
+    for name in clear:
+        if name in _SEARCH_ENV:
+            entry.pop(name, None)
+    if serper_key.strip():
+        entry["serper_key"] = serper_key.strip()
+    if google_cse_key.strip():
+        entry["google_cse_key"] = google_cse_key.strip()
+    if google_cse_cx is not None:
+        entry["google_cse_cx"] = google_cse_cx.strip()
+    data["search"] = entry
+    _write(data)

@@ -172,11 +172,33 @@ async def _brave_api(query: str) -> list[dict]:
                 for x in response.json().get("web", {}).get("results", [])]
 
 
+def _keys() -> dict:
+    from . import ai_settings
+    return ai_settings.search()
+
+
+async def search_check() -> dict:
+    """Ayarlar sayfasındaki "Dene" düğmesi: kayıtlı her arama servisine tek bir sorgu atar, sonucu kısa metinle döndürür."""
+    keys, out = _keys(), {}
+    for name, ready, call in (("serper", keys["serper_key"], _serper),
+                              ("google_cse", keys["google_cse_key"] and keys["google_cse_cx"], _google_cse)):
+        if not ready:
+            out[name] = "Anahtar yok" if name == "serper" or not keys["google_cse_key"] else "Arama motoru kimliği (cx) yok"
+            continue
+        try:
+            rows = await asyncio.wait_for(call("site:metu.edu.tr ders programı"), 8)
+            out[name] = f"Çalışıyor · {len(rows)} sonuç"
+            _STATE["providers"].pop(name, None)  # önceki hata beklemesi kalkar
+        except Exception as exc:  # noqa: BLE001
+            out[name] = f"Hata: {type(exc).__name__} {str(exc)[:80]}"
+    return out
+
+
 async def _serper(query: str) -> list[dict]:
-    """Serper.dev (Google sonuçları, JSON). Anahtar: .env içinde SERPER_API_KEY. Hata iletisine anahtar yazılmaz."""
+    """Serper.dev (Google sonuçları, JSON). Anahtar Ayarlar sayfasından (ai_settings.search); hata iletisine yazılmaz."""
     async with httpx.AsyncClient(timeout=5) as client:
         response = await client.post("https://google.serper.dev/search", json={"q": query, "num": 10, "gl": "tr", "hl": "tr"},
-                                     headers={"X-API-KEY": os.environ["SERPER_API_KEY"], "Content-Type": "application/json"})
+                                     headers={"X-API-KEY": _keys()["serper_key"], "Content-Type": "application/json"})
     if response.status_code >= 400:
         raise RuntimeError(f"HTTP {response.status_code}")  # 429: istek sınırı; 400/403: kredi bitti ya da anahtar geçersiz
     return [{"url": x.get("link", ""), "title": x.get("title", ""), "snippet": x.get("snippet", "")}
@@ -184,11 +206,11 @@ async def _serper(query: str) -> list[dict]:
 
 
 async def _google_cse(query: str) -> list[dict]:
-    """Google Custom Search JSON API. .env: GOOGLE_CSE_KEY (API anahtarı) ve GOOGLE_CSE_CX (arama motoru kimliği);
-    ikisi de yoksa bu sağlayıcı kullanılmaz. Anahtar sorgu parametresinde gittiği için hata iletisine adres yazılmaz."""
+    """Google Custom Search JSON API: API anahtarı ve arama motoru kimliği (cx) Ayarlar sayfasından; ikisi de yoksa bu
+    sağlayıcı kullanılmaz. Anahtar sorgu parametresinde gittiği için hata iletisine adres yazılmaz."""
     async with httpx.AsyncClient(timeout=5) as client:
         response = await client.get("https://www.googleapis.com/customsearch/v1", params={
-            "key": os.environ["GOOGLE_CSE_KEY"], "cx": os.environ["GOOGLE_CSE_CX"], "q": query, "num": 10})
+            "key": _keys()["google_cse_key"], "cx": _keys()["google_cse_cx"], "q": query, "num": 10})
     if response.status_code >= 400:
         raise RuntimeError(f"HTTP {response.status_code}")  # 429: günlük kota doldu
     return [{"url": x.get("link", ""), "title": x.get("title", ""), "snippet": x.get("snippet", "")}
@@ -273,7 +295,9 @@ async def _provider(provider: str, query: str, log=None) -> list[dict]:
 
 def provider_order() -> tuple[str, ...]:
     # Anahtarlı arama servisleri (tarayıcı gerektirmez, engellenmez) önce; anahtar yoksa listeye girmezler.
-    providers = (("serper",) if os.getenv("SERPER_API_KEY") else ())         + (("google_cse",) if os.getenv("GOOGLE_CSE_KEY") and os.getenv("GOOGLE_CSE_CX") else ())
+    keys = _keys()
+    providers = (("serper",) if keys["serper_key"] else ()) \
+        + (("google_cse",) if keys["google_cse_key"] and keys["google_cse_cx"] else ())
     providers += ("ddgs",) + (("brave_api",) if os.getenv("BRAVE_API_KEY") else ())
     if os.getenv("GOOGLE_SEARCH_ENABLED", "1").lower() not in ("0", "false", "off"):
         providers += ("google",)

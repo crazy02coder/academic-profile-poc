@@ -4672,12 +4672,14 @@ async function viewSystem() {
   setView(`<div class="section-head"><div><h1>Ayarlar</h1><p>Kullanılacak yapay zekâ, servislerin durumu ve REA'nın öğrendiği site tarifleri.</p></div></div>
     <div class="card card-pad ai-card" id="aiCard">${skeleton(3)}</div>
     <div class="card card-pad" id="speedCard">${skeleton(2)}</div>
+    <div class="card card-pad ai-card" id="searchCard">${skeleton(2)}</div>
     <div class="grid-2"><div class="card card-pad"><div class="card-title">${icon("info")}Durum</div><div id="sysState">${skeleton(3)}</div></div>
       <div class="card card-pad"><div class="card-title">${icon("settings")}Site tarifleri</div>
         <p class="muted" style="margin:0 0 14px">REA sitelerin arka plandaki isteklerini öğrenir; site değişince yeniden öğrenir.</p>
         <div class="actions"><button class="btn sm" type="button" data-recipes>Öğrenilen tarifler</button><button class="btn sm" type="button" data-scan>Değişiklikleri tara</button></div></div></div>`);
   aiSettingsCard();
   speedSettingsCard();
+  searchSettingsCard();
   let h = null;
   try { h = await api("/api/health"); } catch { /* aşağıda gösterilir */ }
   const box = $("#sysState");
@@ -4685,6 +4687,47 @@ async function viewSystem() {
   const row = (name, ok, text) => `<div class="sys-row"><span class="dot ${ok ? "ok" : "warn"}"></span><b>${esc(name)}</b><span class="muted">${esc(text)}</span></div>`;
   box.innerHTML = h ? [row("Yapay zekâ", h.llm_ready, h.llm), row("REA", h.rea, h.rea ? "Hazır" : "Kurulu değil"), row("Tarayıcı", h.chromium, h.chromium ? "Hazır" : "Kurulu değil"),
     row("Patentler (EPO)", h.patents, h.patents ? "Anahtar tanımlı" : "Anahtar yok; patent sekmeleri kapalı")].join("") : `<p class="muted">Sunucuya ulaşılamadı.</p>`;
+}
+
+// Arama servisleri: Serper.dev ve Google Custom Search anahtarları. Anahtarlar sunucudan geri gelmez (yalnız kayıtlı mı).
+async function searchSettingsCard() {
+  const card = $("#searchCard");
+  let cfg = null;
+  try { cfg = await api("/api/settings/search"); } catch { if (card) card.innerHTML = `<p class="muted">Arama ayarları okunamadı.</p>`; return; }
+  if (!card?.isConnected) return;
+  const draw = (message = "") => {
+    card.innerHTML = `<div class="card-title">${icon("search")}Arama servisleri</div>
+      <p class="muted" style="margin:0 0 12px">Anahtar girilen servisler ücretsiz arama motorlarından önce kullanılır; tarayıcı açmadıkları için engellenmezler. Ders bilgi paketi doğrudan okunan kurumlar arama kullanmaz.</p>
+      <form class="ai-form" id="searchForm" autocomplete="off">
+        <div class="field"><label for="serperKey">Serper.dev anahtarı</label><div class="input"><input id="serperKey" type="password" autocomplete="new-password" placeholder="${cfg.serper ? "Kayıtlı; değiştirmek için yazın" : "Anahtarı yapıştırın"}"></div></div>
+        <div class="field"><label for="cseKey">Google Custom Search anahtarı</label><div class="input"><input id="cseKey" type="password" autocomplete="new-password" placeholder="${cfg.google_cse ? "Kayıtlı; değiştirmek için yazın" : "Anahtarı yapıştırın"}"></div></div>
+        <div class="field"><label for="cseCx">Arama motoru kimliği (cx) <small>Custom Search için gerekli</small></label><div class="input"><input id="cseCx" value="${esc(cfg.google_cse_cx || "")}" placeholder="Programlanabilir Arama Motoru panelindeki kimlik"></div></div>
+      </form>
+      <div class="actions"><button class="btn primary sm" type="button" data-search-save>Kaydet</button>
+        <button class="btn sm" type="button" data-search-test>Dene</button>
+        ${cfg.serper || cfg.google_cse ? `<button class="btn sm" type="button" data-search-clear>Anahtarları sil</button>` : ""}</div>
+      <p class="muted ai-note" data-search-status role="status">${esc(message)}</p>
+      <p class="faint ai-note">Anahtarlar yalnızca bu bilgisayarda saklanır. Arama sorguları (kurum alan adı ve bölüm adı) seçilen servise gönderilir.</p>`;
+    hydrateIcons(card);
+    const status = (text) => { $("[data-search-status]", card).textContent = text; };
+    const save = async (extra = {}) => {
+      status("Kaydediliyor…");
+      try {
+        cfg = await post("/api/settings/search", { serper_key: $("#serperKey").value, google_cse_key: $("#cseKey").value, google_cse_cx: $("#cseCx").value, ...extra });
+        draw("Kaydedildi.");
+      } catch (e) { status(e.message || "Kaydedilemedi."); }
+    };
+    $("[data-search-save]", card).addEventListener("click", () => save());
+    $("[data-search-clear]", card)?.addEventListener("click", () => save({ serper_key: "", google_cse_key: "", clear: ["serper_key", "google_cse_key"] }));
+    $("[data-search-test]", card).addEventListener("click", async () => {
+      status("Deneniyor…");
+      try {
+        const r = await post("/api/settings/search/test", {});
+        status(`Serper: ${r.results.serper} · Custom Search: ${r.results.google_cse}`);
+      } catch (e) { status(e.message || "Denenemedi."); }
+    });
+  };
+  draw();
 }
 
 // YÖK istek hızı (1-5). Profil çıkarma her zaman bir üst kademeden çalışır.

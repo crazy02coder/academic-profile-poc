@@ -545,6 +545,33 @@ async def yok_speed_save(body: SpeedIn):
     return await yok_speed_get()
 
 
+class SearchSettingsIn(BaseModel):
+    serper_key: str = ""
+    google_cse_key: str = ""
+    google_cse_cx: str | None = None
+    clear: list[str] = []
+
+
+@app.get("/api/settings/search")
+async def search_settings_get():
+    return ai_settings.search_public()
+
+
+@app.post("/api/settings/search")
+async def search_settings_save(body: SearchSettingsIn):
+    """Arama servisi anahtarları (Serper.dev, Google Custom Search); anahtarlar arayüze geri gönderilmez."""
+    if any(len(x) > 300 for x in (body.serper_key, body.google_cse_key, body.google_cse_cx or "")):
+        raise HTTPException(422, "Anahtar çok uzun.")
+    ai_settings.save_search(body.serper_key, body.google_cse_key, body.google_cse_cx, tuple(body.clear[:3]))
+    return ai_settings.search_public()
+
+
+@app.post("/api/settings/search/test")
+async def search_settings_test():
+    from .websearch import search_check
+    return {**ai_settings.search_public(), "results": {k: redact(v) for k, v in (await search_check()).items()}}
+
+
 @app.get("/api/settings/ai")
 async def ai_settings_get():
     return ai_settings.public()
