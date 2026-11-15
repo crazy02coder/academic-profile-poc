@@ -129,6 +129,11 @@ def _load(uid: str, section: str, faculty: str = "", department: str = ""):
     saved = _read_cache(CACHE / f"{_key(uid, section, faculty, department)}.json")
     if saved and saved.get("version") == CACHE_VERSION and isinstance(saved["groups"].get(section), dict):
         group = saved["groups"][section]
+        rows = group.get("items") or []
+        if section == "courses" and department and rows and (len(rows) < MIN_TABLE or group.get("format") != "course_catalog"):
+            # Eski toplayıcının yanıltıcı sonucu (birkaç ders satırı ya da özet cümlesi "ders" diye saklanmış): kayıt
+            # sayılmaz, bölüm bir kez yeniden taranır.
+            return None
         # A new collector gets one attempt at an old empty/menu/calendar-only
         # result. Useful cached facts (especially scoped catalogues) stay cached.
         if saved.get("collection_version") == COLLECTION_VERSION or (section != "courses" and _useful(group, section)):
@@ -187,6 +192,7 @@ _EN_TR = {
 _EN_RX = re.compile(r"\b(?:" + "|".join(sorted(map(re.escape, _EN_TR), key=len, reverse=True)) + r")\b")
 # Aynı kökün ekli biçimleri tek biçime: mühendisliği/mühendislik, bilimi/bilimleri, eğitimi/eğitim.
 _TR_STEM = ((r"\bmakina\b", "makine"),  # aynı bölümün iki yazımı (YÖK "Makine", bazı siteler "Makina")
+            (r"\bekonomi\b", "iktisat"),  # "Ekonomi ve Finans" ile sitedeki "Economics and Finance" aynı bölümdür
             (r"\bmuhendisligi\b", "muhendislik"), (r"\bbilimi\b", "bilimleri"), (r"\begitimi\b", "egitim"),
             (r"\bmimarligi\b", "mimarlik"), (r"\byonetimi\b", "yonetim"), (r"\btasarimi\b", "tasarim"))
 
@@ -305,7 +311,10 @@ def _slugify(name: str) -> str:
 
 _PATTERNS = CACHE / "_course_patterns.json"
 # Ders kataloğu sistemleri (bölüm sitesi ya da dosya sunucusu değil): obs., meobs., sis., ects., bologna., bilgipaketi. …
-_CATALOG_HOST = re.compile(r"(?:[a-z]*ects|[a-z]*obs|oibs|ubs|ebs|sis|bologna|bilgipaketi|akts|katalog|catalog|ders|course)[a-z0-9-]*\.", re.I)
+_CATALOG_HOST = re.compile(r"(?:[a-z]*ects|[a-z]*obs|oibs|ubs|ebs|ebp|bbs|dbp|sis|bologna|bilgipaketi|akts|katalog|catalog|ders|course)[a-z0-9-]*\.", re.I)
+# Ders bilgi paketi / öğrenci bilgi sistemi için yaygın alt alan adları (ebp: eğitim bilgi paketi, bbs: Bologna bilgi
+# sistemi, dbp: ders bilgi paketi). Arama motoru sonuç vermediğinde kurumun alan adında bunlar yoklanır.
+CATALOG_NAMES = ("obs", "bologna", "ects", "akts", "bilgipaketi", "ebs", "ubs", "oibs", "ebp", "bbs", "dbp", "katalog", "catalog")
 # Lisans ders planı olmayan sayfalar (çift anadal, yandal, lisansüstü, seçmeli listesi, Erasmus): tarif olarak öğrenilmez.
 _NOT_PLAN = re.compile(r"\bcap\b|cift ana ?dal|\byap\b|yan ?dal|double major|\bminor\b|lisansustu|yuksek lisans|doktora"
                        r"|graduate|master|\bphd\b|secmeli|elective|erasmus")
@@ -554,8 +563,36 @@ def _index(uid: str) -> dict:
         "shapes": rows("shapes", lambda v: isinstance(v, list) and all(isinstance(x, str) for x in v)),
         "miss": saved.get("miss") if isinstance(saved.get("miss"), int) else 0,
         "off": saved.get("off") if isinstance(saved.get("off"), (int, float)) else 0,
+        # Yaygın ders bilgi paketi adreslerinin en son yoklandığı an ve bulunan giriş sayfaları (bkz. probe_catalogs).
+        "probed": saved.get("probed") if isinstance(saved.get("probed"), (int, float)) else 0,
+        "catalogs": [x for x in saved["catalogs"] if isinstance(x, str)][:6] if isinstance(saved.get("catalogs"), list) else [],
     }
     return data
+
+
+def _index_links(uid: str) -> list[dict]:
+    """Dizindeki bağlantılar sayfa bağlantısı biçiminde (ad, adres): bölümün kendi sitesi buradan bulunur."""
+    return [{"title": title, "url": row["u"]} for row in _index(uid)["links"].values() for title in row["t"]]
+
+
+MIN_TABLE = 5  # bir bölüm için bundan az ders satırı ders planı sayılmaz (laboratuvar ya da tanıtım sayfasındaki ders kodları)
+_HOSTS: dict[str, dict] = {}  # alan adı başına: istek kapısı, art arda bağlantı hatası sayısı, beklenecek an
+_SEARCH = {"zero": 0, "off": 0.0}  # art arda boş dönen arama sayısı; üç kez boş dönünce arama 10 dakika atlanır
+
+
+def _host(url: str) -> dict:
+    name = (urlsplit(url).hostname or "").lower()
+    state = _HOSTS.get(name)
+    if state is None:
+        state = _HOSTS[name] = {"gate": asyncio.Semaphore(3), "fails": 0, "cool": 0.0}
+    return state
+
+
+def _thin(group: dict, department: str) -> None:
+    """Bölüm için birkaç ders satırından ibaret sonuç ders planı değildir: yanlış sonuç doğruymuş gibi gösterilmez."""
+    if department and 0 < len(group["items"]) < MIN_TABLE:
+        group["items"] = []
+        group.pop("format", None)
 
 
 def _index_flush(uid: str) -> None:
@@ -780,6 +817,19 @@ def _scope(page: dict, faculty: str, department: str, parent: dict | None = None
         page["department_verified"] = True
         page["context_quote"] = parent["context_quote"]
         page["context_source_url"] = parent["context_source_url"]
+    # Kurumun kendi sayfasında bağlantının adı seçilen bölümün adıysa (birebir ya da yanında yalnız "Lisans Programı"
+    # gibi zararsız kelimeler) açılan sayfa o bölüme aittir: program sayfasının başlığı genel ("Bilgi Paketi", "Derece
+    # Programları"), İngilizce ya da alt başlıkta olabilir. Seçim formunun bölüm için ürettiği bağlantı da böyledir
+    # (program listesindeki satır bölümün adını taşır). Başka fakültenin aynı adlı bölümü ve lisansüstü/yandal
+    # sayfaları sayılmaz.
+    title = link.get("title") or ""
+    if (department and not page["department_verified"] and not other_language and not link.get("search")
+            and (link.get("form") or _name_fit(title, department) >= 1)
+            and not (faculty and link.get("faculty_context") and not _matches(link["faculty_context"], faculty))
+            and not _NEWS_PATH.search(b.path) and not _OTHER_PLAN.search(fold(title + " " + _slug(page["url"])))):
+        page["department_verified"] = True
+        page["context_quote"] = clean(title)[:700]
+        page["context_source_url"] = parent["url"]
     return page
 
 
@@ -856,6 +906,10 @@ def _catalog(body, url: str) -> list[dict]:
             row_period = next((_course_period(v) for v in values if _course_period(v)), "")
             if row_period:
                 period = row_period
+            elif len(values) == 1 and len(values[0]) < 140 and re.search(r"secmeli|secimlik|elective", normalized[0]):
+                # Tek hücrelik grup başlığı ("Teknik Seçmeli Dersler", "TEG - Technical Elective"): altındaki dersler son
+                # dönemin değil seçmeli havuzunun dersleridir.
+                period = "Seçmeli dersler"
             names = {"code": {"ders kodu", "course code", "kodu", "kod", "code"},
                      "name": {"ders adi", "dersin adi", "course name", "ders", "course", "course title"},
                      "credit": {"kredi", "credit", "yerel kredi"}, "ects": {"akts", "ects"},
@@ -867,7 +921,10 @@ def _catalog(body, url: str) -> list[dict]:
             if not columns or max(columns.values()) >= len(values):
                 continue
             code, name = values[columns["code"]], values[columns["name"]]
-            if not name or not re.fullmatch(code_pattern, code, re.I):
+            # Başlık satırı "Ders Kodu" sütununu açıkça gösterdiği için yalnız rakamdan oluşan kodlar ("501001012022")
+            # ve uzun numaralı kodlar da kabul edilir; dönem başlığı ya da toplam satırı kod sayılmaz.
+            if (not name or _course_period(code) or not (re.fullmatch(code_pattern, code, re.I) or re.fullmatch(
+                    r"\d{4,14}|[A-ZÇĞİÖŞÜ]{1,8}[ -]?\d{1,6}[A-Z]{0,2}", code, re.I))):
                 continue
             details = []
             for key, label in (("credit", "Kredi"), ("ects", "AKTS"), ("kind", "Tür")):
@@ -1391,8 +1448,11 @@ def _candidate(link: dict, page: dict, section: str, faculty: str, department: s
     course_score = 30 if in_group and re.search(r"mufredat|curriculum|akts|ects", label) else 20 if in_group and re.search(r"icerik|content", label) else 0
     if section == "courses":
         # Ders listesini taşıyan sayfa adları (sisteme özel değil): öğretim programı/planı, ders planı, müfredat.
-        if re.search(r"ogretim ?(?:programi|plani|planlari)|ders ?(?:plani|planlari|programi)|program ?yapisi|course ?(?:plan|structure|list)|curriculum|mufredat", route):
+        if re.search(r"ogretim ?(?:programi|plani|planlari)|ders ?(?:plani|planlari)|program ?yapisi|course ?(?:plan|structure|list)|curriculum|mufredat", route):
             course_score += 60
+        elif re.search(r"\bders program", route) and not re.search(r"akts|ects|bologna|icerik", route):
+            # "Ders programı" çoğu sitede haftalık çizelgedir (gün/saat), ders planı değil: diğer adaylardan sonra denenir.
+            course_score -= 40
         # Aynı sistemdeki tanıtım sayfaları ders listesi vermez: derece, üst kademe, amaç, yeterlilik, diploma eki.
         if re.search(r"ust ?derece|ustdereceprogramagecis|kazanilan derece|amac|hedef|yeterlilik|ogrenme cikti|diploma|kabul kosul|degerlendirme", route):
             course_score -= 50
@@ -1428,6 +1488,7 @@ def _retain_facts(result: dict, pages: list[dict], section: str, faculty: str, d
                 if key not in known:
                     group["items"].append({**item, "context_quote": page.get("context_quote", ""), "context_source_url": page.get("context_source_url", page["url"])})
                     known.add(key)
+        _thin(group, department)
         if group["items"]:
             group["format"] = "course_catalog"
         return
@@ -1613,16 +1674,45 @@ _JS_SCRIPT = re.compile(r"<script(?![^>]*type=[\"'](?!text/javascript|module|app
 _TEMPLATE_MARK = re.compile(r"\$\{\s*[$\w]|\{\{\s*[$\w#]|\bng-app\b|\bdata-reactroot\b|\bv-cloak\b|id=[\"'](?:__next|__nuxt)[\"']")
 
 
+# Listeyi (program ağacı, ders tablosu) sayfa açıldıktan sonra ayrı bir veri isteğiyle dolduran sayfa içi betik.
+_DATA_CALL = re.compile(r"\.jstree\s*\(|\$\.getJSON\s*\(|\$\.ajax\s*\(|\bfetch\s*\(\s*[\"'`]|axios\s*\.\s*get\s*\(|\.DataTable\s*\("
+                        r"|[\"']?dataType[\"']?\s*:\s*[\"']json", re.I)
+_ROUTE_WORDS = re.compile(r"bologna|ects|akts|bilgi ?paket|curriculum|mufredat|ders|program|katalog|catalog|derece|birim|bolum"
+                          r"|fakulte|akademik|academic|department|faculty")
+# Ana sayfadan birimlere götüren bağlantı adları (fakülte adı ya da "Akademik", "Bölümler", "Programlar" …).
+_ROUTE_LINK = re.compile(r"\b(?:fakulte\w*|akademik|bolumler\w*|programlar\w*|birimler\w*|academics?|faculties|departments|schools)\b")
+
+
 def _shell(html: str, page: dict) -> bool:
     """Kabuk sayfa: menüsü ve gövdesi sayfa açıldıktan sonra betikle dolan sayfa (sunucudan boş iskelet gelir).
     İçeriğe bakılır, adrese ya da sisteme değil: (a) betik var ama neredeyse hiç bağlantı ve metin yok; (b) metin az ve
-    işaretlemede doldurulmamış şablon yer tutucuları (${Ad}, {{ad}}) ya da tek sayfa uygulaması izleri duruyor."""
+    işaretlemede doldurulmamış şablon yer tutucuları (${Ad}, {{ad}}) ya da tek sayfa uygulaması izleri duruyor;
+    (c) metin az, sayfa bir birim/program/ders sayfası ve sayfa içi betik listeyi ayrı bir veri isteğiyle dolduruyor
+    (menüsü dolu olduğu için (a)'ya takılmayan program ağaçları ve ders tabloları)."""
     if "<script" not in html.lower():
         return False
     links, text = len(page.get("links") or []), len(page.get("text") or "")
     if links <= 5 and text < 400 and len(html) > 3000:
         return True
-    return text < 1500 and bool(_TEMPLATE_MARK.search(_JS_SCRIPT.sub(" ", html)))
+    if text < 1500 and _TEMPLATE_MARK.search(_JS_SCRIPT.sub(" ", html)):
+        return True
+    if text >= 2500 or not _ROUTE_WORDS.search(fold(f"{page.get('url', '')} {page.get('title', '')}")):
+        return False
+    return any(_DATA_CALL.search(script) for script in _JS_SCRIPT.findall(html) if "src=" not in script[:script.find(">") + 1])
+
+
+def _routeless(page: dict) -> bool:
+    """Ana sayfada birimlere (fakülte, bölüm, program) götüren hiçbir bağlantı yok: menü betikle doluyor olabilir."""
+    return not any(_UNIT_LINK.search(fold(link.get("title") or "")) or _ROUTE_LINK.search(fold(link.get("title") or ""))
+                   for link in page.get("links") or [])
+
+
+def _timetable(text: str) -> bool:
+    """Haftalık ders programı (gün/saat çizelgesi) mi: en az üç ayrı gün adı ve altı saat. Ders planı değildir; ders
+    kodu geçse de ders listesi sayılmaz ve modelle ders çıkarmaya verilmez."""
+    sample = fold(text[:40000])
+    days = {day for day in re.findall(r"\b(pazartesi|sali|carsamba|persembe|cuma|monday|tuesday|wednesday|thursday|friday)\b", sample)}
+    return len(days) >= 3 and len(re.findall(r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d\b", text[:40000])) >= 6
 
 
 _RENDERS: dict[str, asyncio.Future] = {}
@@ -1766,10 +1856,12 @@ def _stub(uid: str, section: str, faculty: str, department: str) -> dict:
 
 
 async def _collect(uid: str, llm, section: str, faculty: str, department: str, dept_url: str = "", faculty_url: str = "",
-                   mode: str = "urgent", fresh: bool = False) -> dict:
+                   mode: str = "urgent", fresh: bool = False, known: tuple = ()) -> dict:
     """mode: "urgent" (kullanıcı bekliyor: tarif + arama + gezinti aynı anda), "scout" (arka plan keşfi: onaylı tarif
     yokken sınırlı gezinti), "recipe" (arka plan: yalnız onaylı tarif, birkaç istek, serbest gezinti yok). Arka plan
-    taraması sürerken kullanıcı aynı bölüme tıklarsa tarama yerinde tam moda yükselir (URGENT_KEYS)."""
+    taraması sürerken kullanıcı aynı bölüme tıklarsa tarama yerinde tam moda yükselir (URGENT_KEYS).
+    known: bölümün program sayfası olarak önceden bilinen adresler (veri setindeki ders bilgi paketi adresi); ilk onlar okunur."""
+    known = tuple(u for u in known if isinstance(u, str) and re.fullmatch(r"https?://[^\s<>\"']+", u))
     old = _load(uid, section, faculty, department) or _read_cache(CACHE / f"{_key(uid, section, faculty, department)}.json")
     result = {"version": CACHE_VERSION, "collection_version": COLLECTION_VERSION,
               "uid": uid, "section": section, "faculty": faculty, "department": department,
@@ -1798,6 +1890,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
     spawned: list[asyncio.Task] = []  # süren okuma görevleri; bloktan çıkılırken bırakılır (_reaper)
     cut_short = False  # dolu ders tablosu gelince bazı okumalar yarıda bırakıldı: denenen tarifler "tutmadı" sayılmaz
     direct_hit = False  # ders tablosu kalıcı program dizininden doğrudan okundu: ana sayfa, arama ve gezinti atlanır
+    index_used = False  # kısa yolda dizin adayları denendi (sonucu dizinin tutma/tutmama sayacına yazılır)
 
     def urgent() -> bool:
         return mode == "urgent" or progress_key in URGENT_KEYS
@@ -1831,7 +1924,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
             domain = registrable(urlsplit(home).hostname or "")
             async with public_client(timeout=12, headers={"User-Agent": USER_AGENT, "Accept-Language": "tr"}) as client, \
                     _reaper(spawned):
-                async def fetch(url, is_home):
+                async def download(url, is_home):
                     limit = 8_000_000 if section == "courses" else 4_000_000
                     if not is_home:
                         return await _hedged(client, url, limit)
@@ -1844,6 +1937,25 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         if got.status >= 400 or not got.html:
                             raise ValueError(f"HTTP {got.status}")
                         return got.html.encode("utf-8"), "text/html", got.url or url
+
+                async def fetch(url, is_home):
+                    """Ağdan okuma, alan adı başına nazik: aynı anda en çok üç istek. Site bağlantıyı kesmeye başladıysa
+                    (çok sık istek) arka plan o siteyi bir süre bırakır; kullanıcı bekliyorsa kısa bir aradan sonra dener."""
+                    state = _host(url)
+                    cooling = state["cool"] - time.time()
+                    if cooling > 0:
+                        if not urgent():
+                            raise ValueError("site bağlantıyı kesiyor; arka plan isteği ertelendi")
+                        await asyncio.sleep(min(cooling, 5))
+                    async with state["gate"]:
+                        try:
+                            got = await download(url, is_home)
+                        except (httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError):
+                            state["fails"] += 1
+                            state["cool"] = time.time() + min(45, 6 * state["fails"])
+                            raise
+                        state["fails"] = 0
+                        return got
 
                 async def fetch_shared(url, is_home):
                     """Önbellekte varsa oradan; başka bir tarama aynı sayfayı şu an indiriyorsa onu bekler."""
@@ -1882,6 +1994,18 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         page["via_title"] = clean(link.get("title") or "")
                     return page
 
+                def document(final, lines, parent, link):
+                    """PDF / Excel / Word belgesi sayfa gibi değerlendirilir. Haftalık ders programıysa (gün/saat çizelgesi)
+                    ders listesi sayılmaz ve modelle ders çıkarmaya verilmez."""
+                    text = clean(lines)[:26000]
+                    schedule = section == "courses" and _timetable(lines)
+                    if schedule:
+                        trace.append(f"haftalık ders programı (ders planı değil): {final}"[:220])
+                    title = (link or {}).get("title") or "Kurum belgesi"
+                    return linked(_scope({"url": final, "title": title, "heading": text[:700], "pdf": True, "timetable": schedule,
+                                          "text": text, "links": [], "course_items": [] if schedule else _pdf_courses(lines, final)},
+                                         faculty, department, parent, link), parent, link)
+
                 async def read(url, *, is_home=False, parent=None, link=None):
                     nonlocal domain, home
                     async with _LIMIT(urgent()):
@@ -1905,23 +2029,15 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                                     return "\n".join(p.extract_text() or "" for p in pdf.pages[:20])
                                 try:
                                     lines = await asyncio.wait_for(asyncio.to_thread(pdf_text), 8)
-                                    text = clean(lines)[:26000]
-                                    title = (link or {}).get("title") or "Kurum belgesi"
-                                    return linked(_scope({"url": final, "title": title, "heading": text[:700], "pdf": True,
-                                                          "text": text, "links": [], "course_items": _pdf_courses(lines, final)},
-                                                         faculty, department, parent, link), parent, link)
+                                    return document(final, lines, parent, link)
                                 except Exception:
                                     return None  # Görüntü PDF'si veya okunamayan belge bağlantı olarak kalır.
                             if raw[:2] == b"PK" and (re.search(r"\.(?:xlsx|docx)(?:\?|$)", final, re.I) or "officedocument" in mime):
                                 # Öğretim planı Excel/Word belgesi: metni satır satır okunur, PDF gibi değerlendirilir.
                                 try:
                                     lines = await asyncio.wait_for(asyncio.to_thread(_office_text, raw), 8)
-                                    text = clean(lines)[:26000]
-                                    title = (link or {}).get("title") or "Kurum belgesi"
-                                    trace.append(f"belge okundu: {final} · {len(text)} karakter"[:220])
-                                    return linked(_scope({"url": final, "title": title, "heading": text[:700], "pdf": True,
-                                                          "text": text, "links": [], "course_items": _pdf_courses(lines, final)},
-                                                         faculty, department, parent, link), parent, link)
+                                    trace.append(f"belge okundu: {final} · {len(clean(lines)[:26000])} karakter"[:220])
+                                    return document(final, lines, parent, link)
                                 except Exception:  # noqa: BLE001 — bozuk ya da şifreli belge bağlantı olarak kalır
                                     return None
                             if "html" not in mime:
@@ -1940,6 +2056,9 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                                                                    headers={"X-Requested-With": "XMLHttpRequest", "Referer": final})
                                         extra = _form_link(plan, answer.json() if answer.status_code == 200 else None, department)
                                         if extra and registrable(urlsplit(extra["url"]).hostname or "") == domain:
+                                            # Program listesindeki satır bölümün adını taşıyor: açılan sayfa o bölüme aittir
+                                            # ve kardeş bölümler için giriş sayfası bu form sayfasıdır (bkz. _scope).
+                                            extra["form"] = True
                                             page["links"].append(extra)
                                             trace.append(f"seçim formu dolduruldu: {extra['url']}"[:220])
                                         else:
@@ -1962,8 +2081,11 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                                     trace.append(f"veri isteği (tarayıcısız): {api} · {len(page['course_items'])} ders"[:220])
                             # Kabuk sayfa (içerik betikle doluyor): hangi site/sistem olduğuna bakılmadan çizilir. Onaylı
                             # tarifle çalışan arka plan tarayıcı açmaz; çizilmiş kopya önbellekteyse zaten onu okur.
+                            # Ana sayfada birimlere götüren hiçbir bağlantı yoksa menü betikle doluyordur: kullanıcı beklerken
+                            # ana sayfa da çizilir (arama sonuç vermediğinde ilerlemenin tek yolu).
                             shell = (section == "courses" and not page["course_items"] and "rendered" not in mime
-                                     and live() != "recipe" and _shell(html, page))
+                                     and live() != "recipe" and (_shell(html, page) or (
+                                         is_home and urgent() and "<script" in html.lower() and _routeless(page))))
                             if shell or (section == "courses" and not page["course_items"] and "rendered" not in mime
                                     and (len(page["text"]) < 300 or catalog and len(page["text"]) < 5000)
                                     and len(page.get("links") or []) < 25
@@ -1978,6 +2100,10 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                                     page = _page(rendered[0], rendered[1], domain)
                                     # Çizilmiş hali saklanır: kardeş bölümler aynı sayfa için tarayıcı açmaz.
                                     _cache_page(url, rendered[0].encode("utf-8"), "text/html; rendered", rendered[1])
+                            if section == "courses" and _timetable(page["text"]):
+                                # Haftalık ders programı (gün/saat çizelgesi): ders kodu geçse de ders planı değildir.
+                                page["timetable"], page["course_items"] = True, []
+                                trace.append(f"haftalık ders programı (ders planı değil): {final}"[:220])
                             page = _scope(page, faculty, department, parent, link)
                             # Bölüm/fakülte sitesi kurumun kendi menüsünden eşlendi: altındaki sayfalar o birime aittir.
                             if dept_root and _under(final, dept_root) is not None:
@@ -2007,8 +2133,9 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                             return None
 
                 def hit(page) -> bool:
-                    """Sayfa seçilen birimin doğrulanmış ders tablosunu taşıyor mu."""
-                    return bool(section == "courses" and page and page.get("course_items")
+                    """Sayfa seçilen birimin doğrulanmış ders tablosunu taşıyor mu. Bölüm seçiliyken birkaç ders satırı
+                    (laboratuvar ya da tanıtım sayfasında geçen ders kodları) ders tablosu sayılmaz; tarama sürer."""
+                    return bool(section == "courses" and page and len(page.get("course_items") or []) >= (MIN_TABLE if department else 1)
                                 and _scope_matches(page, faculty, department))
 
                 def strong(page) -> bool:
@@ -2093,41 +2220,61 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         seen.update(_url_key(p["url"]) for p in got)
                         return got
 
+                    async def follow(got) -> bool:
+                        """Program sayfasında tablo yoksa bölüme ait sayfaların ders bağlantıları (ders planı, müfredat)
+                        izlenir; en çok iki adım."""
+                        for _ in range(2):
+                            if any(strong(p) for p in pages):
+                                return True
+                            ranked = {}
+                            for page in got:
+                                if not page.get("department_verified"):
+                                    continue
+                                for link in page["links"]:
+                                    rank = _candidate(link, page, section, faculty, department)
+                                    if (rank is not None and rank >= 200 and _url_key(link["url"]) not in seen
+                                            and rank > ranked.get(link["url"], (0,))[0]):
+                                        ranked[link["url"]] = (rank, link, page)
+                            if not ranked:
+                                break
+                            got = await visit(sorted(ranked.values(), key=lambda row: (-row[0], row[1]["url"].count("/"), row[1]["url"])))
+                        return any(strong(p) for p in pages)
+
+                    nonlocal index_used
+                    tried_known = False
+                    if known:
+                        # Veri setinde kayıtlı program sayfası (ders bilgi paketindeki adresi): ilk o okunur. Bağlantı
+                        # bölümün adını taşıdığı için açılan sayfa bölüme ait sayılır.
+                        origin = {"url": home, "title": "", "heading": "", "links": [], "indexed": True, "department_verified": False,
+                                  "faculty_verified": False, "context_quote": "", "context_source_url": home}
+                        report("Kayıtlı program sayfası okunuyor…")
+                        trace.append(("kısa yol (kayıtlı adres): " + ", ".join(known[:3]))[:220])
+                        tried_known = True
+                        if await follow(await visit([(1000, {"title": department, "url": address, "groups": ["courses"],
+                                                              "language": "", "faculty_context": ""}, origin) for address in known[:3]])):
+                            return True
+                    if _index(uid)["off"] > time.time():
+                        return False if tried_known else None
                     rows = _direct_targets(uid, faculty, department)
                     if not rows and faculty:
                         lists = _direct_targets(uid, "", faculty, lists=True)
                         if not lists:
-                            return None
+                            return False if tried_known else None
+                        index_used = True
                         report("Fakültenin program listesi kayıtlı dizinden okunuyor…")
                         trace.append(("kısa yol (fakülte listesi): " + ", ".join(link["url"] for _, link, _ in lists[:3]))[:220])
                         rows = _direct_targets(uid, faculty, department, await visit(lists))
                         if not rows:
                             return False
                     if not rows:
-                        return None
+                        return False if tried_known else None
+                    index_used = True
                     report("Program sayfası kayıtlı dizinden okunuyor…")
                     trace.append(("kısa yol: " + ", ".join(link["url"] for _, link, _ in rows[:3]))[:220])
-                    got = await visit(rows)
-                    for _ in range(2):
-                        if any(strong(p) for p in pages):
-                            return True
-                        # Program sayfasında tablo yok: bölüme ait sayfaların ders bağlantıları (ders planı, müfredat) izlenir.
-                        ranked = {}
-                        for page in got:
-                            if not page.get("department_verified"):
-                                continue
-                            for link in page["links"]:
-                                rank = _candidate(link, page, section, faculty, department)
-                                if (rank is not None and rank >= 200 and _url_key(link["url"]) not in seen
-                                        and rank > ranked.get(link["url"], (0,))[0]):
-                                    ranked[link["url"]] = (rank, link, page)
-                        if not ranked:
-                            break
-                        got = await visit(sorted(ranked.values(), key=lambda row: (-row[0], row[1]["url"].count("/"), row[1]["url"])))
-                    return any(strong(p) for p in pages)
+                    return await follow(await visit(rows))
 
                 search, guessed = None, None
-                if section == "courses" and department and _index(uid)["off"] <= time.time():
+                if section == "courses" and department and (known or _index(uid)["off"] <= time.time()):
                     # Kısa yol kendi süre sınırıyla çalışır; tutmazsa ya da hata verirse tarama aşağıda eskisi gibi sürer.
                     outcome = None
                     try:
@@ -2138,9 +2285,19 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         trace.append(f"kısa yol tamamlanamadı: {type(exc).__name__}: {exc}"[:220])
                     if outcome is not None:
                         direct_hit = bool(outcome)
-                        _index_result(uid, direct_hit)
-                        trace.append("kısa yol tuttu: ders tablosu dizindeki adresten okundu" if direct_hit
+                        if index_used:
+                            _index_result(uid, direct_hit)
+                        trace.append("kısa yol tuttu: ders tablosu kayıtlı adresten okundu" if direct_hit
                                      else "kısa yol tutmadı: tam tarama")
+                if section == "courses" and department and not dept_root and not direct_hit:
+                    # Bölümün kendi sitesi daha önce bir liste sayfasında görüldüyse (kalıcı dizin) ana sayfanın okunması
+                    # beklenmez: öğrenilmiş yollar (…/lisans/mufredat) hemen o siteye uygulanır.
+                    try:
+                        dept_root = _find_dept_root([{"links": _index_links(uid)}], department, home)
+                    except Exception:  # noqa: BLE001 — dizin yardımcıdır
+                        dept_root = ""
+                    if dept_root:
+                        trace.append(f"bölüm sitesi dizinden: {dept_root}"[:220])
                 home_task = None if direct_hit else asyncio.create_task(read(home, is_home=True))
                 if home_task is not None:
                     spawned.append(home_task)
@@ -2164,6 +2321,10 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                     seeds += hubs
                     hub_set = {_url_key(h) for h in hubs}
                     tried.update(f"hub:{h}" for h in hubs)
+                    if not only_trusted:
+                        # Yaygın adreslerde bulunmuş ders bilgi paketi girişleri (bkz. probe_catalogs): liste sayfası tarifi
+                        # çıkana kadar başlangıç sayfası olarak okunur (ortak liste sayfası sayılmaz).
+                        seeds += [entry for entry in _index(uid)["catalogs"] if entry not in seeds][:2]
                 seeds = list(dict.fromkeys(seeds))[:8]
                 hub_task = asyncio.create_task(read_all([read(url) for url in seeds])) if seeds else None
                 if hub_task is not None:
@@ -2177,6 +2338,10 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         # yapan sitelerde bölümün İngilizce adıyla da aranır; iki arama paralel, sonuçlar birleşir.
                         nonlocal searched
                         searched = True
+                        if _SEARCH["off"] > time.time():
+                            # Arama motorları art arda boş döndü (engel / istek sınırı): sonuç beklemek yalnız süre kaybettirir.
+                            trace.append("arama atlandı: arama motorları son denemelerde sonuç vermedi")
+                            return None
                         queries = [f"{department} ders müfredatı"]
                         if english := (ALIASES.get(fold(department)) or [""])[0]:
                             queries.append(f"{english} curriculum courses")
@@ -2188,6 +2353,10 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
 
                         async def both():
                             found = await asyncio.gather(*(site_results_race(home, q, engine_log, k=4) for q in queries), return_exceptions=True)
+                            # Üç arama art arda boş dönerse arama 10 dakika atlanır; sonuç gelince sayaç sıfırlanır.
+                            _SEARCH["zero"] = 0 if any(isinstance(part, list) and part for part in found) else _SEARCH["zero"] + 1
+                            if _SEARCH["zero"] >= 3:
+                                _SEARCH["off"] = time.time() + 600
                             if engines and not any(isinstance(part, list) and part for part in found):
                                 trace.append(("arama motorları: " + " | ".join(engines))[:300])  # hiç sonuç yok: hangi motor ne dedi
                             rows, seen = [], set()
@@ -2206,7 +2375,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                     if guess:
                         tried.add("pattern")
                         guessed = await read(guess)
-                    if (not search and live() != "recipe"
+                    if (not search and not searched and live() != "recipe"
                             and not (guessed and guessed.get("course_items") and _scope_matches(guessed, faculty, department))):
                         search = start_search()  # keşif: tarif tutmadıysa arama (onaylı tarifle çalışan arka plan aramaz)
                 # Ana sayfa ile tarif sayfaları birlikte beklenir. Dolu ders tablosu kısa yoldan, adres kalıbından ya da
@@ -2289,7 +2458,10 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         if _url_key(hit["url"]) in seen:
                             continue
                         seen.add(_url_key(hit["url"]))
-                        hits.append({"title": hit.get("title") or department, "url": hit["url"], "groups": ["courses"], "language": ""})
+                        # "search": bağlantı kurumun sayfasından değil arama sonucundan geliyor; adı bölüm adı olsa da tek
+                        # başına sayfanın bölüme ait olduğunu göstermez (bkz. _scope).
+                        hits.append({"title": hit.get("title") or department, "url": hit["url"], "groups": ["courses"],
+                                     "language": "", "search": True})
                     if hits:
                         attempted += len(hits)
                         pages.extend(p for p in await read_all([read(h["url"], parent=first, link=h) for h in hits]) if p)
@@ -2316,7 +2488,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         if (page.get("course_items") or not page.get("department_verified") or len(page.get("text") or "") < 500
                                 or not (page.get("pdf") or page.get("guided") or re.search(
                                     r"mufredat|ogretim ?plan|ders ?plan|ders ?icerik|dersler|curriculum|course|akts|ects|bolumdersleri", hint))
-                                or re.search(r"haftalik|sinav|takvim|duyuru|haber", hint)):
+                                or page.get("timetable") or re.search(r"haftalik|sinav|takvim|duyuru|haber", hint)):
                             continue
                         if extractions >= (3 if urgent() else 1):
                             return
@@ -2391,9 +2563,46 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                                                                   for _, link, owned in picks) or "bağlantı seçmedi"))[:300])
                     return picks
 
+                async def probe_catalogs() -> None:
+                    """Arama sonuç vermedi ve bilinen bir liste sayfası yok: kurumun alan adında ders bilgi paketi / öğrenci
+                    bilgi sistemi için yaygın adresler yoklanır (obs., bologna., ects., ebs. …). Üniversite başına 30 günde
+                    bir yapılır; bulunan giriş sayfaları dizine yazılır ve sonraki bölümlerde başlangıç sayfası olur."""
+                    data = _index(uid)
+                    if time.time() - data["probed"] < 30 * 24 * 3600 or data["catalogs"] or _hubs(uid):
+                        return
+                    data["probed"] = time.time()
+                    _INDEX_DIRTY.add(uid)
+                    guesses = [f"https://{name}.{domain}/" for name in CATALOG_NAMES] + [f"https://obs.{domain}/oibs/bologna/index.aspx"]
+                    guesses = [guess for guess in guesses if _url_key(guess) not in seen]
+                    report("Ders bilgi paketi adresleri yoklanıyor…")
+
+                    async def knock(address):
+                        try:
+                            return await asyncio.wait_for(read(address), 6)
+                        except (TimeoutError, asyncio.TimeoutError):
+                            return None
+
+                    known_keys = {_url_key(p["url"]) for p in pages}
+                    entries = []
+                    for new in await read_all([knock(guess) for guess in guesses]):
+                        # Her alt alan adını ana siteye yönlendiren kurumlarda yoklama ana sayfayı döndürür: sayılmaz.
+                        if (not new or _url_key(new["url"]) in known_keys
+                                or not _CATALOG_HOST.match(urlsplit(new["url"]).hostname or "")):
+                            continue
+                        known_keys.add(_url_key(new["url"]))
+                        entries.append(new)
+                    pages.extend(entries)
+                    seen.update(_url_key(guess) for guess in guesses)  # açılmayan adresler gezintide yeniden denenmez
+                    seen.update(_url_key(p["url"]) for p in entries)
+                    data["catalogs"] = [p["url"] for p in entries][:4]
+                    trace.append(("ders bilgi paketi yoklaması: " + (", ".join(data["catalogs"]) or "bulunamadı"))[:300])
+
                 if not found():  # tarif tuttuysa arama beklenmez
-                    report("Arama sonuçları bekleniyor…")
+                    if search:
+                        report("Arama sonuçları bekleniyor…")
                     await use_search(3)
+                if not found() and section == "courses" and department and live() != "recipe":
+                    await probe_catalogs()
                 started, base_attempted = time.monotonic(), attempted
 
                 def budget() -> tuple[int, float]:
@@ -2518,7 +2727,10 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
             scoped = bool(faculty or department)
             evidence_pages = [i for i, page in enumerate(pages) if not scoped or _scope_matches(page, faculty, department)]
             if section == "courses" and department:
-                source = next((p for p in pages if p.get("course_items") and _scope_matches(p, faculty, department)), None)
+                # Tarif yalnız dolu ders tablosundan öğrenilir: birkaç ders kodu geçen sayfa (laboratuvar, tanıtım) "tutan
+                # yol" sayılırsa kardeş bölümler de o yanlış sayfaya gider.
+                source = next((p for p in pages if len(p.get("course_items") or []) >= STRONG_TABLE
+                               and _scope_matches(p, faculty, department)), None)
                 hits: set[str] = set()
                 if source:
                     src = urlsplit(source["url"])
@@ -2621,16 +2833,24 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                         result["groups"][section]["items"].append({**item,
                             "context_quote": page.get("context_quote", ""),
                             "context_source_url": page.get("context_source_url", page["url"])})
+                thin = len(result["groups"][section]["items"])
+                _thin(result["groups"][section], department)
+                if thin and not result["groups"][section]["items"]:
+                    trace.append(f"ders planı sayılmadı: yalnız {thin} ders satırı bulundu")
             catalog_ready = section == "courses" and bool(result["groups"][section]["items"])
             if catalog_ready:
                 result["groups"][section]["format"] = "course_catalog"
+            # Bölümün ders planı aranırken genel özet modeli kullanılmaz: ders planı ya tablo olarak (ya da modelle ders
+            # satırı çıkarılarak) bulunur ya da bulunamamıştır. Özet modeli tanıtım cümlesini "1 ders" gibi gösteriyor ve
+            # sonuç yokken 20 saniye daha bekletiyordu; bulunamadığında resmî bağlantılar gösterilir.
+            summarize = not (section == "courses" and department)
             # Model yalnız kullanıcı beklerken ve ders tablosu bulunamadığında devreye girer; arka plan modelsiz çalışır.
-            if callable(llm) and evidence_pages and not catalog_ready and urgent():
+            if summarize and callable(llm) and evidence_pages and not catalog_ready and urgent():
                 try:
                     llm = await llm()
                 except Exception:
                     llm = None
-            if not catalog_ready and evidence_pages and urgent() and llm and not callable(llm) and llm.available:
+            if summarize and not catalog_ready and evidence_pages and urgent() and llm and not callable(llm) and llm.available:
                 schema = {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {
                     "group": {"type": "string", "enum": [section]}, "title": {"type": "string"}, "detail": {"type": "string"},
                     "period": {"type": "string"}, "quote": {"type": "string"}, "context_quote": {"type": "string"}, "page": {"type": "integer"}},
@@ -2688,7 +2908,7 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
                 except Exception:
                     if not result["groups"][section]["items"]:
                         result["errors"].append("Sayfa özetleri hazırlanamadı; bulunan resmî bağlantılar gösteriliyor.")
-            elif not catalog_ready and evidence_pages and urgent() and not result["groups"][section]["items"]:
+            elif summarize and not catalog_ready and evidence_pages and urgent() and not result["groups"][section]["items"]:
                 result["errors"].append("Sayfa özetleri için yapay zekâ bağlantısı gerekli; resmî bağlantılar gösteriliyor.")
             result["status"] = "done" if not result["errors"] else "partial"
     except TimeoutError:
@@ -2717,7 +2937,9 @@ async def _collect(uid: str, llm, section: str, faculty: str, department: str, d
     if old:
         for key, previous in old.get("groups", {}).items():
             group = result["groups"].get(key)
-            if (group is not None and (section != "courses" or previous.get("format") == "course_catalog" and previous.get("items")) and (previous.get("items") or previous.get("links"))
+            if (group is not None and (section != "courses" or previous.get("format") == "course_catalog"
+                                       and len(previous.get("items") or []) >= (MIN_TABLE if department else 1))
+                    and (previous.get("items") or previous.get("links"))
                     and not group["items"] and (result["errors"] or not group["links"])):
                 result["groups"][key] = {**previous,
                     "links": group["links"] or previous.get("links", []),
@@ -2744,9 +2966,26 @@ async def get(uid: str, llm, refresh: bool = False, section: str | None = None, 
     if section == "courses":
         department, note = _scoped(faculty, department)
     saved = _load(uid, section, faculty, department)
+    # Hazır veri seti (data/poc): bölümün dersleri oradaysa tarama yapılmadan anında döner. "Yeniden tara" veri setini
+    # atlar; canlı taramanın getirdiği ders planı veri setinden yeniyse o gösterilir. Veri setinde ders yoksa bölümün
+    # sitesi ve ders bilgi paketi adresi canlı taramaya başlangıç olarak verilir.
+    ready, unit, known = None, None, ()
+    if section == "courses" and department:
+        try:
+            ready, unit, known = await _dataset(uid, faculty, department)
+        except Exception:  # noqa: BLE001 — veri seti yardımcıdır; okunamazsa canlı tarama sürer
+            ready, unit, known = None, None, ()
+        if unit and unit.get("url") and not dept_url:
+            dept_url = unit["url"]
+    extra = {"program_note": note, **({"unit": unit} if unit else {})}
+    if ready and not refresh:
+        rows = ((saved or {}).get("groups") or {}).get(section) or {}
+        newer = saved and saved.get("checked_at", 0) > ready["checked_at"] and len(rows.get("items") or []) >= MIN_TABLE
+        if not newer:
+            return {**ready, "uid": uid, "section": section, "faculty": faculty, "department": department, **extra}
     # Kayıtlı bilgiler kullanıcı açıkça yenileyene kadar tekrar taranmaz.
     if saved and not refresh:
-        return {**saved, "cached": True, "program_note": note}
+        return {**saved, "cached": True, **extra}
     key = _key(uid, section, faculty, department)
     background = background and section == "courses" and bool(department)
     if background and key not in TASKS:
@@ -2792,14 +3031,14 @@ async def get(uid: str, llm, refresh: bool = False, section: str | None = None, 
                 if held and mode == "scout":
                     state["n"] += 1
             try:
-                out = await _collect(uid, llm, section, faculty, department, dept_url, faculty_url, mode, refresh)
+                out = await _collect(uid, llm, section, faculty, department, dept_url, faculty_url, mode, refresh, known)
             finally:
                 if held:
                     state["sem"].release()
             empty = not ((out.get("groups") or {}).get(section) or {}).get("items")
             if section == "courses" and department and empty and not out.get("skipped") and set(_recipes(uid)) - before:
                 # Bu tarama sürerken kardeş bölüm sitenin yapısını öğrendi (yeni tarif): bir kez daha, öğrenilen yoldan.
-                out = await _collect(uid, llm, section, faculty, department, dept_url, faculty_url, "urgent", refresh)
+                out = await _collect(uid, llm, section, faculty, department, dept_url, faculty_url, "urgent", refresh, known)
             return out
         task = TASKS[key] = asyncio.create_task(run())
         def done(completed):
@@ -2814,7 +3053,34 @@ async def get(uid: str, llm, refresh: bool = False, section: str | None = None, 
     if out.get("skipped") and not background:
         # Arka plan denemesi tam bu sırada boş bitti: kullanıcı için tam tarama.
         return await get(uid, llm, refresh, section, False, faculty, department, dept_url, faculty_url, trusted)
-    return {**out, "program_note": note}
+    if ready and not ((out.get("groups") or {}).get(section) or {}).get("items"):
+        # "Yeniden tara" ders planına ulaşamadı: hazır veri setindeki dersler gösterilmeye devam eder.
+        return {**ready, "uid": uid, "section": section, "faculty": faculty, "department": department, **extra,
+                "errors": ["Canlı tarama ders planına ulaşamadı; hazır veri setindeki dersler gösteriliyor."]}
+    return {**out, **extra}
+
+
+async def _dataset(uid: str, faculty: str, department: str) -> tuple:
+    """Hazır veri setinde (data/poc, bkz. poc_dataset) bölümü arar: (hazır sonuç | None, birim bilgisi | None, bilinen
+    adresler). Hazır sonuç kayıtlı bir tarama sonucuyla aynı biçimdedir (status="dataset"); birim bilgisi dekan, bölüm
+    başkanı, mezunların iş alanları ve bölüm sitesidir; bilinen adres bölümün ders bilgi paketindeki sayfasıdır."""
+    from . import poc_dataset
+    if not poc_dataset.available():
+        return None, None, ()
+    home = await university_home(uid)
+    if not home:
+        return None, None, ()
+    found = await asyncio.to_thread(poc_dataset.lookup, _MOVED.get(registrable(urlsplit(home).hostname or ""), home), faculty, department)
+    if not found:
+        return None, None, ()
+    unit = found.get("unit") or None
+    known = tuple(u for u in ((unit or {}).get("bologna_url"),) if u)
+    ready = None
+    if found.get("group"):
+        ready = {"version": CACHE_VERSION, "collection_version": COLLECTION_VERSION, "groups": {"courses": found["group"]},
+                 "checked_at": found.get("generated") or 0, "pages_read": 0, "home": home, "status": "dataset", "errors": [],
+                 "cached": True}
+    return ready, unit, known
 
 
 # ------------------------------------------------------------------ bağlantı önizlemesi (bağlantının içeriği)

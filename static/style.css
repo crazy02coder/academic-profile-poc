@@ -2443,3 +2443,98 @@ html.page-vt.tx-perspective.tx-back::view-transition-new(page) { z-index: 1; ani
 .aday-past { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 12px; color: var(--muted); }
 .aday-trend { display: block; font-size: 11.5px; }
 .aday-trend.up { color: #c2410c; } .aday-trend.down { color: #15803d; }
+
+/* Veri geldikçe yerine yerleşme (flyIn): kopyalar bütün pencerenin üstündeki bu katmanda üç boyutlu uçar.
+   perspective ve perspective-origin değerleri app.js içindeki flyIn hesabıyla aynıdır (1200px, %50 %40). */
+.flight-layer { position: fixed; inset: 0; z-index: 2147483000; overflow: hidden; pointer-events: none; perspective: 1200px; perspective-origin: 50% 40%; }
+.flight-ghost { position: absolute; margin: 0 !important; box-sizing: border-box; overflow: hidden; pointer-events: none; backface-visibility: hidden; will-change: transform, opacity, filter; }
+.flight-pad { position: absolute; box-sizing: border-box; border: 1.5px dashed color-mix(in srgb, var(--blue) 45%, transparent); background: color-mix(in srgb, var(--blue) 5%, transparent); opacity: 0; }
+
+/* Birim bilgisi (hazır veri seti): dekan, bölüm başkanı, mezunların iş alanları */
+.student-unit { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 0 0 14px; }
+.student-unit > span { display: grid; gap: 2px; min-width: 0; padding: 9px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); font-size: 13px; }
+.student-unit > span > small { color: var(--muted); font-size: 11px; letter-spacing: .02em; }
+.student-unit > span > b { font-weight: 600; overflow-wrap: anywhere; }
+.student-unit-careers { flex: 1 1 100%; }
+.student-unit-careers > p, .student-unit-careers > .chips { margin: 0; padding: 10px 14px 14px; }
+
+/* Kimlik kapağı — yeniden tasarım (profil, üniversite ve firma sayfaları). Önceki katmanların üstüne yazar.
+   Kapak: kurum renginden doygun, katmanlı bir zemin (kurum rengi yoksa nötr) ve ince bir doku; kırpılan dev filigran
+   logo yok. Profilde kurum, kapağın sağ üstünde logo + ad taşıyan bir rozetle gösterilir. Fotoğraf daireyi tam
+   doldurur; kurum logosu beyaz karoya sığdırılır (kırpılmaz). */
+.identity-hero { --cover-a: var(--surface-3); --cover-b: var(--line-2); --cover-ink: var(--text); border-radius: 22px; overflow: visible; }
+.identity-hero.has-org-color { --cover-a: color-mix(in srgb, var(--org-color) 84%, #0b1020); --cover-b: color-mix(in srgb, var(--org-color) 58%, #ffffff); --cover-ink: #ffffff; }
+.identity-hero .identity-cover, .identity-hero.has-org-color .identity-cover,
+:root[data-theme="dark"] .identity-hero.has-org-color .identity-cover {
+  position: relative; height: 176px; min-height: 0; padding: 0; overflow: hidden; border: 0;
+  border-top-left-radius: 22px; border-top-right-radius: 22px; isolation: isolate;
+  background:
+    radial-gradient(90% 150% at 0% 0%, color-mix(in srgb, var(--cover-b) 70%, transparent) 0%, transparent 62%),
+    radial-gradient(70% 130% at 100% 100%, color-mix(in srgb, var(--cover-a) 80%, #000000) 0%, transparent 60%),
+    linear-gradient(118deg, var(--cover-a) 0%, var(--cover-b) 100%);
+}
+.identity-org .identity-cover, .identity-org.has-org-color .identity-cover { height: 148px; }
+/* İnce doku: çapraz çizgiler ve alttan yumuşak geçiş (kapak düz bir renk bandı gibi durmaz). */
+.identity-hero .identity-cover::before, .identity-hero.has-org-logo .identity-cover::before {
+  content: ""; display: block; position: absolute; inset: 0; width: auto; z-index: 0; opacity: 1; mix-blend-mode: normal; pointer-events: none;
+  background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--cover-ink) 9%, transparent) 0 1px, transparent 1px 14px);
+  -webkit-mask-image: linear-gradient(100deg, transparent 0%, #000 45%, #000 100%); mask-image: linear-gradient(100deg, transparent 0%, #000 45%, #000 100%);
+}
+.identity-hero .identity-cover::after {
+  content: ""; display: block; position: absolute; inset: auto 0 0 0; height: 56%; z-index: 0; pointer-events: none;
+  background: linear-gradient(to top, color-mix(in srgb, #000000 16%, transparent), transparent);
+}
+:root[data-theme="dark"] .identity-hero { --cover-a: #18181b; --cover-b: #2f2f33; }
+:root[data-theme="dark"] .identity-hero.has-org-color { --cover-a: color-mix(in srgb, var(--org-color) 62%, #050507); --cover-b: color-mix(in srgb, var(--org-color) 78%, #1b1b1e); }
+
+/* Profil kapağındaki kurum rozeti: logo beyaz karoda, ad yanında; kapağın rengi ne olursa olsun okunur. */
+.identity-hero .ph-institution {
+  position: absolute; inset: 18px 18px auto auto; z-index: 1; transform: none; display: inline-flex; flex-direction: row; align-items: center; gap: 10px;
+  width: auto; height: auto; max-width: min(72%, 420px); padding: 7px 14px 7px 7px; border: 1px solid rgba(255, 255, 255, .55); border-radius: 16px;
+  background: rgba(255, 255, 255, .86); -webkit-backdrop-filter: blur(10px) saturate(1.2); backdrop-filter: blur(10px) saturate(1.2);
+  box-shadow: 0 10px 26px -14px rgba(0, 0, 0, .45); color: #111113; font-size: 13px; font-weight: 700; letter-spacing: -.01em; text-align: left;
+}
+.identity-hero .ph-institution > span { display: inline; max-width: none; white-space: normal; overflow: visible; overflow-wrap: anywhere; line-height: 1.3; }
+.identity-hero .ph-institution .band-logo {
+  order: 0; flex: 0 0 auto; display: inline-grid; place-items: center; width: 40px; height: 40px; border-radius: 11px;
+  background: #ffffff !important; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .06) !important; overflow: hidden;
+}
+.identity-hero .ph-institution .band-logo img { position: static; width: 100%; height: 100%; padding: 5px; object-fit: contain; object-position: center; }
+.identity-hero .ph-institution .band-logo .logo-fallback { font-size: 13px; }
+.profile-hero .ph-band:has(.ph-institution):not(:has(.ph-slider)) { min-height: 0; padding-bottom: 0; }
+
+/* Gövde: fotoğraf / logo kapağın üstüne taşar. */
+.identity-hero:not(.identity-org) .identity-main { align-items: end; padding: 0 28px 24px; }
+.identity-hero:not(.identity-org) .identity-info { padding-top: 16px; }
+.identity-hero .identity-avatar, .identity-hero .ph-photo.identity-avatar {
+  position: relative; z-index: 2; display: grid; place-items: center; width: 132px; height: 132px; margin-top: -66px; padding: 0; overflow: hidden;
+  border: 4px solid var(--surface); border-radius: 50%; background: var(--surface-3); box-shadow: 0 14px 34px -16px rgba(0, 0, 0, .5); cursor: pointer;
+}
+/* Fotoğraf daireyi tam doldurur: yüz üstte kaldığı için kırpma yukarıdan hizalanır. */
+.identity-hero .identity-avatar img, .identity-hero .ph-photo img { position: absolute; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; object-fit: cover; object-position: 50% 18%; }
+.identity-hero .ph-photo .av { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 50%; font-size: 40px; }
+
+/* Üniversite ve firma: logo beyaz, yuvarlatılmış karoda; kırpılmadan ortalanır. */
+.identity-org .identity-main { align-items: center; padding: 0 24px 26px; }
+.identity-org .identity-avatar {
+  width: 124px !important; height: 124px !important; margin-top: -62px !important; border: 4px solid var(--surface) !important; border-radius: 30px !important;
+  background: #ffffff !important; box-shadow: 0 16px 38px -18px rgba(0, 0, 0, .5) !important; cursor: default;
+}
+.identity-hero .identity-avatar .hero-logo { position: absolute; inset: 0; display: grid; place-items: center; width: 100%; height: 100%; border-radius: 0; }
+.identity-hero .identity-avatar .hero-logo img { position: static; width: 100%; height: 100%; padding: 16px; object-fit: contain; object-position: center; }
+.identity-hero .identity-avatar .hero-logo .logo-fallback { font-size: 34px; }
+.identity-hero .identity-avatar:has(.hero-logo) { background: #ffffff; }
+
+@media (max-width: 720px) {
+  .identity-hero .identity-cover, .identity-hero.has-org-color .identity-cover { height: 132px; }
+  .identity-org .identity-cover, .identity-org.has-org-color .identity-cover { height: 116px; }
+  .identity-hero .identity-avatar, .identity-hero .ph-photo.identity-avatar { width: 104px; height: 104px; margin-top: -52px; }
+  .identity-org .identity-avatar { width: 104px !important; height: 104px !important; margin-top: -52px !important; border-radius: 26px !important; }
+  .identity-hero .ph-institution { display: inline-flex; inset: 12px 12px auto auto; max-width: calc(100% - 24px); padding: 5px 11px 5px 5px; font-size: 12px; }
+  .identity-hero .ph-institution .band-logo { width: 32px; height: 32px; }
+  .identity-hero:not(.identity-org) .identity-main, .identity-org .identity-main { padding: 0 18px 20px; }
+}
+
+/* Fotoğraf penceresi: fotoğraf çerçevesini tam doldurur (çerçeve fotoğrafın en-boy oranını alır, bkz. photoPop). */
+.pp-photo { overflow: hidden; }
+.pp-photo img { width: 100%; height: 100%; max-width: none; max-height: none; object-fit: cover; object-position: 50% 20%; }

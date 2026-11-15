@@ -588,7 +588,7 @@ function avatar(name, photo, cls = "av") {
   const img = safeImg(photo);
   return `<div class="${cls}">${esc(initials(name))}${img ? `<img src="${esc(img)}" alt="" loading="lazy" onerror="this.remove()">` : ""}</div>`;
 }
-const profilePhoto = (c) => (c.job_id ? `/api/jobs/${encodeURIComponent(c.job_id)}/photo?v=2` : "");
+const profilePhoto = (c) => (c.job_id ? `/api/jobs/${encodeURIComponent(c.job_id)}/photo?v=3` : "");
 
 const orgId = (name) => fold(name).replace(/\s+/g, "-");
 const organizationColors = new Map();
@@ -2821,6 +2821,29 @@ function studentFactCard(item, section) {
   return `<article class="sv-card"><h4>${esc(item.title)}</h4>${item.period ? `<span class="chip">${esc(item.period)}</span>` : section === "fees" ? '<span class="chip warn">Dönem belirtilmemiş</span>' : ""}
     ${item.detail ? `<p>${esc(item.detail)}</p>` : ""}${src ? `<a class="sv-src" href="${esc(src)}" target="_blank" rel="noopener">${icon("external")}${esc(hostPath(src))}</a>` : ""}</article>`;
 }
+// Hazır veri setindeki ders: amaç, içerik, haftalık konular ve öğrenme çıktıları kayıtla birlikte gelir (kaynak sayfası
+// ayrıca okunmaz). İçerik metnindeki "Haftalık konular: 1. hafta: …; 2. hafta: …" kısmı hafta listesine ayrılır.
+function datasetCourseHtml(item) {
+  const text = String(item.content || ""), cut = text.search(/Haftalık konular\s*:/i);
+  const body = (cut >= 0 ? text.slice(0, cut) : text).trim();
+  const weeks = cut < 0 ? [] : text.slice(cut).replace(/^Haftalık konular\s*:\s*/i, "").split(/;\s*(?=\d{1,2}\.\s*hafta\b)/i)
+    .map((row) => { const m = row.match(/^\s*(\d{1,2})\.\s*hafta\s*:?\s*([\s\S]*)$/i); return m ? { week: m[1], topic: m[2].trim().replace(/[;.]+$/, ""), prep: "" } : null; })
+    .filter((w) => w && w.topic);
+  const outcomes = String(item.outcomes || "").split(/\n+/).map((x) => x.replace(/^\s*\d{1,2}[.)]\s*/, "").trim()).filter(Boolean);
+  const parts = [["Dersin amacı", item.objective], ["Dersin içeriği", body]].filter(([, value]) => value && String(value).trim());
+  if (!parts.length && !weeks.length && !outcomes.length) return "";
+  return `<div class="course-description">${parts.map(([heading, value]) => `<section><h4>${heading}</h4><p>${esc(String(value).trim())}</p></section>`).join("")}${weeks.length || outcomes.length ? syllabusHtml({ weeks, outcomes }) : ""}</div>`;
+}
+// Birim bilgisi (hazır veri setinden): fakültenin dekanı, bölüm başkanı ve mezunların iş alanları.
+function studentUnitHtml(unit) {
+  if (!unit) return "";
+  const people = [["Dekan", unit.dean], ["Bölüm başkanı", unit.head]].filter(([, name]) => name);
+  const careers = Array.isArray(unit.careers) ? unit.careers.join(", ") : String(unit.careers || "");
+  if (!people.length && !careers) return "";
+  const chips = careers && programChips(careers);
+  return `<div class="student-unit">${people.map(([label, name]) => `<span><small>${label}</small><b>${esc(name)}</b></span>`).join("")}${careers
+    ? `<details class="student-links student-unit-careers"><summary>Mezunların iş alanları</summary>${chips ? `<div class="chips">${chips.map((c) => `<span class="chip teal">${esc(c)}</span>`).join("")}</div>` : `<p>${esc(careers)}</p>`}</details>` : ""}</div>`;
+}
 function studentItems(group, section) {
   const items = group.items;
   if (section === "courses" && group.format === "course_catalog") {
@@ -2830,9 +2853,9 @@ function studentItems(group, section) {
       if (!periods.has(key)) periods.set(key, []);
       periods.get(key).push(item);
     });
-    const source = (item) => `<a class="source-link" href="${esc(safeUrl(item.source_url))}" target="_blank" rel="noopener">${icon("external")}Kaynağı aç</a>`;
+    const source = (item) => safeUrl(item.source_url) ? `<a class="source-link" href="${esc(safeUrl(item.source_url))}" target="_blank" rel="noopener">${icon("external")}Kaynağı aç</a>` : "";
     const progUrl = items.map((x) => x.source_url || "").find((u) => /\/oibs\/bologna\/.*curSunit=\d+/i.test(u));
-    return `<div class="student-catalog">${progUrl && safeUrl(progUrl) ? `<div class="program-profile" data-program-url="${esc(safeUrl(progUrl))}"></div>` : ""}<p class="student-hint">${items.length} ders kaydı · İçeriği görmek için bir dönem ve ders seçin.</p>${[...periods].map(([period, courses]) => `<details class="student-term"><summary><b>${esc(period)}</b><span>${courses.length} kayıt</span>${icon("chevron")}</summary><div class="student-term-courses">${courses.map((item) => `<details class="student-course" ${safeUrl(item.detail_url) ? `data-course-url="${esc(safeUrl(item.detail_url))}"` : ""}><summary><span>${esc(item.title)}</span>${icon("chevron")}</summary><div>${item.detail ? `<p>${esc(item.detail)}</p>` : ""}${item.detail_url ? `<div class="course-description"></div>` : ""}${source(item)}</div></details>`).join("")}</div></details>`).join("")}</div>`;
+    return `<div class="student-catalog">${progUrl && safeUrl(progUrl) ? `<div class="program-profile" data-program-url="${esc(safeUrl(progUrl))}"></div>` : ""}<p class="student-hint">${items.length} ders kaydı · İçeriği görmek için bir dönem ve ders seçin.</p>${[...periods].map(([period, courses]) => `<details class="student-term"><summary><b>${esc(period)}</b><span>${courses.length} kayıt</span>${icon("chevron")}</summary><div class="student-term-courses">${courses.map((item) => `<details class="student-course" ${safeUrl(item.detail_url) ? `data-course-url="${esc(safeUrl(item.detail_url))}"` : ""}><summary><span>${esc(item.title)}</span>${icon("chevron")}</summary><div>${item.detail ? `<p>${esc(item.detail)}</p>` : ""}${item.detail_url ? `<div class="course-description"></div>` : datasetCourseHtml(item)}${source(item)}</div></details>`).join("")}</div></details>`).join("")}</div>`;
   }
   // Tablo satırları (ör. anlaşmalı kurum listeleri) ayrı, aranabilir bir listede; metin bilgileri kart olarak
   const rows = items.filter((x) => x.evidence_kind === "table"), facts = items.filter((x) => x.evidence_kind !== "table");
@@ -2864,7 +2887,11 @@ function studentSectionResult(data, section) {
   const hasItems = Boolean(group.items?.length);
   const empty = !hasItems && !links.length
     ? `<div class="sv-empty">${icon("info")}<div><b>${data.partial ? "Aranıyor…" : data.missing_note ? "Ders planı yayımlanmamış" : section === "courses" && data.errors?.length ? "Bu bölüm için ders içeriği bulunamadı" : data.errors?.length ? "Bu bilgi şu an alınamadı" : section === "work_travel" ? "Üniversitenin sitesinde Work and Travel sayfası yok" : "Resmî sayfalarda bu başlıkta bilgi bulunamadı"}</b><p>${data.partial ? "Bulunanlar geldikçe burada görünecek." : data.missing_note ? esc(data.missing_note) : section === "courses" && data.errors?.length ? "Yukarıdaki nota bakın; istersen yeniden tarayabilirsin." : data.errors?.length ? "Kurum sitesi geç yanıt vermiş olabilir; yeniden tarayabilirsin." : section === "work_travel" ? "Work and Travel genellikle özel ajanslarla yürütülür; üniversite yalnız duyuru yayımlıyorsa burada görünür. Uluslararası ofis sayfaları Erasmus başlığında." : "Kurum bu konuyu sitesinde yayımlamıyor olabilir. Asistana sorarak diğer sayfalara da baktırabilirsin."}</p></div></div>` : "";
-  return `<div class="student-section-meta"><span>${previous ? "Önceki kayıt" : "Son kontrol"}: ${date(previous || data.checked_at)} · ${fmtNum(data.pages_read || 0)} sayfa okundu</span><button class="btn sm" type="button" data-student-refresh>${icon("refresh")}Yeniden tara</button></div>
+  // Hazır veri setinden gelen dersler taranmadan gösterilir; "Yeniden tara" üniversitenin sitesini canlı tarar.
+  const checked = data.status === "dataset" ? `Hazır veri setinden · ${date(data.checked_at)}`
+    : `${previous ? "Önceki kayıt" : "Son kontrol"}: ${date(previous || data.checked_at)} · ${fmtNum(data.pages_read || 0)} sayfa okundu`;
+  return `<div class="student-section-meta"><span>${checked}</span><button class="btn sm" type="button" data-student-refresh>${icon("refresh")}Yeniden tara</button></div>
+    ${studentUnitHtml(data.unit)}
     ${data.program_note ? `<div class="notice"><div>${esc(data.program_note)}</div></div>` : ""}
     ${data.errors?.length && !data.partial ? `<div class="notice warn"><div>${data.errors.map(esc).join(" ")}</div></div>` : ""}
     ${hasItems ? studentItems(group, section) : ""}${empty}
@@ -3211,21 +3238,23 @@ async function fillStudentSkeleton(details, box, data, section, d) {
     if (!catalog || !terms.length) return;
     const hint = $(".student-hint", tmp);
     if (hint) $(".student-hint", catalog).textContent = hint.textContent;
+    const flights = [];
     for (const [i, term] of terms.entries()) {
       const label = fold($("summary b", term)?.textContent || "");
       if ($$(".student-term:not(.sk-term)", catalog).some((t) => fold($("summary b", t)?.textContent || "") === label)) continue;
       const slot = $$(".sk-term", catalog).find((t) => fold($("b", t).textContent) === label) || $(".sk-term", catalog);
       updateStudentContent(details, () => { if (slot) slot.replaceWith(term); else catalog.append(term); });
-      flyIn(term, i % 2 ? 1 : -1);
-      await new Promise((r) => setTimeout(r, 110));
+      flights.push(flyIn(term, i % 2 ? 1 : -1));
+      await new Promise((r) => setTimeout(r, 130));
     }
     bindCourseDetails(box, d);
+    await Promise.all(flights);  // son dönem de yerine konmadan sonuç yeniden çizilmez (uçuş yarıda kesilmez)
     return;
   }
   const items = $$(".sv-group, .sv-item", tmp), host = $(".sk-cards", box);
   if (!host) return;
   updateStudentContent(details, () => { host.classList.remove("sk-cards"); host.innerHTML = ""; items.forEach((el) => host.append(el)); });
-  items.forEach((el, i) => setTimeout(() => flyIn(el, i % 2 ? 1 : -1), i * 90));
+  await Promise.all(items.map((el, i) => new Promise((done) => setTimeout(() => flyIn(el, i % 2 ? 1 : -1).then(done), i * 110))));
 }
 // YÖK kadrosuna fotoğraf: kişinin fakülte/bölüm sayfasındaki kartından, ad eşleşmesiyle (YÖK'e istek atmaz).
 async function addSitePhotos(box, people, faculty, department, d) {
@@ -3707,7 +3736,14 @@ function photoPop(src, linksHtml) {
   document.body.appendChild(layer); hydrateIcons(layer);
   const portrait = $(".pp-photo img", layer);
   if (portrait) {
-    const fit = () => { const w = Math.min(240, portrait.naturalWidth || 128), h = Math.min(300, portrait.naturalHeight || 160); Object.assign(portrait.parentElement.style, { width: `${w}px`, height: `${h}px`, aspectRatio: "auto" }); };
+    // Çerçeve fotoğrafın en-boy oranını alır ve fotoğraf çerçeveyi tam doldurur; küçük görsel (YÖK küçük resmi) en çok
+    // iki katına büyütülür, büyük görsel 240×320'yi aşmaz.
+    const fit = () => {
+      const nw = portrait.naturalWidth || 128, nh = portrait.naturalHeight || 160, ratio = nh / nw;
+      let w = Math.min(240, Math.max(150, nw * 2)), h = w * ratio;
+      if (h > 320) { h = 320; w = h / ratio; }
+      Object.assign(portrait.parentElement.style, { width: `${Math.round(w)}px`, height: `${Math.round(h)}px`, aspectRatio: "auto" });
+    };
     portrait.addEventListener("load", fit); if (portrait.complete) fit();
   }
   const card = $(".pp-card", layer), photo = $(".pp-photo", layer), from = src.getBoundingClientRect(), to = photo.getBoundingClientRect();
@@ -3811,7 +3847,7 @@ function renderProfile(r, chat) {
       <div class="ph-branding"><div class="ph-band identity-cover"><div class="ph-institution">${organizationLogo("universities", orgId(p.institution), p.institution, "band-logo")}<span>${esc(p.institution || "Akademik profil")}</span></div>
       </div>
       <div class="ph-body identity-main">
-        <button type="button" class="ph-photo identity-avatar" id="phPhoto" aria-label="Fotoğraf ve iletişim">${r.job_id ? `<img src="/api/jobs/${encodeURIComponent(r.job_id)}/photo?v=2" alt="${esc(p.name)}" onerror="this.hidden=true">` : avatar(p.name, safeImg(p.photo || y.photo))}</button>
+        <button type="button" class="ph-photo identity-avatar" id="phPhoto" aria-label="Fotoğraf ve iletişim">${avatar(p.name, r.job_id ? `/api/jobs/${encodeURIComponent(r.job_id)}/photo?v=3` : (p.photo || y.photo))}</button>
         <div class="ph-info identity-info">
           <div class="ph-title">${esc(p.title || "Unvan bilinmiyor")}</div>
           <h1>${esc(p.name)}</h1>
@@ -5331,14 +5367,55 @@ async function loadProgramProfile(box, d) {
   }));
   if (!got && host.isConnected) host.hidden = true;
 }
-// Ekranın dışından gelip yerine sıçrayarak oturma (hareket azaltılmışsa yalnız belirme).
+// Veri geldikçe yerine yerleşme: öğe pencerenin dışından, izleyicinin önünden (z ekseni) gelir; derinleşip küçülerek
+// kendi yerine yavaşça konur. Uçuşu, öğenin bütün pencerenin üstündeki sabit katmanda duran kopyası yapar (hiçbir kutu
+// uçuşu kırpmaz); gerçek öğe yerinde bekler ve iniş anında görünür. side: 1 sağdan, -1 soldan, 0 üstten/önden.
+// İniş bitince çözülen bir Promise döner. Hareket azaltılmışsa ya da öğe görünür alanda değilse yalnız belirir.
+let flightLayer = null;
 function flyIn(el, side = 1) {
-  if (calmMotion()) { el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200 }); return; }
-  el.animate([
-    { opacity: 0, transform: `translate(${side * 120}px, 40px) scale(.92)` },
-    { opacity: 1, transform: "translate(0, -8px) scale(1.02)", offset: .6 },
-    { transform: "translate(0, 3px) scale(.995)", offset: .8 },
-    { opacity: 1, transform: "none" }], { duration: 650, easing: "cubic-bezier(.2,.8,.3,1)" });
+  if (!el?.isConnected) return Promise.resolve();
+  const fade = () => el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220 }).finished.catch(() => {});
+  if (calmMotion()) return fade();
+  const rect = el.getBoundingClientRect(), vw = innerWidth, vh = innerHeight;
+  if (!rect.width || !rect.height || rect.bottom < 0 || rect.top > vh) return fade();
+  if (!flightLayer?.isConnected) {
+    flightLayer = document.createElement("div");
+    flightLayer.className = "flight-layer";
+    flightLayer.setAttribute("aria-hidden", "true");
+    document.body.append(flightLayer);
+  }
+  const ghost = el.cloneNode(true), look = getComputedStyle(el), pad = document.createElement("div");
+  ghost.removeAttribute("id");
+  ghost.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
+  ghost.inert = true;
+  ghost.classList.add("flight-ghost");
+  pad.className = "flight-pad";
+  const place = { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`, borderRadius: look.borderRadius };
+  // Kopya katmanda durduğu için üst öğelerinden miras kalan yazı biçimi elle taşınır; zemini saydamsa kart zemini verilir.
+  Object.assign(ghost.style, place, { font: look.font, color: look.color, letterSpacing: look.letterSpacing, textAlign: look.textAlign });
+  if (/^(?:rgba\(0, 0, 0, 0\)|transparent)$/.test(look.backgroundColor)) ghost.style.background = "var(--surface)";
+  Object.assign(pad.style, place);
+  flightLayer.append(pad, ghost);
+  // Katmanın bakış noktası pencerenin ortası (yukarıdan %40). z0 kadar öndeki kopya s kat büyük görünür; görünen
+  // merkezi bakış noktası + (merkez + öteleme − bakış noktası) × s olur. Başlangıçta kopyanın tamamı pencere dışındadır.
+  const depth = 1200, z0 = 640, s = depth / (depth - z0), ox = vw / 2, oy = vh * 0.4;
+  const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+  const x0 = side > 0 ? (vw + 60 + rect.width * s / 2 - ox) / s + ox - cx : side < 0 ? (-60 - rect.width * s / 2 - ox) / s + ox - cx : 0;
+  const y0 = side ? -Math.min(vh * 0.16, 150) : (-60 - rect.height * s / 2 - oy) / s + oy - cy;
+  const turn = side * -38, tilt = side ? 12 : -26, roll = side * 5;
+  const pose = (k, z) => `translate3d(${x0 * k}px, ${y0 * k}px, ${z}px) rotateX(${tilt * k}deg) rotateY(${turn * k}deg) rotateZ(${roll * k}deg)`;
+  el.style.visibility = "hidden";
+  // Zamanlama: uzun, yumuşak bir yaklaşma (uçuşun büyük kısmı görünür), yerine hafifçe bastırma, sonra oturma.
+  const timing = { duration: 1500, easing: "linear", fill: "both" };
+  pad.animate([{ opacity: 0 }, { opacity: .7, offset: .25 }, { opacity: .7, offset: .82 }, { opacity: 0 }], timing);
+  const flight = ghost.animate([
+    { opacity: 0, filter: "blur(6px)", transform: pose(1, z0), boxShadow: "0 60px 90px -30px rgba(15, 23, 42, .45)", easing: "cubic-bezier(.4, 0, .2, 1)" },
+    { opacity: 1, offset: .12 },
+    { filter: "blur(.6px)", transform: pose(.1, z0 * .08), offset: .7, easing: "ease-out" },
+    { filter: "blur(0px)", transform: pose(0, -20), boxShadow: "0 10px 24px -14px rgba(15, 23, 42, .3)", offset: .9, easing: "ease-in-out" },
+    { opacity: 1, filter: "blur(0px)", transform: pose(0, 0), boxShadow: "0 0 0 0 rgba(15, 23, 42, 0)" }], timing);
+  const land = () => { ghost.remove(); pad.remove(); el.style.visibility = ""; };
+  return flight.finished.then(land, land);
 }
 
 function bindCourseDetails(root, d) {

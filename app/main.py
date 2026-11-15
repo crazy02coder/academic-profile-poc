@@ -742,6 +742,21 @@ async def job_photo(jid: str):
         except (ValueError, OSError):
             continue
     if best is None:
+        # Fotoğraf gömülü değil, adres olarak kayıtlı (kurum sayfasındaki ya da YÖK'teki görselin bağlantısı): sunucu
+        # üzerinden verilir. Böylece profil ve liste görünümleri aynı adresten fotoğrafı alır; tarayıcının doğrudan
+        # yükleyemediği (http, bağlantı koruması) görseller de görünür.
+        from .config import USER_AGENT
+        from .org_assets import public_client, read_public
+        for candidate in candidates:
+            if not isinstance(candidate, str) or not re.fullmatch(r"https?://[^\s<>\"']+", candidate):
+                continue
+            try:
+                async with public_client(timeout=12, headers={"User-Agent": USER_AGENT}) as client:
+                    raw, mime, _ = await read_public(client, candidate, 3_000_000)
+            except (httpx.HTTPError, ValueError, OSError):
+                continue
+            if (mime or "").startswith("image/") and len(raw) >= 800:
+                return Response(raw, media_type=mime, headers={"Cache-Control": "public, max-age=3600"})
         raise HTTPException(404)
     return Response(best[1], media_type=best[2], headers={"Cache-Control": "public, max-age=3600"})
 
