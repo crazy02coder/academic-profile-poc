@@ -47,7 +47,8 @@ def main(source: Path) -> int:
         courses += sum(len(d.get("courses") or []) for f in data["faculties"] for d in f.get("departments") or [])
     if (source / "universities.json").exists():
         shutil.copyfile(source / "universities.json", TARGET / "universities.json")
-    print(f"{count} üniversite, {courses} ders · {raw / 1e6:.0f} MB → {packed / 1e6:.0f} MB · {TARGET}")
+    # Çıktıda yalnız her konsol kodlamasında bulunan karakterler (Windows konsolu "→" yazamıyor).
+    print(f"{count} universite, {courses} ders: {raw / 1e6:.0f} MB -> {packed / 1e6:.0f} MB, hedef: {TARGET}")
     return 0
 
 
