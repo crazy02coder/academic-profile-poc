@@ -1634,7 +1634,19 @@ async def universities():
         uni = patents._university_of(c.get("institution") or "", tokens)
         if uni:
             people.setdefault(uni, []).append({"name": c["name"], "chat_id": c["id"], "title": c.get("title")})
+    # Önce OSTİM, sonra ders bilgi paketi doğrudan okunan kurumlar (app/catalogs), kalanı alfabetik (liste zaten sıralı).
+    unis = sorted(unis, key=lambda u: _FEATURED.get(fold(u["name"]), len(_FEATURED)))
     return {"items": [{"id": u["id"], "name": u["name"], "people": people.get(u["raw"], [])} for u in unis]}
+
+
+_FEATURED = {name: order for order, names in enumerate([
+    ("ostim teknik universitesi",), ("orta dogu teknik universitesi",), ("istanbul teknik universitesi",),
+    ("bogazici universitesi",), ("koc universitesi",), ("fenerbahce universitesi",), ("ted universitesi",),
+    ("tobb ekonomi ve teknoloji universitesi",), ("marmara universitesi",), ("baskent universitesi",),
+    ("ihsan dogramaci bilkent universitesi", "bilkent universitesi"), ("galatasaray universitesi",),
+    ("gebze teknik universitesi",), ("hacettepe universitesi",), ("ankara universitesi",), ("ankara bilim universitesi",),
+    ("sabanci universitesi",), ("dokuz eylul universitesi",), ("ege universitesi",), ("karadeniz teknik universitesi",),
+]) for name in names}
 
 
 @app.get("/api/universities/{uid}")

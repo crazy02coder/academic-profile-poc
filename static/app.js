@@ -2853,6 +2853,15 @@ function studentItems(group, section) {
       if (!periods.has(key)) periods.set(key, []);
       periods.get(key).push(item);
     });
+    // Dönemler sırayla: 1. dönem … 12. dönem, sınıf grupları, adlı gruplar, seçmeliler, en sonda dönemi belirtilmeyenler.
+    const rank = (key) => {
+      const n = key.match(/^(\d+)\.\s*(dönem|sınıf)/i);
+      if (n) return (n[2].toLowerCase() === "dönem" ? 0 : 100) + Number(n[1]);
+      return /^Dönemi belirtilmeyen/.test(key) ? 400 : /seçmeli/i.test(key) ? 300 : 200;
+    };
+    const sorted = [...periods].map((entry, i) => [entry, i]).sort((a, b) => rank(a[0][0]) - rank(b[0][0]) || a[1] - b[1]);
+    periods.clear();
+    sorted.forEach(([[key, courses]]) => periods.set(key, courses));
     const source = (item) => safeUrl(item.source_url) ? `<a class="source-link" href="${esc(safeUrl(item.source_url))}" target="_blank" rel="noopener">${icon("external")}Kaynağı aç</a>` : "";
     const progUrl = items.map((x) => x.source_url || "").find((u) => /\/oibs\/bologna\/.*curSunit=\d+/i.test(u));
     return `<div class="student-catalog">${progUrl && safeUrl(progUrl) ? `<div class="program-profile" data-program-url="${esc(safeUrl(progUrl))}"></div>` : ""}<p class="student-hint">${items.length} ders kaydı · İçeriği görmek için bir dönem ve ders seçin.</p>${[...periods].map(([period, courses]) => `<details class="student-term"><summary><b>${esc(period)}</b><span>${courses.length} kayıt</span>${icon("chevron")}</summary><div class="student-term-courses">${courses.map((item) => `<details class="student-course" ${safeUrl(item.detail_url) ? `data-course-url="${esc(safeUrl(item.detail_url))}"` : ""}><summary><span>${esc(item.title)}</span>${icon("chevron")}</summary><div>${item.detail ? `<p>${esc(item.detail)}</p>` : ""}${item.detail_url ? `<div class="course-description"></div>` : datasetCourseHtml(item)}${source(item)}</div></details>`).join("")}</div></details>`).join("")}</div>`;
