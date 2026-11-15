@@ -171,6 +171,59 @@ async def _locate(data: JobIn, name: str, log, llm) -> tuple[Profile, dict]:
     return profile, report
 
 
+_PHOTO_TASKS: dict[str, asyncio.Task] = {}
+
+
+def _spawn_site_photo(job_id: str) -> None:
+    """YÖK fotoğraf vermediyse kişinin bölüm sitesindeki kartından fotoğraf aranır; profil bunu beklemez."""
+    if job_id in _PHOTO_TASKS and not _PHOTO_TASKS[job_id].done():
+        return
+    _PHOTO_TASKS[job_id] = asyncio.create_task(_site_photo_later(job_id))
+
+
+async def _site_photo_later(job_id: str) -> None:
+    try:
+        result = history_store.load_result(job_id) or {}
+        profile = result.get("profile") or {}
+        yok = profile.get("yok") or {}
+        if profile.get("photo") or yok.get("photo") or not profile.get("name"):
+            return
+        path = yok.get("path") or []
+        if len(path) < 2:
+            return
+        uid = yokdir.uni_id(path[0])
+        if not await yokdir._university(uid):
+            return
+        found = await university_site_photos(uid, path[1], path[2] if len(path) > 2 else "")
+        tokens = lambda value: tuple(sorted(yokdir.name_tokens(value)))  # noqa: E731 — ad birebir (sıra önemsiz) eşleşmeli
+        want = tokens(profile["name"])
+        src = next((url for name, url in (found.get("photos") or {}).items() if tokens(name) == want), "")
+        if not src:
+            return
+        from .config import USER_AGENT
+        from .org_assets import public_client, read_public
+        async with public_client(timeout=15, headers={"User-Agent": USER_AGENT}) as client:
+            raw, mime, _ = await read_public(client, src, 3_000_000)
+        if not (mime or "").startswith("image/") or len(raw) < 800:
+            return
+        # Bu arada kayıt yenilenmiş olabilir: en güncelini okuyup yalnız fotoğrafı yaz
+        result = history_store.load_result(job_id) or result
+        target = result.get("profile") or {}
+        if target.get("photo") or (target.get("yok") or {}).get("photo"):
+            return
+        target["photo"] = f"data:{mime.split(';')[0]};base64,{base64.b64encode(raw).decode()}"
+        target.setdefault("provenance", {})
+        if isinstance(target["provenance"], dict):
+            target["provenance"]["photo"] = src
+        history_store.save_result(job_id, result)
+        if job_id in JOBS:
+            JOBS[job_id]["result"] = result
+    except Exception:  # noqa: BLE001 — arka plan işi; profil zaten hazır
+        pass
+    finally:
+        _PHOTO_TASKS.pop(job_id, None)
+
+
 _TEZ_TASKS: dict[str, asyncio.Task] = {}
 
 
@@ -403,6 +456,7 @@ async def pipeline(job: dict, data: JobIn):
         job["result"] = result
         history_store.save_result(result["job_id"], result)
         _spawn_tez_details(result["job_id"])
+        _spawn_site_photo(result["job_id"])
         # Yalnız kullanıcının başlattığı tam toplama sırasında WoS işi oluştur.
         # Kayıtlı profilin açılması artık salt durum okumasıdır.
         if job.get("wos", True):
@@ -1676,6 +1730,23 @@ async def university_faculty(uid: str, name: str = "", metrics: bool = True):
             raise HTTPException(404, "Bu birimin kadrosu ne YÖK Akademik'te ne de üniversite sitesinde bulunabildi.")
     # Öğrenci dizini için bütün kayıtlı profillerin yayın/atıf metriklerini okumaya gerek yok.
     return {**d, "people": _staff_metrics(d["people"], d["university"]) if metrics else d["people"]}
+
+
+@app.get("/api/universities/{uid}/atlas")
+async def university_atlas(uid: str, refresh: bool = False):
+    """Aday bakışı: üniversitenin programları YÖK Atlas'tan (taban puan, başarı sırası, kontenjan, puan türü, dil,
+    burs). Üniversite başına tek istek, 30 gün saklanır. Atlas'ta yoksa ya da ulaşılamazsa boş liste (hata değil)."""
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(422, "Geçersiz istek.")
+    uni = await yokdir._university(uid)
+    if not uni:
+        raise HTTPException(404, "Üniversite bulunamadı.")
+    from . import atlas
+    try:
+        data = await asyncio.wait_for(atlas.programs(uni["name"], refresh), 40)
+    except Exception:  # noqa: BLE001 — Atlas yanıt vermezse aday bakışı boş notla açılır
+        data = None
+    return data or {"university": uni["name"], "programs": [], "missing": True}
 
 
 @app.get("/api/universities/{uid}/departments")

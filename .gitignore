@@ -13,3 +13,4 @@ data/*
 .app-settings.json
 .app-settings.tmp
 data/job-log/
+data/atlas/

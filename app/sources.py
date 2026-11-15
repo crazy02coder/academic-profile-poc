@@ -644,7 +644,8 @@ async def yok_profile_api(name: str, institution: str, link: str, emit, sections
         if key in data:
             sec[key] = [x for x in (_generic_row(r) for r in data[key]) if x["title"] or x["detail"]]
     extra = {"photo": detail.get("authorImage") if str(detail.get("authorImage") or "").startswith("data:image") else "",
-             "email": "", "updated": "", "sections": sec}
+             "email": "", "updated": "", "sections": sec,
+             "path": [clean(x) for x in (prof.get("path") or [])[:3]]}  # üniversite / fakülte / bölüm (site fotoğrafı için)
     if "career" in data:
         extra["career"] = [_tl(r.get("baslangicTarihi"), r.get("bitisTarihi"), YOK_TITLES.get(r.get("kadroUnvanAdi") or "", r.get("kadroUnvanAdi")),
                                r.get("unvBirimAdi"), _units(r.get("fakultebilgisi"), r.get("bolumbilgisi")), r.get("akademikDurumAdi"))

@@ -2546,10 +2546,10 @@ async function viewUni(uid) {
         <div class="identity-info"><h1 id="uName">${esc(d.data?.name || "Üniversite")}</h1><div class="meta" id="uMeta"></div></div>
         <div class="kebab"><button class="icon-btn kebab-btn" type="button" aria-label="Seçenekler">${icon("dots")}</button><div class="kebab-menu" id="uAct" hidden></div></div>
       </div></section>
-    <div class="audience-tabs" role="tablist" aria-label="Üniversite görünümü"><button data-audience="overview" type="button" role="tab" aria-controls="universityOverview">Genel bakış</button><button class="active" data-audience="academic" type="button" role="tab" aria-selected="true" aria-controls="academicUniversity">${icon("users")}Akademisyen bakışı</button><button data-audience="student" type="button" role="tab" aria-selected="false" aria-controls="studentView">${icon("cap")}Öğrenci bakışı</button></div>
+    <div class="audience-tabs" role="tablist" aria-label="Üniversite görünümü"><button data-audience="overview" type="button" role="tab" aria-controls="universityOverview">Genel bakış</button><button class="active" data-audience="academic" type="button" role="tab" aria-selected="true" aria-controls="academicUniversity">${icon("users")}Akademisyen bakışı</button><button data-audience="student" type="button" role="tab" aria-selected="false" aria-controls="studentView">${icon("cap")}Öğrenci bakışı</button><button data-audience="candidate" type="button" role="tab" aria-selected="false" aria-controls="candidateView">${icon("grid")}Aday bakışı</button></div>
     <div id="academicUniversity" role="tabpanel"><div class="miller">${col("colFac", "layers", "Fakülteler", "Fakültelerde ara", skeleton(7))}
       ${col("colDep", "grid", "Bölümler", "Bölümlerde ara", `<div class="col-empty">Soldan bir fakülte seçin.</div>`)}
-      ${col("colStaff", "users", "Akademisyenler", "Akademisyenlerde ara", `<div class="col-empty">Bir bölüm seçin.</div>`)}</div></div><div id="studentView" role="tabpanel" hidden></div><div id="universityOverview" role="tabpanel" hidden></div>`);
+      ${col("colStaff", "users", "Akademisyenler", "Akademisyenlerde ara", `<div class="col-empty">Bir bölüm seçin.</div>`)}</div></div><div id="studentView" role="tabpanel" hidden></div><div id="candidateView" role="tabpanel" hidden></div><div id="universityOverview" role="tabpanel" hidden></div>`);
   if (d.data?.name) { $("#uName").dataset.typed = d.data.name; typeText($("#uName"), d.data.name); }
   const facultyColumn = $("#colFac");
   if (!d.data) {
@@ -3261,8 +3261,62 @@ function setUniversityAudience(audience) {
   $("#academicUniversity").hidden = audience !== "academic";
   $("#studentView").hidden = audience !== "student";
   $("#universityOverview").hidden = audience !== "overview";
+  $("#candidateView").hidden = audience !== "candidate";
   if (audience === "overview") renderUniversityOverview();
   if (audience === "student") renderStudentView();
+  if (audience === "candidate") renderCandidateView();
+}
+
+// Aday bakışı: YÖK Atlas'tan programların taban puanı, başarı sırası, kontenjanı, puan türü, dili ve bursu.
+// Üniversite başına tek istek; fakülteye göre gruplanır, arama ve puan türü süzgeci tarayıcıda çalışır.
+async function renderCandidateView() {
+  const d = S.uni, box = $("#candidateView");
+  if (!d || !box) return;
+  if (!d.atlas) {
+    box.innerHTML = `<div class="card card-pad"><div class="loading-line" role="status"><span class="spinner"></span>YÖK Atlas'tan program bilgileri alınıyor…</div></div>`;
+    try { d.atlas = await api(`/api/universities/${encodeURIComponent(d.id)}/atlas`, { quiet: true }); }
+    catch { d.atlas = { programs: [], missing: true }; }
+    if (S.uni !== d || !box.isConnected) return;
+  }
+  const all = d.atlas.programs || [];
+  if (!all.length) {
+    box.innerHTML = `<div class="card card-pad"><p class="student-missing">Bu üniversitenin program bilgileri YÖK Atlas'tan şu an alınamadı. <button class="link" type="button" data-atlas-retry>Tekrar dene</button></p></div>`;
+    $("[data-atlas-retry]", box).onclick = () => { d.atlas = null; renderCandidateView(); };
+    return;
+  }
+  const types = [...new Set(all.map((x) => x.score_type).filter(Boolean))].sort();
+  const st = d.atlasFilter ||= { q: "", type: "", level: "" };
+  box.innerHTML = `<div class="card card-pad aday">
+    <div class="aday-head"><div><b>${fmtNum(all.length)}</b> program · ${esc(String(d.atlas.year || ""))} tercih kılavuzu<small class="muted"> · Kaynak: <a href="https://yokatlas.yok.gov.tr/" target="_blank" rel="noopener">YÖK Atlas</a></small></div>
+      <div class="aday-filters"><input type="search" placeholder="Program ara" value="${esc(st.q)}" data-aday-q aria-label="Program ara">
+        <select data-aday-type aria-label="Puan türü"><option value="">Tüm puan türleri</option>${types.map((t) => `<option ${st.type === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>
+        <select data-aday-level aria-label="Düzey"><option value="">Lisans ve ön lisans</option><option ${st.level === "Lisans" ? "selected" : ""}>Lisans</option><option ${st.level === "Ön lisans" ? "selected" : ""}>Ön lisans</option></select></div></div>
+    <div data-aday-list></div></div>`;
+  const draw = () => {
+    const q = fold(st.q);
+    const rows = all.filter((x) => (!st.type || x.score_type === st.type) && (!st.level || x.level === st.level) && (!q || fold(`${x.name} ${x.faculty}`).includes(q)));
+    const groups = new Map();
+    rows.forEach((x) => { if (!groups.has(x.faculty)) groups.set(x.faculty, []); groups.get(x.faculty).push(x); });
+    const num = (v, digits = 0) => v == null ? "—" : Number(v).toLocaleString("tr-TR", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    const row = (x) => {
+      const [now, prev] = [x.years?.[0], x.years?.[1]];
+      // Başarı sırası küçüldüyse program zorlaşmış (daha üst sıradan öğrenci almış) demektir.
+      const diff = now?.rank != null && prev?.rank != null ? now.rank - prev.rank : null;
+      const trend = diff == null || diff === 0 ? "" : `<small class="aday-trend ${diff < 0 ? "up" : "down"}" title="${prev.year} başarı sırası: ${num(prev.rank)}">${diff < 0 ? "▲" : "▼"} ${num(Math.abs(diff))}</small>`;
+      const past = (x.years || []).slice(1).map((y) => `<span title="${y.year}">${y.year}: ${num(y.score, 2)} · ${num(y.rank)}</span>`).join("");
+      return `<tr><td><b>${esc(x.name)}</b><div class="aday-tags"><span class="chip blue">${esc(x.score_type || "—")}</span>${x.language && x.language !== "Türkçe" ? `<span class="chip">${esc(x.language)}</span>` : ""}${x.scholarship !== "Ücretsiz" ? `<span class="chip gold">${esc(x.scholarship)}</span>` : ""}${x.level !== "Lisans" ? `<span class="chip">${esc(x.level)}</span>` : ""}${x.study && x.study !== "Örgün Öğretim" ? `<span class="chip">${esc(x.study)}</span>` : ""}</div>${past ? `<div class="aday-past">${past}</div>` : ""}</td>
+        <td>${num(now?.quota ?? x.quota)}${now?.placed != null ? `<small> / ${num(now.placed)}</small>` : ""}</td><td>${num(now?.score, 2)}</td><td>${num(now?.rank)}${trend}</td></tr>`;
+    };
+    const head = `<thead><tr><th>Program</th><th>Kontenjan<small> / yerleşen</small></th><th>Taban puan</th><th>Başarı sırası</th></tr></thead>`;
+    $("[data-aday-list]", box).innerHTML = [...groups].sort((a, b) => a[0].localeCompare(b[0], "tr")).map(([fac, list], i) =>
+      `<details class="student-accordion student-branch" ${groups.size <= 3 || q || i === 0 ? "open" : ""}><summary><span class="student-summary-icon">${icon("building")}</span><span><b>${esc(tTitle(fac))}</b><small>${fmtNum(list.length)} program</small></span>${icon("chevron")}</summary>
+        <div class="student-content"><table class="aday-table">${head}<tbody>${list.sort((a, b) => (a.years?.[0]?.rank ?? 9e9) - (b.years?.[0]?.rank ?? 9e9)).map(row).join("")}</tbody></table></div></details>`).join("")
+      || '<p class="student-missing">Süzgece uyan program yok.</p>';
+  };
+  draw();
+  $("[data-aday-q]", box).oninput = (e) => { st.q = e.target.value; draw(); };
+  $("[data-aday-type]", box).onchange = (e) => { st.type = e.target.value; draw(); };
+  $("[data-aday-level]", box).onchange = (e) => { st.level = e.target.value; draw(); };
 }
 
 function renderUni() {
@@ -3340,6 +3394,26 @@ function selectYokDept(i) {
   S.uni.dep = i;
   $$("#colDep .unit").forEach((x) => x.classList.toggle("active", +x.dataset.i === i));
   renderYokStaff();
+  if (i >= 0) addYokStaffPhotos(i);
+}
+// Akademisyen bakışı: seçilen bölümün YÖK kadrosuna, bölümün kendi sitesindeki kişi kartlarından fotoğraf (ad birebir
+// eşleşirse). Liste önce fotoğrafsız çizilir; fotoğraflar gelince yeniden çizilir. YÖK'e istek atmaz.
+async function addYokStaffPhotos(i) {
+  const d = S.uni, dep = d?.facData?.departments?.[i], fac = d?.data?.items?.[d.fac];
+  if (!dep || !fac) return;
+  d.sitePhotoDone ||= new Set();
+  const key = JSON.stringify([fac.raw, dep.key]);
+  if (d.sitePhotoDone.has(key)) return;
+  d.sitePhotoDone.add(key);
+  const people = d.facData.people.filter((p) => p.department === dep.key && !p.photo);
+  if (!people.length) return;
+  try {
+    const r = await api(`/api/universities/${encodeURIComponent(d.id)}/site-photos?${new URLSearchParams({ faculty: fac.raw, department: dep.name })}`, { quiet: true });
+    const site = new Map(Object.entries(r.photos || {}).map(([name, photo]) => [nameKey(name), photo]));
+    let changed = 0;
+    people.forEach((p) => { const photo = site.get(nameKey(p.name)); if (photo && safeImg(photo)) { p.photo = photo; changed += 1; } });
+    if (changed && S.uni === d && d.dep === i) renderYokStaff();
+  } catch { /* fotoğraf yoksa baş harfler kalır */ }
 }
 function renderYokStaff() {
   const d = S.uni, people = yokStaff(), host = $("#colStaff .col-body");
@@ -3743,7 +3817,6 @@ function renderProfile(r, chat) {
         <div class="kpi"><b>${count((y.collaborators || []).length)}</b><span>iş birliği</span></div>
       </div>
     </section>
-    <div id="yokStatsBox"></div>
 
     <div class="tabs" role="tablist">${tabs.map(([k, l, n], i) => `<button class="tab ${i === 0 ? "active" : ""}" data-tab="${k}" type="button" ${k === "patents" && !n ? "hidden" : ""}>${esc(l)}${n !== "" && n != null ? `<span class="n">${fmtNum(n)}</span>` : ""}</button>`).join("")}</div>
 
@@ -3762,7 +3835,7 @@ function renderProfile(r, chat) {
     <div class="panel active" data-panel="pubs">
       <div class="publication-actions"><div class="pub-scan-state" id="profileWosState" role="status"></div>${sourcePicker("profileSourcesPicker", PROFILE_SOURCES, r.refresh_preferences?.sources, true)}</div><div id="profilePublications"></div></div>
 
-    <div class="panel" data-panel="interests"><div class="extra-info-grid"><section class="card card-pad"><h3>Dergi çeyreği</h3><p class="extra-info-value" id="profileQuartiles">${quartileDistribution(r, qCounts)}</p><p class="faint">SJR sınıflaması, yayın yılına göre derginin en iyi alanı.</p></section><section class="card card-pad"><h3>Kaynak dağılımı</h3><p class="extra-info-value" id="profileSources">${esc(sourceDistribution(r))}</p></section></div><div class="card card-pad"><h3>İlgi alanları</h3><div class="chips interest-list">${heroInts.map(x => `<span class="chip">${esc(x)}</span>`).join("") || "İlgi alanı kaydı bulunamadı."}</div></div></div>
+    <div class="panel" data-panel="interests"><div class="extra-info-grid"><section class="card card-pad"><h3>Dergi çeyreği</h3><p class="extra-info-value" id="profileQuartiles">${quartileDistribution(r, qCounts)}</p><p class="faint">SJR sınıflaması, yayın yılına göre derginin en iyi alanı.</p></section><section class="card card-pad"><h3>Kaynak dağılımı</h3><p class="extra-info-value" id="profileSources">${esc(sourceDistribution(r))}</p></section></div><div class="card card-pad"><h3>İlgi alanları</h3><div class="chips interest-list">${heroInts.map(x => `<span class="chip">${esc(x)}</span>`).join("") || "İlgi alanı kaydı bulunamadı."}</div></div><div class="extra-info-grid" id="yokStatsBox" style="margin-top:18px"></div></div>
     <div class="panel" data-panel="career"><div class="grid-2">
       <div class="card card-pad"><div class="card-title">${icon("briefcase")}Akademik görevler</div>${timeline(y.career)}</div>
       <div class="card card-pad"><div class="card-title">${icon("cap")}Öğrenim</div>${timeline(y.education, "teal")}</div>
@@ -4583,11 +4656,13 @@ async function loadYokStats(jobId) {
       <span>${String(x.year).slice(2)}</span></div>`).join("");
   const types = (d.types || []).filter((t) => t.national + t.international > 0).map((t) =>
     `<tr><td>${esc(tTitle(t.name))}</td><td>${fmtNum(t.national)}</td><td>${fmtNum(t.international)}</td><td><b>${fmtNum(t.national + t.international)}</b></td></tr>`).join("");
-  box.innerHTML = `<div class="card card-pad yok-stats"><div class="card-title">${icon("info")}YÖK Akademik istatistikleri<small class="muted" style="font-weight:400;margin-left:8px">Kaynak: YÖK Akademik</small></div>
-    ${years.length ? `<div class="ys-head"><div><b>${fmtNum(pubs)}</b><span>Web of Science yayını</span></div><div><b>${fmtNum(cites)}</b><span>Web of Science atfı</span></div>
+  // Ekstra bilgi sekmesinde iki kart: Web of Science (yıllara göre yayın/atıf) ve yayın türleri.
+  box.innerHTML = `<section class="card card-pad yok-stats"><h3>Web of Science <small class="faint" style="font-weight:400">· YÖK Akademik</small></h3>
+      ${years.length ? `<div class="ys-head"><div><b>${fmtNum(pubs)}</b><span>yayın</span></div><div><b>${fmtNum(cites)}</b><span>atıf</span></div>
         <div class="ys-legend"><span><i class="ys-pub"></i>yayın</span><span><i class="ys-cite"></i>atıf</span></div></div>
-      <div class="ys-chart">${bars}</div>` : `<p class="muted" style="margin:0 0 12px">YÖK Akademik'te bu kişi için Web of Science istatistiği yok.</p>`}
-    ${types ? `<table class="ys-table"><thead><tr><th>Yayın türü</th><th>Ulusal</th><th>Uluslararası</th><th>Toplam</th></tr></thead><tbody>${types}</tbody></table>` : ""}</div>`;
+      <div class="ys-chart">${bars}</div>` : `<p class="faint">YÖK Akademik'te bu kişi için Web of Science istatistiği yok.</p>`}</section>
+    <section class="card card-pad yok-stats"><h3>Yayın türleri <small class="faint" style="font-weight:400">· YÖK Akademik</small></h3>
+      ${types ? `<table class="ys-table"><thead><tr><th>Tür</th><th>Ulusal</th><th>Uluslararası</th><th>Toplam</th></tr></thead><tbody>${types}</tbody></table>` : `<p class="faint">YÖK Akademik'te yayın türü kaydı yok.</p>`}</section>`;
 }
 const tTitle = (s) => (s || "").toLocaleLowerCase("tr-TR").replace(/(^|\s)\S/g, (c) => c.toLocaleUpperCase("tr-TR"));
 
