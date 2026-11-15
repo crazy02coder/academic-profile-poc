@@ -14,7 +14,8 @@ import asyncio
 import json
 import re
 import time
-from urllib.parse import urldefrag, urljoin, urlparse
+from collections import Counter
+from urllib.parse import unquote, urldefrag, urljoin, urlparse
 
 import httpx
 
@@ -23,7 +24,7 @@ from .config import OPENALEX_PARAMS, ROOT, USER_AGENT
 from .discover import registrable, tr_title
 from .net import fetch_smart, parse
 from . import quartiles
-from .text import clean, detect_title, fold, name_in_text, name_score, strip_titles
+from .text import clean, detect_title, fold, name_in_text, name_score, name_tokens, strip_titles
 
 DIR = ROOT / "data" / "directory"
 TTL = 7 * 24 * 3600
@@ -90,7 +91,9 @@ def all_stores() -> list[dict]:
 
 
 # Kadro ayrıştırma kuralları değişince artar: eski kurallarla (ya da eski sunucuyla) kaydedilmiş listeler bayat sayılır.
-STAFF_V = 3
+STAFF_V = 5
+_ICON_IMG = re.compile(r"logo|icon|ikon|orcid|scholar|y[öo]k|linkedin|scopus|researchgate|avesis|publons|twitter|facebook|"
+                       r"instagram|badge|placeholder|no-?image|default|avatar-?default|\.svg(?:$|\?)", re.I)
 
 
 def _fresh(entry: dict | None, version: int = 0) -> bool:
@@ -328,6 +331,17 @@ def _looks_like_name(name: str) -> bool:
 def _people(sel, base: str) -> list[dict]:
     """Unvan geçen kısa metinlerden (kişi kartları) kişi listesi (ad, unvan, e-posta, fotoğraf, profil bağlantısı)."""
     out, seen = [], set()
+    # Açıklamasında (alt/title) kişinin adı yazan görsel o kişinin portresidir: portre ad metninden ayrı bir sütunda
+    # olsa da bulunur (kart düzeninden bağımsız).
+    named: dict[tuple, str] = {}
+    for image in sel.css("img"):
+        src = image.attrib.get("src") or image.attrib.get("data-src") or ""
+        label = clean(image.attrib.get("alt") or image.attrib.get("title") or "")
+        if not src or not label or len(label) > 80 or _ICON_IMG.search(unquote(src)):
+            continue
+        who = tuple(sorted(name_tokens(label)))
+        if len(who) >= 2:
+            named.setdefault(who, urljoin(base, src))
     for el in sel.css("h2, h3, h4, h5, h6, a, strong, b, span, p, li, td, div"):
         text = clean(el.get_all_text(separator=" "))
         if not (6 <= len(text) <= 200):
@@ -365,8 +379,11 @@ def _people(sel, base: str) -> list[dict]:
             continue
         box = _container(el)
         mail = next((a.attrib.get("href", "")[7:].split("?")[0] for a in box.css("a[href^='mailto:']")), "")
-        img = next((urljoin(base, i.attrib.get("src") or i.attrib.get("data-src") or "") for i in box.css("img")
-                    if (i.attrib.get("src") or i.attrib.get("data-src"))), "")
+        # Portre: kartın ilk görseli; kartlardaki bağlantı simgeleri (YÖK Akademik, ORCID, Scholar logoları) portre değildir.
+        img = next((urljoin(base, src) for i in box.css("img")
+                    if (src := i.attrib.get("src") or i.attrib.get("data-src") or "")
+                    and not _ICON_IMG.search(unquote(f"{src} {i.attrib.get('alt', '')} {i.attrib.get('class', '')}"))), "")
+        img = named.get(tuple(sorted(name_tokens(name)))) or img
         link = next((urljoin(base, a.attrib.get("href", "")) for a in box.css("a[href]")
                      if not (a.attrib.get("href") or "").startswith(("mailto:", "tel:", "#", "javascript:"))), "")
         # Aynı profil bağlantısı + birinin devamı olan ad ("Ahmet Özdi" / "Ahmet Özdi L") aynı kişidir
@@ -374,6 +391,11 @@ def _people(sel, base: str) -> list[dict]:
             continue
         seen.add(key)
         out.append({"name": tr_title(name), "title": title, "email": clean(mail), "photo": img, "url": link})
+    # Aynı görsel birden çok kişide çıkıyorsa portre değildir (ortak simge, yer tutucu resim).
+    shared = {photo for photo, n in Counter(o["photo"] for o in out if o["photo"]).items() if n > 1}
+    for o in out:
+        if o["photo"] in shared:
+            o["photo"] = ""
     return out
 
 

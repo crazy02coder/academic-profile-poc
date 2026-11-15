@@ -3394,26 +3394,40 @@ function selectYokDept(i) {
   S.uni.dep = i;
   $$("#colDep .unit").forEach((x) => x.classList.toggle("active", +x.dataset.i === i));
   renderYokStaff();
-  if (i >= 0) addYokStaffPhotos(i);
+  addYokStaffPhotos(i);
 }
-// Akademisyen bakışı: seçilen bölümün YÖK kadrosuna, bölümün kendi sitesindeki kişi kartlarından fotoğraf (ad birebir
-// eşleşirse). Liste önce fotoğrafsız çizilir; fotoğraflar gelince yeniden çizilir. YÖK'e istek atmaz.
-async function addYokStaffPhotos(i) {
-  const d = S.uni, dep = d?.facData?.departments?.[i], fac = d?.data?.items?.[d.fac];
-  if (!dep || !fac) return;
+// Akademisyen bakışı: YÖK kadrosuna, bölümlerin kendi sitesindeki kişi kartlarından fotoğraf (ad birebir eşleşirse).
+// Liste önce fotoğrafsız çizilir; fotoğraflar geldikçe yeniden çizilir. Bölüm seçiliyse o bölüm, "Tüm fakülte"
+// seçiliyse bütün bölümler sırayla (aynı anda en çok üç site isteği). YÖK'e istek atmaz.
+async function sitePhotosForDept(d, i) {
+  const dep = d.facData?.departments?.[i], fac = d.data?.items?.[d.fac];
+  if (!dep || !fac) return 0;
   d.sitePhotoDone ||= new Set();
   const key = JSON.stringify([fac.raw, dep.key]);
-  if (d.sitePhotoDone.has(key)) return;
+  if (d.sitePhotoDone.has(key)) return 0;
   d.sitePhotoDone.add(key);
   const people = d.facData.people.filter((p) => p.department === dep.key && !p.photo);
-  if (!people.length) return;
+  if (!people.length) return 0;
   try {
     const r = await api(`/api/universities/${encodeURIComponent(d.id)}/site-photos?${new URLSearchParams({ faculty: fac.raw, department: dep.name })}`, { quiet: true });
     const site = new Map(Object.entries(r.photos || {}).map(([name, photo]) => [nameKey(name), photo]));
     let changed = 0;
     people.forEach((p) => { const photo = site.get(nameKey(p.name)); if (photo && safeImg(photo)) { p.photo = photo; changed += 1; } });
-    if (changed && S.uni === d && d.dep === i) renderYokStaff();
-  } catch { /* fotoğraf yoksa baş harfler kalır */ }
+    return changed;
+  } catch { return 0; /* fotoğraf yoksa baş harfler kalır */ }
+}
+async function addYokStaffPhotos(i) {
+  const d = S.uni, facIndex = d?.fac;
+  if (!d?.facData) return;
+  const same = () => S.uni === d && d.fac === facIndex && d.dep === i;
+  if (i >= 0) { if (await sitePhotosForDept(d, i) && same()) renderYokStaff(); return; }
+  const queue = d.facData.departments.map((_, k) => k);
+  const work = async () => {
+    while (queue.length && S.uni === d && d.fac === facIndex) {
+      if (await sitePhotosForDept(d, queue.shift()) && same()) renderYokStaff();
+    }
+  };
+  await Promise.all([work(), work(), work()]);
 }
 function renderYokStaff() {
   const d = S.uni, people = yokStaff(), host = $("#colStaff .col-body");
