@@ -126,6 +126,10 @@ def decode(body: bytes, encoding: str = "") -> str:
     try:
         return body.decode("utf-8")
     except UnicodeDecodeError:
+        # Birkaç bozuk bayt içeren UTF-8 sayfa (kurum sitelerinde sık): tamamını başka kodlama saymak Türkçe harfleri bozar.
+        loose = body.decode("utf-8", errors="replace")
+        if loose.count("�") <= max(3, len(loose) // 20000):
+            return loose
         declared = re.search(rb"charset=[\"']?([a-zA-Z0-9_-]+)", body[:4000])
         try:
             return body.decode(declared[1].decode("ascii") if declared else "windows-1254", errors="replace")
