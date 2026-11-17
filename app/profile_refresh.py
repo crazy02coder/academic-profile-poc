@@ -153,6 +153,10 @@ async def collect(old: dict, sections: set[str], sources: set[str], llm, log) ->
                 if "industry" in sections and "collaborators" in fresh:
                     merged["collaborators"] = fresh["collaborators"]
                 merged.setdefault("sections", {}).update(fresh.get("sections") or {})
+                # Ekstra bilgi: temel alan, bilim alanı, anahtar kelimeler ve dizin kimlikleri her YÖK yanıtında gelir.
+                for key in ("area", "field", "keywords", "scopus_id", "researcher_id"):
+                    if fresh.get(key):
+                        merged[key] = fresh[key]
             else:
                 await warn("YÖK profil yanıtı alınamadı; kayıtlı bilgiler korundu.")
             p.yok = merged

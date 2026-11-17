@@ -245,6 +245,28 @@ async def firm_patents(names: list[str], academics: list[str]) -> dict:
     return {"items": sorted(out, key=lambda f: f["year"], reverse=True), "total": total}
 
 
+# ------------------------------------------------------------------ üniversite
+async def university_patents(name: str) -> dict:
+    """Üniversitenin başvuru sahibi olduğu patentler. EPODOC kurum adını kısaltır ("ANKARA UNIV"): adın
+    "Üniversitesi" dışındaki kelimeleri + "univ" aranır, başvuru sahibinde bu kelimelerin hepsi geçmelidir."""
+    words = [w for w in _norm(name).split() if len(w) > 1 and not w.startswith("univers")]
+    if not words:
+        return {"items": [], "total": 0}
+    short = " ".join(words[:4])
+    cql = " and ".join(_cql_terms("pa", short) + ["pa=univ"])
+    async with _client() as client:
+        docs, total = await _search(client, cql, 200)
+    out, seen = [], set()
+    for f in _families(docs):
+        if f["url"] in seen:
+            continue
+        if not any(set(words) <= set(_norm(a).split()) and "univ" in _norm(a) for a in f["_applicants"]):
+            continue
+        seen.add(f["url"])
+        out.append(_public(f))
+    return {"items": sorted(out, key=lambda f: f["year"], reverse=True), "total": total}
+
+
 # ------------------------------------------------------------------ açıklama (isteğe bağlı, tek patent)
 async def description(numbers: list[str]) -> dict:
     """Patent ailesinin açıklama metni: EP/WO yayınından (OPS tam metin). TR yayınlarında tam metin yoktur.

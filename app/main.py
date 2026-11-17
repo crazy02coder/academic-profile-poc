@@ -1036,6 +1036,20 @@ async def yok_stats(jid: str, refresh: bool = False):
     return data or {"wos_yearly": [], "types": [], "totals": {}}
 
 
+@app.get("/api/jobs/{jid}/yok-record")
+async def yok_record(jid: str, kind: str = Query(pattern="^(project|patent)$"), title: str = Query(min_length=2, max_length=600)):
+    """Profildeki bir YÖK projesinin / patentinin ayrıntısı (konu, tam ekip; buluş özeti). Kayda tıklanınca istenir."""
+    result = _result_for(jid)
+    if not result:
+        raise HTTPException(404)
+    link = ((result.get("profile") or {}).get("links") or {}).get("yok") or ""
+    found = re.search(r"authorGuidId=([0-9A-F]{16})", link)
+    data = await yokdir.record_detail(found[1], kind, title) if found else None
+    if not data:
+        raise HTTPException(404, "YÖK'te bu kaydın ayrıntısı bulunamadı.")
+    return data
+
+
 @app.get("/api/jobs/{jid}/wos")
 async def wos_status(jid: str):
     result = _result_for(jid)
@@ -1485,6 +1499,28 @@ async def firm_chat(fid: str, body: FirmChatIn):
     return await firm_facts.answer(fid, _llm, body.question.strip(), msgs)
 
 
+@app.get("/api/firms/{fid}/web-projects")
+async def firm_web_projects(fid: str, refresh: bool = False):
+    """Firmanın kamuoyunda bilinen projeleri (arama motoru sonuçları)."""
+    if not re.fullmatch(r"[a-z0-9-]{1,80}", fid):
+        raise HTTPException(422, "Geçersiz firma kimliği.")
+    d = await firms.firm_web_projects(fid, refresh)
+    if d is None:
+        raise HTTPException(404, "Firma resmi listede bulunamadı.")
+    return d
+
+
+@app.get("/api/firms/{fid}/cordis")
+async def firm_cordis(fid: str, refresh: bool = False):
+    """Firmanın katıldığı AB projeleri (CORDIS açık verisi)."""
+    if not re.fullmatch(r"[a-z0-9-]{1,80}", fid):
+        raise HTTPException(422, "Geçersiz firma kimliği.")
+    d = await firms.firm_cordis(fid, refresh)
+    if d is None:
+        raise HTTPException(404, "Firma resmi listede bulunamadı.")
+    return d
+
+
 @app.get("/api/firms/{fid}/patents")
 async def firm_patents(fid: str, refresh: bool = False):
     """Firmanın başvuru sahibi olduğu patentler (EPO Open Patent Services)."""
@@ -1799,12 +1835,12 @@ async def university_facts(uid: str, refresh: bool = False):
 
 
 @app.get("/api/universities/{uid}/staff-counts")
-async def university_staff_counts(uid: str):
+async def university_staff_counts(uid: str, refresh: bool = False):
     """YÖK Akademik kadro sayıları (toplam ve unvan); büyük üniversitelerde ilk okuma yarım dakikayı bulabilir."""
     if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
         raise HTTPException(422, "Geçersiz üniversite.")
     try:
-        d = await uni_facts.staff_counts(uid)
+        d = await uni_facts.staff_counts(uid, titles=refresh)  # refresh: kullanıcı "Yenile"ye bastı → unvan dağılımı da
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(502, f"YÖK Akademik okunamadı ({type(exc).__name__}).") from None
     if not d:
@@ -1860,6 +1896,95 @@ async def _dataset_roles(uid: str, faculty: str, deps: list[str], d: dict) -> di
         if head:
             d["heads"][name] = {"name": _person_case(head), "title": "", "since": "", "source": "dataset"}
     return d
+
+
+@app.get("/api/atlas/nets/{code}")
+async def atlas_nets(code: str):
+    """Aday bakışı: programa son yerleşen adayın netleri (YÖK Atlas); program tıklanınca, program başına tek istek."""
+    from . import atlas
+    d = await atlas.nets(code)
+    if d is None:
+        raise HTTPException(404, "Net bilgisi alınamadı.")
+    return d
+
+
+@app.get("/api/campus/line/{relation_id}")
+async def campus_line(relation_id: int):
+    """Kampüse ulaşım: bir toplu taşıma hattının durakları ve sefer bilgisi (OpenStreetMap); hat tıklanınca."""
+    from . import campus_map
+    d = await campus_map.line_detail(relation_id)
+    if d is None:
+        raise HTTPException(404, "Hat bilgisi şu an alınamadı.")
+    return d
+
+
+@app.get("/api/universities/{uid}/campus3d")
+async def campus_scene(uid: str):
+    """Kampüsün 3B görünümü için çevredeki binalar ve yollar (OpenStreetMap)."""
+    from . import campus_map
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(422, "Geçersiz istek.")
+    d = await campus_map.scene(uid)
+    if d is None:
+        raise HTTPException(404, "Kampüs verisi şu an alınamadı.")
+    return d
+
+
+@app.get("/api/universities/{uid}/extra")
+async def university_extra(uid: str, refresh: bool = False):
+    """Genel bakışın ek blokları: Erasmus kaydı (AB HEI kaydı) ve — yalnız kullanıcı "Yenile"ye basınca — YÖK
+    Akademik'ten unvan ve temel alan dağılımı. Kayıtlı olan anında döner."""
+    from . import uni_extra
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(422, "Geçersiz istek.")
+    out: dict = {"erasmus": None, "staff": None, "students": None, "errors": []}
+    try:
+        # Öğrenci dağılımı (YÖK İstatistik): kayıttan anında; tablo hiç okunmadıysa yalnız "Yenile" ile bir kez okunur.
+        from . import yok_istatistik
+        uni = await yokdir._university(uid)
+        if uni:
+            out["students"] = await asyncio.wait_for(yok_istatistik.students(uni.get("raw") or uni["name"], fetch=refresh), 150)
+    except Exception as exc:  # noqa: BLE001
+        out["errors"].append(f"YÖK İstatistik: {type(exc).__name__}")
+    try:
+        out["erasmus"] = await asyncio.wait_for(uni_extra.erasmus(uid), 35)
+    except Exception as exc:  # noqa: BLE001 — ek kaynak yardımcıdır
+        out["errors"].append(f"Erasmus kaydı: {type(exc).__name__}")
+    try:
+        out["staff"] = await uni_facts.staff_counts(uid, titles=refresh) if refresh else yokdir._load(f"staff-{uid}", uni_facts.ROLE_TTL)
+    except (httpx.HTTPError, ValueError) as exc:
+        out["errors"].append(f"YÖK Akademik: {type(exc).__name__}")
+    return out
+
+
+@app.get("/api/universities/{uid}/patents")
+async def university_patents(uid: str, refresh: bool = False):
+    """Üniversitenin başvuru sahibi olduğu patentler (EPO Open Patent Services); 30 gün saklanır."""
+    from . import patents
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(422, "Geçersiz istek.")
+    if not patents.enabled():
+        return {"enabled": False, "items": [], "total": 0, "error": ""}
+    path = ROOT / "data" / "patents" / f"uni-{uid}.json"
+    if not refresh:
+        try:
+            saved = json.loads(path.read_text())
+            if time.time() - saved.get("ts", 0) < 30 * 24 * 3600 and saved.get("pv") == patents.VERSION:
+                return {"enabled": True, "items": saved["items"], "total": saved["total"], "error": ""}
+        except (OSError, ValueError):
+            pass
+    uni = await yokdir._university(uid)
+    if not uni:
+        raise HTTPException(404, "Üniversite bulunamadı.")
+    try:
+        d = await patents.university_patents(uni.get("name") or yokdir.display_uni(uni.get("raw", "")))
+    except patents.PatentError as exc:
+        return {"enabled": True, "items": [], "total": 0, "error": str(exc)}
+    except httpx.HTTPError as exc:
+        return {"enabled": True, "items": [], "total": 0, "error": f"EPO'ya ulaşılamadı ({type(exc).__name__})"}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"ts": time.time(), "pv": patents.VERSION, **d}, ensure_ascii=False))
+    return {"enabled": True, **d, "error": ""}
 
 
 @app.get("/api/universities/{uid}/faculty")

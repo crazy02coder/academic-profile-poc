@@ -168,7 +168,7 @@ async def openalex_author(client, profile: Profile, log) -> dict | None:
 
 
 OPENALEX_SELECT = ("id,doi,display_name,publication_year,publication_date,primary_location,authorships,abstract_inverted_index,"
-                   "cited_by_count,language,type,topics")
+                   "cited_by_count,language,type,topics,sustainable_development_goals")
 
 
 def _openalex_record(w: dict, is_self) -> dict:
@@ -182,6 +182,9 @@ def _openalex_record(w: dict, is_self) -> dict:
         abstract=_abstract(w.get("abstract_inverted_index")), url=w.get("doi") or loc.get("landing_page_url") or w["id"],
         citations=w.get("cited_by_count"), type=w.get("type"),
         labels=[t["display_name"] for t in (w.get("topics") or [])[:3]],
+        # BM Sürdürülebilir Kalkınma Amaçları (OpenAlex sınıflandırması; yalnız güçlü eşleşmeler)
+        sdgs=[{"id": (g.get("id") or "").rsplit("/", 1)[-1], "name": g.get("display_name")}
+              for g in w.get("sustainable_development_goals") or [] if g.get("display_name") and (g.get("score") or 0) >= 0.4] or None,
         orgs=[{"name": i.get("display_name"), "type": i.get("type"), "country": i.get("country_code")}
               for a in w.get("authorships") or [] if not is_self(a)
               for i in a.get("institutions") or [] if i.get("type") == "company" and i.get("display_name")])
@@ -517,6 +520,20 @@ def _units(*parts) -> str:
     return " / ".join(clean(p).strip("/ ") for p in parts if p and clean(p).strip("/ "))
 
 
+def _project_fields(r: dict) -> dict:
+    """Proje penceresi için YÖK kaydının bütün dolu alanları (kimlik alanları hariç): bütçe, ekip, konu, destekleyen
+    kurum, özet… Alan adları YÖK'ün adlarıdır; ön yüz okunur başlığa çevirir."""
+    out = {}
+    for key, value in r.items():
+        if re.search(r"Id$|Guid|^id$", key) or value in (None, "", 0, "0", [], {}):
+            continue
+        if key == "projeEkip":
+            out["ekip"] = _team(value)
+        elif isinstance(value, (str, int, float)):
+            out[key] = clean(str(value))[:3000]
+    return out
+
+
 def _generic_row(r: dict) -> dict:
     """Alanları önceden bilinmeyen bölümler (ders, üyelik, sanatsal faaliyet): ad içeren ilk alan başlık olur."""
     vals = {k: v for k, v in r.items() if isinstance(v, (str, int)) and v not in ("", None) and not re.search(r"Id$|Guid|En$", k)}
@@ -681,7 +698,8 @@ async def yok_profile_api(name: str, institution: str, link: str, emit, sections
         sec["projects"] = [{"labels": _labels(r.get("projeTuruAd"), r.get("projeDurumuAd")), "title": clean(r.get("projeAdi") or ""),
                             "detail": _join(f"{r.get('butcesi')} {r.get('paraBirimi')}" if str(r.get("butcesi") or "0") != "0" else "",
                                             _team(r.get("projeEkip"))),
-                            "extra": _join(r.get("baslangicTarihi"), r.get("bitisTarihi") or r.get("bitisyil"))} for r in data["projects"]]
+                            "extra": _join(r.get("baslangicTarihi"), r.get("bitisTarihi") or r.get("bitisyil")),
+                            "fields": _project_fields(r)} for r in data["projects"]]
     if "awards" in data:
         sec["awards"] = [{"labels": _labels(r.get("turAdi"), r.get("isyeriTuruAdi")), "title": clean(r.get("odulAdi") or ""),
                           "detail": clean(r.get("kurulusAdi") or ""), "extra": _join(r.get("odulTarih"), tr_title(r.get("ulkeAd") or ""))}
@@ -879,5 +897,9 @@ async def yok_works(profile: Profile, log, *, sections: set[str] | None = None, 
             profile.links.setdefault("orcid", prof["orcid"])
             profile.observe("orcid", prof["orcid"], "yok", src)
         profile.yok = res.get("extra") or {}
+        # Ekstra bilgi sekmesi: temel alan, bilim alanı, anahtar kelimeler ve dizin kimlikleri (Scopus, ResearcherID)
+        for key in ("area", "field", "keywords", "scopus_id", "researcher_id"):
+            if prof.get(key):
+                profile.yok[key] = prof[key]
         profile.found = True
     return res.get("records", []), res.get("rea")

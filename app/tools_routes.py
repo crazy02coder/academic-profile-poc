@@ -24,6 +24,36 @@ async def score(job_id: str, year: int | None = Query(None, ge=2015, le=2100)):
             "docentlik": academic_score.docentlik(result), "tesvik": academic_score.tesvik(result, year)}
 
 
+@router.get("/score-criteria")
+async def score_criteria():
+    """Doçentlik ve akademik teşvik puan tablosu (Ayarlar sayfası düzenler)."""
+    return academic_score.criteria()
+
+
+def _merge_numbers(old, new, path=""):
+    """Yalnız var olan sayısal alanlar değişir: yapı ve adlar korunur, yeni anahtar eklenmez."""
+    if isinstance(old, dict):
+        return {k: _merge_numbers(v, new.get(k) if isinstance(new, dict) and k in new else v, f"{path}.{k}") for k, v in old.items()}
+    if isinstance(old, bool):
+        return bool(new) if isinstance(new, bool) else old
+    if isinstance(old, (int, float)):
+        if isinstance(new, bool) or not isinstance(new, (int, float)) or not 0 <= new <= 100000:
+            return old
+        return new
+    return old
+
+
+@router.post("/score-criteria")
+async def score_criteria_save(body: dict):
+    import json
+    current = academic_score.criteria()
+    merged = _merge_numbers(current, body)
+    tmp = academic_score.CRITERIA.with_suffix(".tmp")
+    tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(academic_score.CRITERIA)
+    return merged
+
+
 @router.get("/advisors")
 async def advisor_search(q: str = Query(..., min_length=3, max_length=400), uni: str = Query("", max_length=80), mode: str = "tez"):
     mode = "2209" if mode == "2209" else "tez"

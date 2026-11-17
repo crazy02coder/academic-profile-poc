@@ -154,6 +154,9 @@ async def resolve(records: list[dict], subject: str, llm=None, log=None) -> tupl
         best["languages"] = sorted({v["lang"] for v in variants})
         best["language_names"] = [LANG_NAMES.get(x, x) for x in best["languages"]]
         best["labels"] = sorted({lab for m in members for lab in (m.get("labels") or [])})[:6]
+        sdgs = {g["name"]: g for m in members for g in (m.get("sdgs") or []) if isinstance(g, dict) and g.get("name")}
+        if sdgs:
+            best["sdgs"] = list(sdgs.values())
         orgs = {(o.get("name"), o.get("type")): o for m in members for o in (m.get("orgs") or [])}
         if orgs:
             best["orgs"] = list(orgs.values())

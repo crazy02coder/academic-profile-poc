@@ -1521,6 +1521,7 @@ function openModal(html) {
   $(".welcome-toast")?.remove();
   const modal = $("#modal"), box = $(".modal-box", modal), wasHidden = modal.hidden;
   if (modal.hidden) modalPreviousFocus = document.activeElement;
+  box.classList.remove("modal-full");
   $("#modalBody").innerHTML = html; hydrateIcons($("#modalBody"));
   box.removeAttribute("aria-labelledby");
   const title = $("h2", box);
@@ -1643,7 +1644,9 @@ function viewHome() {
   const seen = new Set(visits.map(v => `${v.kind}:${v.id}`));
   const recent = [...visits, ...S.chats.filter(c => !seen.has(`person:${c.id}`)).map(c => ({ kind: "person", id: c.id, name: c.name, at: Date.parse(c.updated || c.created || "") || 0 }))].sort((a, b) => b.at - a.at).slice(0, 10);
   const entries = [["#/akademisyenler", "users", "Akademisyenler", "cProfiles", "profil incelendi"], ["#/universiteler", "building", "Üniversiteler", "cUnis", "üniversite, YÖK'ten"],
-    ["#/firmalar", "briefcase", "Firmalar", "cFirms", "Ar-Ge ve tasarım firması"], ["#/ara", "book", "Konular", "", "Bir alanda yazılmış yayınlar"]];
+    ["#/firmalar", "briefcase", "Firmalar", "cFirms", "Ar-Ge ve tasarım firması"]];
+  // İkinci satır: araçlar (konu araması ve danışman bulucu).
+  const tools = [["#/ara", "compass", "Konu bul", "Bir alanda yazılmış yayınlar ve o alanda çalışanlar"], ["#/danisman", "cap", "Danışman bul", "Tez ya da TÜBİTAK 2209 için konuna uygun, aktif akademisyenler"]];
   setView(`
     <section class="hero">
       <div class="hero-bg" aria-hidden="true"><span></span><span></span></div>
@@ -1657,8 +1660,10 @@ function viewHome() {
     </section>
     <div class="entry-grid stagger">${entries.map(([href, ic, title, id, sub], i) => `<a class="card entry" href="${href}" style="--i:${i + 3}">
       <span class="fi">${icon(ic)}</span><b>${title}</b><span class="e-sub">${id ? `<span id="${id}">—</span> ` : ""}${sub}</span><span class="e-go">${icon("arrow")}</span></a>`).join("")}</div>
+    <div class="entry-grid two stagger">${tools.map(([href, ic, title, sub], i) => `<a class="card entry" href="${href}" style="--i:${i + 6}">
+      <span class="fi">${icon(ic)}</span><b>${title}</b><span class="e-sub">${sub}</span><span class="e-go">${icon("arrow")}</span></a>`).join("")}</div>
     ${recent.length ? `<div class="card list-card" style="margin-top:18px">
-      <div class="lc-head"><h3>Son incelenenler</h3><span class="faint">Akademisyen · Firma · Konu</span></div>
+      <div class="lc-head"><h3>Son incelenenler</h3><span class="faint">Akademisyen · Üniversite · Firma · Konu</span></div>
       <div class="stagger profile-card-list">${recent.map((entry, i) => recentVisitHtml(entry, i + 6)).join("")}</div></div>` : ""}`);
   setupOmni();
   api("/api/overview").then((o) => {
@@ -2184,14 +2189,49 @@ function uniStack(parts, total, note) {
 }
 function uniStaffBlock(ac) {
   if (!ac?.total) return `<div class="peek-h">Akademik kadro</div><div class="loading-line"><span class="spinner"></span>Unvan dağılımı YÖK Akademik'ten okunuyor…</div>`;
-  return `<div class="peek-h">Akademik kadro · ${count(ac.total)} kişi</div>${uniStack((ac.titles || []).map((t) => ({ label: t.title, value: t.count })), ac.total, "Kaynak: YÖK Akademik")}`;
+  const titles = (ac.titles || []).filter((t) => t.count > 0);
+  return `<div class="peek-h">Akademik kadro · ${count(ac.total)} kişi</div>${titles.length ? uniStack(titles.map((t) => ({ label: t.title, value: t.count })), ac.total, "Kaynak: YÖK Akademik")
+    : `<p class="uf-empty">Unvan dağılımı (profesör, doçent…) henüz okunmadı; <b>Yenile → Künye ve sayılar</b> ile YÖK'ten alınır.</p><p class="uf-src">Kaynak: YÖK Akademik</p>`}`;
 }
-function uniFactsHtml(d, people) {
+// Temel alanlara göre akademisyen dağılımı (YÖK Akademik; "Yenile" ile sayılır).
+function uniAreasBlock(ac) {
+  const areas = ac?.areas || [];
+  if (!areas.length) return "";
+  const max = areas[0].count || 1;
+  return `<div class="peek-h">Temel alanlara göre akademisyen</div><div class="uf-areas">${areas.map((a, i) => `<div class="uf-area" style="--i:${i}"><span>${esc(a.name)}</span><i><b style="width:${Math.max(3, Math.round(a.count / max * 100))}%"></b></i><em>${count(a.count)}</em></div>`).join("")}</div><p class="uf-src">Kaynak: YÖK Akademik</p>`;
+}
+// Genel bakışın ek blokları: Erasmus kaydı (AB HEI kaydı) ve, refresh ise, YÖK'ten unvan + temel alan dağılımı.
+async function loadUniExtra(d, refresh = false) {
+  let x;
+  try { x = await api(`/api/universities/${encodeURIComponent(d.id)}/extra${refresh ? "?refresh=1" : ""}`, { quiet: true }); } catch { return; }
+  if (S.uni !== d) return;
+  const er = $("[data-uf-erasmus]"), e = x.erasmus;
+  if (er && e) {
+    const year = (v) => String(v || "").slice(0, 4);
+    er.innerHTML = `<div class="uf-row"><span class="uf-ic">${icon("globe")}</span><div><small>Erasmus</small><p><b>${esc(e.code || "—")}</b>${e.eche ? ` · Erasmus Beyannamesi (ECHE) ${esc(year(e.start))}–${esc(year(e.end))}` : " · ECHE kaydı yok"}${e.pic ? ` · PIC ${esc(e.pic)}` : ""}</p></div></div>`;
+    hydrateIcons(er);
+  }
+  const st = $("[data-uf-students]"), sd = x.students;
+  if (st && sd?.total?.total) {
+    // Öğrenci dağılımı: düzeylere göre (YÖK İstatistik), cinsiyet ve öğrenim türü kırılımıyla.
+    const parts = [["associate", "Önlisans"], ["undergrad", "Lisans"], ["graduate", "Yüksek lisans"], ["doctoral", "Doktora"]].filter(([k]) => sd[k]?.total).map(([k, label]) => ({ label, value: sd[k].total }));
+    const pct = (v) => `%${Math.round(v / sd.total.total * 100)}`;
+    st.innerHTML = `<div class="peek-h">Öğrenci dağılımı · ${count(sd.total.total)} öğrenci · ${esc(sd.year)}</div>${uniStack(parts, sd.total.total, "")}
+      <div class="uf-chips" style="margin-top:8px"><span class="chip">Kadın ${count(sd.total.female)} (${pct(sd.total.female)})</span><span class="chip">Erkek ${count(sd.total.male)} (${pct(sd.total.male)})</span>${Object.entries(sd.modes || {}).map(([k, v]) => `<span class="chip blue">${esc(tTitle(k.replace("Ö.", "öğretim")))} ${count(v)}</span>`).join("")}</div>
+      <p class="uf-src">Kaynak: YÖK İstatistik · ${esc(sd.year)} öğretim yılı</p>`;
+  }
+  if (x.staff?.total) {
+    const staff = $("[data-uf-staff]"), areas = $("[data-uf-areas]");
+    if (staff) staff.innerHTML = uniStaffBlock(x.staff);
+    if (areas) areas.innerHTML = uniAreasBlock(x.staff);
+  }
+}
+function uniFactsHtml(d, people, compact = false) {
   const id = d.identity || {}, sc = d.scale || {}, ac = d.academics || {}, rs = d.research || {}, un = d.units || {};
   const line = [id.founded && `Kuruluş ${id.founded}`, id.type, id.city].filter(Boolean);
   const stat = (v, label, extra = "") => `<div><b>${v == null || v === "" ? "—" : typeof v === "number" ? count(v) : esc(v)}</b><span>${esc(label)}${extra}</span></div>`;
   const studentYear = sc.students?.year ? ` · ${esc(sc.students.year)}` : "";
-  const deps = un.scanned ? `${fmtNum(un.departments)}${un.scanned < un.faculties ? "+" : ""}` : "";
+  const deps = un.departments ? `${fmtNum(un.departments)}${!un.departments_source && un.scanned < un.faculties ? "+" : ""}` : "";
   const row = (ic, label, value) => value ? `<div class="uf-row"><span class="uf-ic">${icon(ic)}</span><div><small>${esc(label)}</small><p>${value}</p></div></div>` : "";
   const link = (url, text) => safeUrl(url) ? `<a href="${esc(safeUrl(url))}" target="_blank" rel="noopener">${esc(text)} ${icon("external")}</a>` : "";
   const studentParts = [["associate", "Önlisans"], ["undergrad", "Lisans"], ["graduate", "Yüksek lisans"], ["doctoral", "Doktora"]]
@@ -2205,22 +2245,24 @@ function uniFactsHtml(d, people) {
     ${row("globe", "Eğitim dili", esc(id.language || ""))}
     ${row("bookmark", "Bağlı olduğu vakıf", esc(id.affiliation || ""))}
     ${row("external", "Bağlantılar", [link(id.website, site), link(id.wikipedia, "Vikipedi")].filter(Boolean).join(" · "))}
+    <div data-uf-erasmus></div>
     ${d.firms?.length ? `<div class="uf-block"><div class="peek-h">Ortak yayın yapan firmalar</div><div class="uf-chips">${d.firms.map((f) => `<a class="chip" href="#/firma/${esc(f.id)}">${esc(f.name)} <b>${f.people}</b></a>`).join("")}</div></div>` : ""}
     ${people.length ? `<div class="uf-block"><div class="peek-h">İncelediğiniz akademisyenler</div><div class="peek-faces">${people.slice(0, 12).map((c) => `<a href="#/profil/${esc(c.id)}" title="${esc(c.name)}">${avatar(c.name, profilePhoto(c))}</a>`).join("")}${people.length > 12 ? `<span class="fi-more">+${people.length - 12}</span>` : ""}</div></div>` : ""}
     ${!id.rector && !id.city && !id.address ? `<p class="uf-empty">Bu kurumun künye bilgisi Vikipedi/Wikidata'da bulunamadı.</p>` : ""}
     ${d.sources?.identity ? `<p class="uf-src">Kaynak: ${esc(d.sources.identity)}</p>` : ""}`;
   const scale = `<div class="uf-block" data-uf-staff>${uniStaffBlock(ac)}</div>
-    <div class="uf-block"><div class="peek-h">Öğrenci dağılımı${sc.students ? ` · ${count(sc.students.value)} öğrenci` : ""}</div>${studentParts.length ? uniStack(studentParts, 0, "Kaynak: Vikipedi bilgi kutusu (yıl yanında)") : `<p class="uf-empty">Önlisans / lisans / lisansüstü kırılımı kamuya açık kaynaklarda bulunamadı.</p>`}</div>
+    <div class="uf-block" data-uf-areas>${uniAreasBlock(ac)}</div>
+    <div class="uf-block" data-uf-students><div class="peek-h">Öğrenci dağılımı${sc.students ? ` · ${count(sc.students.value)} öğrenci` : ""}</div>${studentParts.length ? uniStack(studentParts, 0, d.sources?.students ? `Kaynak: ${d.sources.students}` : "Kaynak: Vikipedi bilgi kutusu (yıl yanında)") : `<p class="uf-empty">Önlisans / lisans / lisansüstü kırılımı kamuya açık kaynaklarda bulunamadı.</p>`}</div>
     ${sc.graduates ? `<div class="uf-block"><div class="peek-h">Mezun</div><p class="uf-big">${count(sc.graduates.value)} <small>${esc(sc.graduates.year || "")}</small></p></div>` : ""}`;
   const research = rs.works ? `<div class="uf-mini">${stat(rs.works, "yayın")}${stat(rs.citations, "atıf")}${stat(rs.h_index, "h-index")}${stat(rs.i10_index, "i10-index")}</div>
     <div class="uf-block"><div class="peek-h">Son ${rs.trend?.length || 0} yılda yayın</div>${uniTrend(rs.trend)}</div>
     ${rs.topics?.length ? `<div class="uf-block"><div class="peek-h">En çok çalışılan konular</div><div class="uf-chips">${rs.topics.map((t) => `<span class="chip">${esc(t)}</span>`).join("")}</div></div>` : ""}
     ${rs.partners?.length ? `<div class="uf-block"><div class="peek-h">En çok birlikte yayın yapılan kurumlar</div><ol class="uf-partners">${rs.partners.map((x) => `<li><span>${esc(x.name)}</span><b>${count(x.count)}</b></li>`).join("")}</ol></div>` : ""}
-    <p class="uf-src">Kaynak: OpenAlex · ${esc(rs.name || "")}</p>` : `<p class="uf-empty">OpenAlex'te kurum kaydı bulunamadı.</p>`;
+    <p class="uf-src">Kaynak: OpenAlex · ${esc(rs.name || "")}</p><div class="uf-block" data-uf-patents></div>` : `<p class="uf-empty">OpenAlex'te kurum kaydı bulunamadı.</p><div class="uf-block" data-uf-patents></div>`;
   return `${line.length || id.motto ? `<div class="uf-id">${line.length ? `<p class="uf-line">${line.map(esc).join(" · ")}</p>` : ""}${id.motto ? `<p class="uf-motto">“${esc(id.motto)}”</p>` : ""}</div>` : ""}
     <div class="uf-stats">${stat(sc.students?.value, "öğrenci", studentYear)}${d.academics ? stat(ac.total, "akademisyen") : `<div data-uf-staff-stat><b class="sk-num"></b><span>akademisyen</span></div>`}${stat(un.faculties, "fakülte")}${stat(deps, "bölüm")}${stat(rs.works, "yayın")}${stat(rs.h_index, "h-index")}</div>
-    <div class="uf-tabs" role="tablist"><button class="on" type="button" data-uf-tab="0" role="tab">Genel bakış</button><button type="button" data-uf-tab="1" role="tab">Kadro ve öğrenci</button><button type="button" data-uf-tab="2" role="tab">Araştırma</button><i class="uf-ink"></i></div>
-    <div class="uf-panes"><div class="uf-pane on">${overview}</div><div class="uf-pane">${scale}</div><div class="uf-pane">${research}</div></div>`;
+    ${compact ? `<div class="uf-panes"><div class="uf-pane on">${overview}</div></div>` : `<div class="uf-tabs" role="tablist"><button class="on" type="button" data-uf-tab="0" role="tab">Genel bakış</button><button type="button" data-uf-tab="1" role="tab">Kadro ve öğrenci</button><button type="button" data-uf-tab="2" role="tab">Araştırma</button><i class="uf-ink"></i></div>
+    <div class="uf-panes"><div class="uf-pane on">${overview}</div><div class="uf-pane">${scale}</div><div class="uf-pane">${research}</div></div>`}`;
 }
 function openUniPeek(card, id, name, people) {
   // Kart açılırken üniversite sayfasının parçaları sunucuda arka planda hazırlanır (fakülteler, site, öğrenci özeti):
@@ -2237,7 +2279,7 @@ function openUniPeek(card, id, name, people) {
     try {
       const d = await api(`/api/universities/${encodeURIComponent(id)}/facts`, { quiet: true });
       if (!peek.isConnected) return;
-      host.innerHTML = uniFactsHtml(d, people); hydrateIcons(host);
+      host.innerHTML = uniFactsHtml(d, people, true); hydrateIcons(host);
       if (!calmMotion()) host.animate([{ opacity: .3 }, { opacity: 1 }], { duration: 320, easing: "ease-out" });
       animateCounts($(".uf-stats", host)); animateCounts($(".uf-pane.on", host));
       const tabs = $$("[data-uf-tab]", host), panes = $$(".uf-pane", host), ink = $(".uf-ink", host);
@@ -2544,12 +2586,12 @@ async function viewUni(uid) {
       <div class="identity-main">
         <div class="identity-avatar" id="uLogo">${organizationLogo("universities", uid, d.data?.name || "Üniversite", "hero-logo")}</div>
         <div class="identity-info"><h1 id="uName">${esc(d.data?.name || "Üniversite")}</h1><div class="meta" id="uMeta"></div></div>
-        <div class="kebab"><button class="icon-btn kebab-btn" type="button" aria-label="Seçenekler">${icon("dots")}</button><div class="kebab-menu" id="uAct" hidden></div></div>
+        <div class="kebab"><button class="icon-btn kebab-btn" type="button" aria-label="Ayarlar ve yenileme" title="Ayarlar ve yenileme">${icon("settings")}</button><div class="kebab-menu" id="uAct" hidden></div></div>
       </div></section>
-    <div class="audience-tabs" role="tablist" aria-label="Üniversite görünümü"><button data-audience="overview" type="button" role="tab" aria-controls="universityOverview">Genel bakış</button><button class="active" data-audience="academic" type="button" role="tab" aria-selected="true" aria-controls="academicUniversity">${icon("users")}Akademisyen bakışı</button><button data-audience="student" type="button" role="tab" aria-selected="false" aria-controls="studentView">${icon("cap")}Öğrenci bakışı</button><button data-audience="candidate" type="button" role="tab" aria-selected="false" aria-controls="candidateView">${icon("grid")}Aday bakışı</button></div>
+    <div class="audience-tabs" role="tablist" aria-label="Üniversite görünümü"><button data-audience="overview" type="button" role="tab" aria-controls="universityOverview">Genel bakış</button><button class="active" data-audience="academic" type="button" role="tab" aria-selected="true" aria-controls="academicUniversity">${icon("users")}Akademisyen bakışı</button><button data-audience="student" type="button" role="tab" aria-selected="false" aria-controls="studentView">${icon("cap")}Öğrenci bakışı</button><button data-audience="candidate" type="button" role="tab" aria-selected="false" aria-controls="candidateView">${icon("grid")}Aday bakışı</button><button data-audience="patents" type="button" role="tab" aria-selected="false" aria-controls="uniPatents">${icon("file")}Patentler<span class="n" id="uniPatentsN"></span></button><button data-audience="ai" type="button" role="tab" aria-selected="false" aria-controls="aiView">${icon("sparkle")}AI bakışı</button></div>
     <div id="academicUniversity" role="tabpanel"><div class="miller">${col("colFac", "layers", "Fakülteler", "Fakültelerde ara", skeleton(7))}
       ${col("colDep", "grid", "Bölümler", "Bölümlerde ara", `<div class="col-empty">Soldan bir fakülte seçin.</div>`)}
-      ${col("colStaff", "users", "Akademisyenler", "Akademisyenlerde ara", `<div class="col-empty">Bir bölüm seçin.</div>`)}</div></div><div id="studentView" role="tabpanel" hidden></div><div id="candidateView" role="tabpanel" hidden></div><div id="universityOverview" role="tabpanel" hidden></div>`);
+      ${col("colStaff", "users", "Akademisyenler", "Akademisyenlerde ara", `<div class="col-empty">Bir bölüm seçin.</div>`)}</div></div><div id="studentView" role="tabpanel" hidden></div><div id="candidateView" role="tabpanel" hidden></div><div id="universityOverview" role="tabpanel" hidden></div><div id="aiView" role="tabpanel" hidden></div><div id="uniPatents" role="tabpanel" hidden></div>`);
   if (d.data?.name) { $("#uName").dataset.typed = d.data.name; typeText($("#uName"), d.data.name); }
   const facultyColumn = $("#colFac");
   if (!d.data) {
@@ -2606,7 +2648,7 @@ function drawStudentChat(d) {
   const nearEnd = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 48;
   if (!keepMessages) thread.replaceChildren();
   if (firstNew < chat.messages.length) thread.insertAdjacentHTML("beforeend", chat.messages.slice(firstNew).map((message) => {
-    const sources = (message.sources || []).filter((source) => /^S\d+$/.test(source.id) && safeUrl(source.url));
+    const sources = (message.sources || []).filter((source) => /^[SW]\d+$/.test(source.id) && safeUrl(source.url));
     let content = esc(message.content).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>");
     if (message.role === "assistant") content = content.replace(/\[(S\d+)\]/g, (label, id) => {
       const source = sources.find((item) => item.id === id);
@@ -2681,22 +2723,14 @@ function renderStudentView() {
   if (!box || !d || box.dataset.ready) return;
   studentState(d); box.dataset.ready = "1";
   box.innerHTML = `<div class="sv-hero"><div><span class="eyebrow">ÖĞRENCİ REHBERİ</span><h2>Ne öğrenmek istersin?</h2><p>Bir başlık seç; bilgiler üniversitenin resmî sayfalarından, kaynağıyla gelir.</p></div>
-      <div class="sv-facts" data-sv-facts>${Array.from({ length: 4 }, () => `<div class="sv-fact"><b class="sk-num"></b><span class="sk-line"></span></div>`).join("")}</div></div>
+</div>
     <div class="student-layout"><div class="student-guide">
       <div class="sv-tiles" role="tablist">${STUDENT_TILES.map(([key, title, sub, ic], i) => `<button type="button" class="sv-tile" role="tab" data-sv-tile="${key}" style="--i:${i}"><span class="sv-tile-ic">${icon(ic)}</span><b>${esc(title)}</b><small>${esc(sub)}</small><em data-sv-badge="${key}"></em></button>`).join("")}</div>
       <section class="sv-panel" hidden aria-live="polite"></section>
       <p class="student-footnote">Program, ücret ve anlaşma bilgileri resmî kaynaklarıyla gösterilir. Başvurmadan önce ilgili dönemin kurum duyurusunu inceleyin.</p></div></div>`;
   hydrateIcons(box);
   $$("[data-sv-tile]", box).forEach((tile) => tile.onclick = () => openStudentTile(d, tile.dataset.svTile));
-  loadStudentFacts(d);
-  api(`/api/universities/${encodeURIComponent(d.id)}/student`, { quiet: true }).then((m) => {
-    if (S.uni !== d) return;
-    Object.entries(m.groups || {}).forEach(([key, g]) => {
-      const badge = $(`[data-sv-badge="${key}"]`); if (!badge) return;
-      badge.textContent = g.cached ? (g.item_count ? `${fmtNum(g.item_count)} bilgi` : "Sayfalar") : "";
-      badge.classList.toggle("on", Boolean(g.item_count));
-    });
-  }).catch(() => {});
+  // Kartların üstünde bilgi sayısı gösterilmez: bilgi yalnız başlık tıklanınca gelir.
   if (d.studentTile) openStudentTile(d, d.studentTile, true);
 }
 async function loadStudentFacts(d) {
@@ -2893,8 +2927,18 @@ function studentSectionResult(data, section) {
   // Derslerde madde yoksa yalnız ders planı/müfredat adlı bağlantılar gösterilir (haber, kalite belgesi, arşiv değil).
   const planLink = (l) => /öğretim planı|ogretim plani|ders planı|ders plani|müfredat|mufredat|curriculum|course plan|ders içerik|ders icerik|ders tanım|ders tanim|ders-tanim|bilgi paketi|program listesi|resmî sayfa/i.test(`${l.title} ${l.url}`) && !/\.(rar|zip|7z)$/i.test(l.url);
   const links = (section === "courses" ? (group.items?.length ? [] : (group.links || []).filter(planLink)) : group.links || []).filter((l) => safeUrl(l.url) && !/^(türkçe|turkce|english|ingilizce|tr|en)$/i.test((l.title || "").trim()) && (section !== "work_travel" || /work.?(and|&)?.?travel|\bwat\b/i.test(`${l.title} ${l.url}`)));
-  const hasItems = Boolean(group.items?.length);
-  const empty = !hasItems && !links.length
+  const hasItems = Boolean(group.items?.length), web = section !== "courses" ? (data.web || []) : [];
+  // Arama motoru sonuçları (kurumun kendi sayfaları önce) üstte; sayfalardan çıkarılan ayrıntılar katlanmış bölümde.
+  const webHtml = web.length ? `<div class="sv-group"><div class="sv-group-head"><b>Öne çıkan sonuçlar</b><span>${web.length} sonuç</span></div><div class="sv-web">${web.map((x) => {
+    const src = safeUrl(x.source_url);
+    return `<a class="sv-web-card ${x.official ? "official" : ""}" href="${esc(src)}" target="_blank" rel="noopener"><span class="sv-web-host">${icon(x.official ? "building" : "globe")}${esc(hostPath(src).split("/")[0])}${x.official ? '<i class="chip teal">resmî</i>' : ""}</span><b>${esc(x.title)}</b>${x.detail ? `<p>${esc(x.detail)}</p>` : ""}</a>`;
+  }).join("")}</div></div>` : "";
+  // Model özeti: arama sonuçlarındaki sayfalar okunup öğrenci için kaynaklı maddelere çevrilir.
+  const brief = null;  // yapay zekâ özeti kullanılmıyor: arama sonuçları ve (kampüste) harita yeterli
+  const briefHtml = brief && (brief.summary || brief.points?.length) ? `<div class="sv-brief"><div class="sv-brief-head"><span class="ai-orb sm">${icon("sparkle")}</span><div><b>Özet</b><small>Resmî sayfalardan okunup yapay zekâ ile özetlendi · ${(brief.sources || []).length} kaynak</small></div></div>
+      ${brief.summary ? `<p class="sv-brief-sum">${esc(brief.summary)}</p>` : ""}
+      ${brief.points?.length ? `<div class="sv-brief-points">${brief.points.map((x, i) => `<article style="--i:${i}"><h4>${esc(x.heading)}</h4><p>${esc(x.text)}</p>${safeUrl(x.source_url) ? `<a class="sv-src" href="${esc(safeUrl(x.source_url))}" target="_blank" rel="noopener">${icon("external")}${esc(hostPath(safeUrl(x.source_url)))}</a>` : ""}</article>`).join("")}</div>` : ""}</div>` : "";
+  const empty = !hasItems && !links.length && !web.length
     ? `<div class="sv-empty">${icon("info")}<div><b>${data.partial ? "Aranıyor…" : data.missing_note ? "Ders planı yayımlanmamış" : section === "courses" && data.errors?.length ? "Bu bölüm için ders içeriği bulunamadı" : data.errors?.length ? "Bu bilgi şu an alınamadı" : section === "work_travel" ? "Üniversitenin sitesinde Work and Travel sayfası yok" : "Resmî sayfalarda bu başlıkta bilgi bulunamadı"}</b><p>${data.partial ? "Bulunanlar geldikçe burada görünecek." : data.missing_note ? esc(data.missing_note) : section === "courses" && data.errors?.length ? "Yukarıdaki nota bakın; istersen yeniden tarayabilirsin." : data.errors?.length ? "Kurum sitesi geç yanıt vermiş olabilir; yeniden tarayabilirsin." : section === "work_travel" ? "Work and Travel genellikle özel ajanslarla yürütülür; üniversite yalnız duyuru yayımlıyorsa burada görünür. Uluslararası ofis sayfaları Erasmus başlığında." : "Kurum bu konuyu sitesinde yayımlamıyor olabilir. Asistana sorarak diğer sayfalara da baktırabilirsin."}</p></div></div>` : "";
   // Hazır veri setinden gelen dersler taranmadan gösterilir; "Yeniden tara" üniversitenin sitesini canlı tarar.
   const checked = data.status === "dataset" ? `Hazır veri setinden · ${date(data.checked_at)}`
@@ -2903,11 +2947,135 @@ function studentSectionResult(data, section) {
     ${studentUnitHtml(data.unit)}
     ${data.program_note ? `<div class="notice"><div>${esc(data.program_note)}</div></div>` : ""}
     ${data.errors?.length && !data.partial ? `<div class="notice warn"><div>${data.errors.map(esc).join(" ")}</div></div>` : ""}
-    ${hasItems ? studentItems(group, section) : ""}${empty}
+    ${section === "campus" ? campusMapHtml(data.map) : ""}${briefHtml}${webHtml}
+    ${hasItems ? (web.length ? `<details class="student-links sv-more sv-extracted"><summary>Sayfalardan çıkarılan ayrıntılar (${fmtNum(group.items.length)})</summary>${studentItems(group, section)}</details>` : studentItems(group, section)) : ""}${empty}
     ${links.length && group.format !== "course_catalog" ? `<div class="sv-group"><div class="sv-group-head"><b>${hasItems ? "İlgili resmî sayfalar" : "Resmî sayfalarda bulunanlar"}</b><span>${links.length} sayfa</span></div>
       <div class="sv-previews">${links.slice(0, hasItems ? 4 : 8).map(linkPreviewCard).join("")}</div>
       ${links.length > (hasItems ? 4 : 8) ? `<details class="student-links sv-more"><summary>${links.length - (hasItems ? 4 : 8)} sayfa daha</summary><div class="sv-previews">${links.slice(hasItems ? 4 : 8).map(linkPreviewCard).join("")}</div></details>` : ""}</div>` : ""}`;
 }
+// Kampüs çevresi (OpenStreetMap): harita + yakındaki toplu taşıma, yurt, kütüphane, yeme-içme, sağlık noktaları.
+function campusMapHtml(m) {
+  if (!m?.center) return "";
+  const { lat, lon } = m.center, d = 0.012;
+  const src = `https://www.openstreetmap.org/export/embed.html?bbox=${lon - d * 1.6},${lat - d},${lon + d * 1.6},${lat + d}&layer=mapnik&marker=${lat},${lon}`;
+  const dist = (v) => v >= 1000 ? `${(v / 1000).toLocaleString("tr-TR", { maximumFractionDigits: 1 })} km` : `${fmtNum(v)} m`;
+  const ICONS = { rail: "layers", ferry: "globe", bus: "grid", dorm: "building", library: "book", food: "sparkle", health: "plus", sport: "award" };
+  // Kampüse ulaşım: her ulaşım türü tam satır; hatlar kart olarak dizilir, karta basınca durakları açılır.
+  CAMPUS_LINES.length = 0;
+  const byMode = new Map();
+  (m.lines || []).forEach((x) => { if (!byMode.has(x.mode)) byMode.set(x.mode, { label: x.label, rows: [] }); byMode.get(x.mode).rows.push(x); });
+  const routeOf = (x) => x.ends?.length === 2 ? `${x.ends[0]} → ${x.ends[1]}` : String(x.name || "").replace(x.ref || "\u0000", "").replace(/^[\s:\-–]+/, "") || x.name || "";
+  const card = (x) => { CAMPUS_LINES.push(x); return `<button type="button" class="line-card" data-campus-line="${CAMPUS_LINES.length - 1}" title="Durakları göster"><b class="line-ref ${esc(x.mode)}">${esc(x.ref || x.label)}</b><span>${esc(routeOf(x))}</span>${icon("chevron")}</button>`; };
+  const transit = byMode.size || m.directions ? `<div class="sv-group"><div class="sv-group-head"><b>Kampüse ulaşım</b><span>${(m.lines || []).length ? `${fmtNum(m.lines.length)} hat · kampüse 700 m içinde geçenler · hatta basınca durakları açılır` : "Toplu taşıma"}</span></div>
+    ${byMode.size ? [...byMode].map(([mode, g]) => `<section class="line-mode"><header><b class="line-ref ${esc(mode)}">${esc(g.label)}</b><span>${g.rows.length} hat</span></header><div class="line-cards">${g.rows.map(card).join("")}</div></section>`).join("")
+      : `<p class="faint">Haritada bu yerleşkeden geçen kayıtlı toplu taşıma hattı bulunamadı; aşağıdaki duraklara ve yol tarifine bakabilirsin.</p>`}
+    ${m.directions ? `<a class="btn sm primary" style="margin-top:12px" href="${esc(m.directions)}" target="_blank" rel="noopener">${icon("map")}Bulunduğum yerden yol tarifi al (toplu taşıma)</a>` : ""}</div>` : "";
+  return `${transit}<div class="sv-group"><div class="sv-group-head"><b>Kampüs çevresi</b><span>${fmtNum(m.radius)} m içinde · OpenStreetMap</span></div>
+    <div class="campus-map"><div class="campus-view"><div class="campus-view-tabs"><button type="button" class="on" data-campus-view="2d">Harita</button><button type="button" data-campus-view="3d">3B görünüm</button></div>
+        <iframe title="Kampüs haritası" loading="lazy" src="${esc(src)}"></iframe><div class="campus-3d" data-campus-3d hidden></div></div>
+      <div class="campus-groups">${(m.groups || []).map((g, i) => `<article class="campus-group" style="--i:${i}"><header>${icon(ICONS[g.key] || "map")}<b>${esc(g.label)}</b><span>${fmtNum(g.count)}</span></header>
+        <small>En yakını ${dist(g.nearest)}</small>${g.items.length ? `<ul>${g.items.slice(0, 4).map((x) => `<li><span>${esc(x.name)}</span><em>${dist(x.distance)}</em></li>`).join("")}</ul>` : ""}</article>`).join("")
+        || '<p class="faint">Yakın çevrede kayıtlı nokta bulunamadı.</p>'}</div></div>
+    <a class="sv-src" href="${esc(m.map)}" target="_blank" rel="noopener">${icon("external")}Haritayı OpenStreetMap'te aç</a></div>`;
+}
+const CAMPUS_LINES = [];
+// Hat ayrıntısı: sıralı duraklar (gidiş / dönüş), işletmeci ve varsa sefer aralığı.
+async function openCampusLine(x) {
+  const head = `<div class="pm-head"><b class="line-ref ${esc(x.mode)}">${esc(x.ref || x.label)}</b><span class="chip">${esc(x.label)}</span>${x.network ? `<span class="chip">${esc(x.network)}</span>` : ""}</div><h2>${esc(x.ends?.length === 2 ? `${x.ends[0]} → ${x.ends[1]}` : x.name)}</h2>`;
+  openModal(`<div class="project-modal">${head}<div class="loading-line"><span class="spinner"></span>Duraklar OpenStreetMap'ten okunuyor…</div></div>`);
+  const opened = $(".project-modal");
+  const parts = await Promise.all((x.ids || []).slice(0, 2).map((id) => api(`/api/campus/line/${encodeURIComponent(id)}`, { quiet: true }).catch(() => null)));
+  if (!opened?.isConnected) return;
+  const ways = parts.filter((d) => d && d.stops?.length);
+  const info = ways[0] || parts.find(Boolean) || {};
+  const stopsHtml = (d) => `<ol class="line-stops">${d.stops.map((n, i) => `<li class="${i === 0 || i === d.stops.length - 1 ? "end" : ""}"><i></i><span>${esc(n)}</span></li>`).join("")}</ol>`;
+  const tabs = ways.map((d) => [`${d.from || d.stops[0]} → ${d.to || d.stops.at(-1)} (${d.stops.length} durak)`, stopsHtml(d)]);
+  const facts = pmRows([["Hat", info.ref || x.ref], ["Ad", info.name || x.name], ["İşletmeci", info.operator], ["Ağ", info.network || x.network], ["Sefer aralığı", info.interval], ["Çalışma saatleri", info.hours], ["Süre", info.duration]]);
+  openRecordModal(x.label, x.ends?.length === 2 ? `${x.ends[0]} → ${x.ends[1]}` : (info.name || x.name), [x.ref, info.network || x.network], [
+    ...tabs, ["Hat bilgisi", facts + (info.url ? `<a class="btn sm" style="margin-top:12px" href="${esc(info.url)}" target="_blank" rel="noopener">${icon("external")}OpenStreetMap'te aç</a>` : "")],
+    ...(ways.length ? [] : [["Duraklar", `<p class="faint">Bu hat için OpenStreetMap'te durak sırası kayıtlı değil ya da şu an okunamadı.</p>`]]),
+  ]);
+}
+// 3B kampüs görünümü (three.js): OpenStreetMap binaları yükseklikleriyle; sürükleyerek döndür, tekerlekle yakınlaş.
+async function mountCampus3d(host, uid) {
+  if (host.dataset.ready) return;
+  host.dataset.ready = "1";
+  host.innerHTML = `<div class="loading-line"><span class="spinner"></span>Binalar OpenStreetMap'ten okunuyor…</div>`;
+  let data, THREE;
+  try { [data, THREE] = await Promise.all([api(`/api/universities/${encodeURIComponent(uid)}/campus3d`, { quiet: true }), import("/static/vendor/three.module.min.js")]); }
+  catch (e) { host.dataset.ready = ""; host.innerHTML = `<p class="faint" style="padding:16px">3B görünüm şu an hazırlanamadı (${esc(e.message || "veri alınamadı")}).</p>`; return; }
+  if (!host.isConnected) return;
+  host.innerHTML = `<canvas></canvas><div class="campus-3d-tip" data-3d-tip>Sürükle: döndür · Tekerlek: yakınlaş · Binanın üstüne gel: adı</div>`;
+  const canvas = $("canvas", host), dark = document.documentElement.dataset.theme === "dark" || document.body.classList.contains("dark");
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(dark ? 0x0f1622 : 0xeaf1f8);
+  scene.fog = new THREE.Fog(scene.background, 700, 1500);
+  const camera = new THREE.PerspectiveCamera(42, 1, 1, 4000);
+  scene.add(new THREE.HemisphereLight(0xffffff, dark ? 0x1b2433 : 0xbfd0e0, 1.15));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.4); sun.position.set(-300, 520, 240); scene.add(sun);
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(data.radius * 1.35, 64), new THREE.MeshLambertMaterial({ color: dark ? 0x18212f : 0xdfe7ee }));
+  ground.rotation.x = -Math.PI / 2; scene.add(ground);
+  const shape = (pts) => { const sh = new THREE.Shape(); pts.forEach(([x, y], i) => (i ? sh.lineTo(x, y) : sh.moveTo(x, y))); return sh; };
+  const flat = (pts, color, y) => { const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape(pts)), new THREE.MeshLambertMaterial({ color })); mesh.rotation.x = -Math.PI / 2; mesh.position.y = y; scene.add(mesh); };
+  (data.greens || []).forEach((pts) => flat(pts, dark ? 0x1f3b2c : 0xbfe3c0, .3));
+  (data.water || []).forEach((pts) => flat(pts, dark ? 0x1d3f5c : 0x9fd0f0, .35));
+  // Yollar: her parça, genişliğinde ince bir şerit.
+  const roadMat = new THREE.MeshLambertMaterial({ color: dark ? 0x2c3a4d : 0xffffff }), pathMat = new THREE.MeshLambertMaterial({ color: dark ? 0x3a4658 : 0xf3e9d2 });
+  (data.roads || []).forEach((r) => { for (let k = 1; k < r.p.length; k += 1) {
+    const [x1, y1] = r.p[k - 1], [x2, y2] = r.p[k], len = Math.hypot(x2 - x1, y2 - y1); if (len < .5) continue;
+    const seg = new THREE.Mesh(new THREE.PlaneGeometry(len, r.w), r.f ? pathMat : roadMat);
+    seg.rotation.x = -Math.PI / 2; seg.rotation.z = Math.atan2(y2 - y1, x2 - x1); seg.position.set((x1 + x2) / 2, r.f ? .5 : .6, -(y1 + y2) / 2); scene.add(seg);
+  } });
+  const uniMat = new THREE.MeshLambertMaterial({ color: 0x3b5bdb }), mat = new THREE.MeshLambertMaterial({ color: dark ? 0x56657a : 0xc9d3de }), hot = new THREE.MeshLambertMaterial({ color: 0xf59f00 });
+  const buildings = [];
+  (data.buildings || []).forEach((b) => {
+    let geo; try { geo = new THREE.ExtrudeGeometry(shape(b.p), { depth: b.h, bevelEnabled: false }); } catch { return; }
+    const mesh = new THREE.Mesh(geo, b.u ? uniMat : mat);
+    mesh.rotation.x = -Math.PI / 2; mesh.userData = { name: b.n, base: b.u ? uniMat : mat, h: b.h }; scene.add(mesh); buildings.push(mesh);
+  });
+  const pin = new THREE.Mesh(new THREE.ConeGeometry(9, 26, 16), new THREE.MeshLambertMaterial({ color: 0xe03131 })); pin.rotation.x = Math.PI; pin.position.set(0, 60, 0); scene.add(pin);
+  // Basit yörünge denetimi: açı (theta), eğim (phi), uzaklık.
+  const view = { theta: -.6, phi: 1.0, dist: data.radius * 1.9 };
+  const place = () => { camera.position.set(view.dist * Math.sin(view.phi) * Math.sin(view.theta), view.dist * Math.cos(view.phi), view.dist * Math.sin(view.phi) * Math.cos(view.theta)); camera.lookAt(0, 0, 0); };
+  let drag = null, raf = 0, idle = true, last = null;
+  const size = () => { const w = host.clientWidth, h = host.clientHeight || 360; renderer.setSize(w, h, false); camera.aspect = w / Math.max(1, h); camera.updateProjectionMatrix(); };
+  const frame = () => {
+    raf = 0;
+    if (!host.isConnected) { renderer.dispose(); return; }
+    if (idle && !calmMotion()) view.theta += .0018;
+    pin.position.y = 60 + Math.sin(performance.now() / 420) * 5;
+    place(); renderer.render(scene, camera);
+    if (!host.hidden) raf = requestAnimationFrame(frame);
+  };
+  const kick = () => { if (!raf) raf = requestAnimationFrame(frame); };
+  canvas.onpointerdown = (e) => { drag = { x: e.clientX, y: e.clientY }; idle = false; canvas.setPointerCapture(e.pointerId); };
+  canvas.onpointerup = () => { drag = null; };
+  const ray = new THREE.Raycaster(), mouse = new THREE.Vector2(), tip = $("[data-3d-tip]", host);
+  canvas.onpointermove = (e) => {
+    if (drag) { view.theta -= (e.clientX - drag.x) * .006; view.phi = Math.min(1.5, Math.max(.2, view.phi - (e.clientY - drag.y) * .005)); drag = { x: e.clientX, y: e.clientY }; return; }
+    const r = canvas.getBoundingClientRect(); mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(mouse, camera);
+    const hit = ray.intersectObjects(buildings)[0]?.object || null;
+    if (hit !== last) { if (last) last.material = last.userData.base; if (hit) hit.material = hot; last = hit;
+      tip.textContent = hit ? `${hit.userData.name || "Adsız bina"} · yaklaşık ${Math.round(hit.userData.h)} m` : "Sürükle: döndür · Tekerlek: yakınlaş · Binanın üstüne gel: adı"; }
+  };
+  canvas.onwheel = (e) => { e.preventDefault(); idle = false; view.dist = Math.min(data.radius * 3.2, Math.max(120, view.dist * (1 + Math.sign(e.deltaY) * .08))); };
+  new ResizeObserver(() => { size(); kick(); }).observe(host);
+  host._kick = kick; size(); kick();
+}
+document.addEventListener("click", (e) => {
+  const line = e.target.closest("[data-campus-line]");
+  if (line) { const x = CAMPUS_LINES[+line.dataset.campusLine]; if (x) openCampusLine(x); return; }
+  const tab = e.target.closest("[data-campus-view]");
+  if (tab) {
+    const wrap = tab.closest(".campus-view"), three = tab.dataset.campusView === "3d", box = $("[data-campus-3d]", wrap);
+    $$("[data-campus-view]", wrap).forEach((b) => b.classList.toggle("on", b === tab));
+    $("iframe", wrap).hidden = three; box.hidden = !three;
+    if (three && S.uni) { mountCampus3d(box, S.uni.id); box._kick?.(); }
+  }
+});
 function linkPreviewCard(link) {
   const url = safeUrl(link.url);
   return `<article class="lp" data-lp-url="${esc(url)}"><header><span class="lp-ic">${icon(/\.pdf(\?|$)/i.test(url) ? "file" : "globe")}</span><div><b>${esc(cleanPageTitle(link.title, "Resmî sayfa"))}</b><small>${esc(hostPath(url))}</small></div>
@@ -3307,7 +3475,11 @@ function setUniversityAudience(audience) {
   $("#studentView").hidden = audience !== "student";
   $("#universityOverview").hidden = audience !== "overview";
   $("#candidateView").hidden = audience !== "candidate";
+  $("#aiView").hidden = audience !== "ai";
+  $("#uniPatents").hidden = audience !== "patents";
+  if (audience === "patents") renderUniPatents();
   if (audience === "overview") renderUniversityOverview();
+  if (audience === "ai") renderAiView();
   if (audience === "student") renderStudentView();
   if (audience === "candidate") renderCandidateView();
 }
@@ -3330,12 +3502,29 @@ async function renderCandidateView() {
     return;
   }
   const types = [...new Set(all.map((x) => x.score_type).filter(Boolean))].sort();
-  const st = d.atlasFilter ||= { q: "", type: "", level: "" };
+  const st = d.atlasFilter ||= { q: "", type: "", level: "", sort: "rank" };
+  st.sort ||= "rank";
+  const lisans = all.filter((x) => x.level === "Lisans"), cur = (x) => x.years?.[0] || {};
+  const fills = all.map((x) => cur(x).quota && cur(x).placed != null ? cur(x).placed / cur(x).quota : null).filter((v) => v != null);
+  const best = all.filter((x) => cur(x).rank != null).sort((a, b) => cur(a).rank - cur(b).rank)[0];
+  const harder = all.filter((x) => x.years?.[0]?.rank != null && x.years?.[1]?.rank != null && x.years[0].rank < x.years[1].rank).length;
+  const byType = types.map((t) => [t, all.filter((x) => x.score_type === t).length]);
+  const stat = (v, label, sub = "") => `<div class="aday-stat"><b>${v}</b><span>${esc(label)}</span>${sub ? `<small>${sub}</small>` : ""}</div>`;
+  const summary = `<div class="aday-stats">
+    ${stat(fmtNum(lisans.length), "lisans programı", `${fmtNum(all.length - lisans.length)} ön lisans`)}
+    ${stat(fmtNum(all.reduce((a, x) => a + (cur(x).quota ?? x.quota ?? 0), 0)), "toplam kontenjan")}
+    ${stat(fills.length ? `%${Math.round(fills.reduce((a, v) => a + v, 0) / fills.length * 100)}` : "—", "ortalama doluluk", `${fills.filter((v) => v < 1).length} program boş kontenjanlı`)}
+    ${stat(best ? fmtNum(cur(best).rank) : "—", "en yüksek başarı sırası", best ? esc(best.name) : "")}
+    ${stat(fmtNum(harder), "program zorlaştı", "başarı sırası geçen yıla göre yükseldi")}
+    ${stat(fmtNum(all.filter((x) => x.language && x.language !== "Türkçe").length), "yabancı dilde", `${fmtNum(all.filter((x) => x.scholarship && x.scholarship !== "Ücretsiz").length)} burslu/indirimli`)}
+  </div><div class="aday-types">${byType.map(([t, n]) => `<span class="chip blue">${esc(t)} <b>${n}</b></span>`).join("")}</div>`;
   box.innerHTML = `<div class="card card-pad aday">
     <div class="aday-head"><div><b>${fmtNum(all.length)}</b> program · ${esc(String(d.atlas.year || ""))} tercih kılavuzu<small class="muted"> · Kaynak: <a href="https://yokatlas.yok.gov.tr/" target="_blank" rel="noopener">YÖK Atlas</a></small></div>
       <div class="aday-filters"><input type="search" placeholder="Program ara" value="${esc(st.q)}" data-aday-q aria-label="Program ara">
         <select data-aday-type aria-label="Puan türü"><option value="">Tüm puan türleri</option>${types.map((t) => `<option ${st.type === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>
-        <select data-aday-level aria-label="Düzey"><option value="">Lisans ve ön lisans</option><option ${st.level === "Lisans" ? "selected" : ""}>Lisans</option><option ${st.level === "Ön lisans" ? "selected" : ""}>Ön lisans</option></select></div></div>
+        <select data-aday-level aria-label="Düzey"><option value="">Lisans ve ön lisans</option><option ${st.level === "Lisans" ? "selected" : ""}>Lisans</option><option ${st.level === "Ön lisans" ? "selected" : ""}>Ön lisans</option></select>
+        <select data-aday-sort aria-label="Sırala">${[["rank", "Başarı sırasına göre"], ["score", "Taban puana göre"], ["quota", "Kontenjana göre"], ["change", "En çok yükselen"], ["name", "Ada göre"]].map(([k, l]) => `<option value="${k}" ${st.sort === k ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
+    ${summary}
     <div data-aday-list></div></div>`;
   const draw = () => {
     const q = fold(st.q);
@@ -3349,21 +3538,97 @@ async function renderCandidateView() {
       const diff = now?.rank != null && prev?.rank != null ? now.rank - prev.rank : null;
       const trend = diff == null || diff === 0 ? "" : `<small class="aday-trend ${diff < 0 ? "up" : "down"}" title="${prev.year} başarı sırası: ${num(prev.rank)}">${diff < 0 ? "▲" : "▼"} ${num(Math.abs(diff))}</small>`;
       const past = (x.years || []).slice(1).map((y) => `<span title="${y.year}">${y.year}: ${num(y.score, 2)} · ${num(y.rank)}</span>`).join("");
-      return `<tr><td><b>${esc(x.name)}</b><div class="aday-tags"><span class="chip blue">${esc(x.score_type || "—")}</span>${x.language && x.language !== "Türkçe" ? `<span class="chip">${esc(x.language)}</span>` : ""}${x.scholarship !== "Ücretsiz" ? `<span class="chip gold">${esc(x.scholarship)}</span>` : ""}${x.level !== "Lisans" ? `<span class="chip">${esc(x.level)}</span>` : ""}${x.study && x.study !== "Örgün Öğretim" ? `<span class="chip">${esc(x.study)}</span>` : ""}</div>${past ? `<div class="aday-past">${past}</div>` : ""}</td>
+      return `<tr class="aday-row" data-aday-code="${esc(String(x.code || ""))}" tabindex="0" title="Ayrıntılar için tıkla"><td><b>${esc(x.name)}</b><div class="aday-tags"><span class="chip blue">${esc(x.score_type || "—")}</span>${x.language && x.language !== "Türkçe" ? `<span class="chip">${esc(x.language)}</span>` : ""}${x.scholarship !== "Ücretsiz" ? `<span class="chip gold">${esc(x.scholarship)}</span>` : ""}${x.level !== "Lisans" ? `<span class="chip">${esc(x.level)}</span>` : ""}${x.study && x.study !== "Örgün Öğretim" ? `<span class="chip">${esc(x.study)}</span>` : ""}</div>${past ? `<div class="aday-past">${past}</div>` : ""}</td>
         <td>${num(now?.quota ?? x.quota)}${now?.placed != null ? `<small> / ${num(now.placed)}</small>` : ""}</td><td>${num(now?.score, 2)}</td><td>${num(now?.rank)}${trend}</td></tr>`;
     };
+    // Ayrıntı: yıllara göre başarı sırası ve taban puan (Atlas'ın verdiği 4 yıl), doluluk, süre, ilçe, akreditasyon.
+    const detail = (x) => {
+      const ys = [...(x.years || [])].reverse(), ranks = ys.map((y) => y.rank).filter((v) => v != null);
+      const lo = Math.min(...ranks), hi = Math.max(...ranks);
+      const bars = ys.map((y) => `<div class="aday-yr"><i style="--h:${y.rank == null ? 0 : hi === lo ? 70 : Math.round(30 + (hi - y.rank) / (hi - lo) * 70)}%"></i><b>${num(y.rank)}</b><small>${num(y.score, 2)}</small><em>${y.year}</em></div>`).join("");
+      const now = x.years?.[0] || {}, fill = now.quota && now.placed != null ? Math.round(now.placed / now.quota * 100) : null;
+      const facts = [["Süre", x.duration ? `${x.duration} yıl` : ""], ["Öğretim", x.study], ["Dil", x.language], ["Burs", x.scholarship], ["Yıllık ücret", x.fee ? `${num(x.fee)} TL` : ""],
+        ["İl / ilçe", [tTitle(x.city || ""), tTitle(x.district || "")].filter(Boolean).join(" / ")], ["Üniversite türü", tTitle(x.uni_type || "")], ["Üniversite akreditasyonu", x.uni_accreditation],
+        ["Türkiye Yeterlilikler Çerçevesi", x.tyc], ["Uygulamalı eğitim", x.applied],
+        ["Doluluk", fill == null ? "" : `%${fill} (${num(now.placed)} / ${num(now.quota)})`], ["Akreditasyon", x.accreditation], ["Program grubu", x.group], ["Program kodu", x.code]]
+        .filter(([, v]) => v).map(([k, v]) => `<span><small>${k}</small><b>${esc(String(v))}</b></span>`).join("");
+      const STAFF = { prof: "Profesör", doc: "Doçent", dou: "Dr. Öğr. Üyesi", ogr_gor: "Öğretim görevlisi", ar_gor: "Araştırma görevlisi" };
+      const staffRows = Object.entries(x.staff || {}).filter(([, n]) => n > 0), staffTotal = staffRows.reduce((a, [, n]) => a + n, 0);
+      const staff = staffRows.map(([k, n]) => `<span><small>${STAFF[k] || k}</small><b>${num(n)}</b></span>`).join("");
+      return `<tr class="aday-detail"><td colspan="4"><div class="aday-detail-box"><div><div class="aday-yrs-h">Başarı sırası ve taban puan · yıllara göre <small>(çubuk yükseldikçe program zorlaşmış)</small></div><div class="aday-yrs">${bars}</div></div>
+        <div class="aday-facts">${facts}</div>
+        ${staffTotal ? `<div><div class="aday-yrs-h">Öğretim elemanları · ${num(staffTotal)} kişi</div><div class="aday-facts">${staff}</div></div>` : ""}
+        ${(x.quotas || []).length ? `<div><div class="aday-yrs-h">Kontenjan ve yerleşme</div><table class="aday-quota"><thead><tr><th>Kontenjan türü</th><th>Kontenjan</th><th>Yerleşen</th></tr></thead><tbody>${x.quotas.map((q) => `<tr><td>${esc(q.name)}</td><td>${num(q.quota)}</td><td>${num(q.placed)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+        <div data-aday-nets="${esc(String(x.code || ""))}"><div class="aday-yrs-h">Son yerleşen adayın netleri</div><div class="loading-line"><span class="spinner"></span>YÖK Atlas'tan okunuyor…</div></div>
+        ${(x.conditions || []).length ? `<details class="student-links"><summary>Programa yerleşme koşulları (${x.conditions.length})</summary><ol class="aday-cond">${x.conditions.map((c) => `<li><b>Koşul ${esc(c.code)}</b> ${esc(c.text)}</li>`).join("")}</ol></details>` : ""}
+        <div class="aday-links">${x.code ? `<a class="source-link" href="https://yokatlas.yok.gov.tr/detay/${encodeURIComponent(x.code)}" target="_blank" rel="noopener">${icon("external")}YÖK Atlas program sayfası</a>` : ""}</div></div></td></tr>`;
+    };
+    const sorters = { rank: (a, b) => (a.years?.[0]?.rank ?? 9e9) - (b.years?.[0]?.rank ?? 9e9), score: (a, b) => (b.years?.[0]?.score ?? -1) - (a.years?.[0]?.score ?? -1),
+      quota: (a, b) => (b.years?.[0]?.quota ?? b.quota ?? 0) - (a.years?.[0]?.quota ?? a.quota ?? 0), name: (a, b) => a.name.localeCompare(b.name, "tr"),
+      change: (a, b) => ((a.years?.[0]?.rank ?? 0) - (a.years?.[1]?.rank ?? a.years?.[0]?.rank ?? 0)) - ((b.years?.[0]?.rank ?? 0) - (b.years?.[1]?.rank ?? b.years?.[0]?.rank ?? 0)) };
     const head = `<thead><tr><th>Program</th><th>Kontenjan<small> / yerleşen</small></th><th>Taban puan</th><th>Başarı sırası</th></tr></thead>`;
     $("[data-aday-list]", box).innerHTML = [...groups].sort((a, b) => a[0].localeCompare(b[0], "tr")).map(([fac, list], i) =>
       `<details class="student-accordion student-branch" ${groups.size <= 3 || q || i === 0 ? "open" : ""}><summary><span class="student-summary-icon">${icon("building")}</span><span><b>${esc(tTitle(fac))}</b><small>${fmtNum(list.length)} program</small></span>${icon("chevron")}</summary>
-        <div class="student-content"><table class="aday-table">${head}<tbody>${list.sort((a, b) => (a.years?.[0]?.rank ?? 9e9) - (b.years?.[0]?.rank ?? 9e9)).map(row).join("")}</tbody></table></div></details>`).join("")
+        <div class="student-content"><table class="aday-table">${head}<tbody>${list.sort(sorters[st.sort] || sorters.rank).map(row).join("")}</tbody></table></div></details>`).join("")
       || '<p class="student-missing">Süzgece uyan program yok.</p>';
+    hydrateIcons($("[data-aday-list]", box));
+    $$(".aday-row", box).forEach((tr) => {
+      const toggle = () => {
+        const open = tr.nextElementSibling?.classList.contains("aday-detail");
+        if (open) { tr.nextElementSibling.remove(); tr.classList.remove("open"); return; }
+        const x = all.find((p) => String(p.code) === tr.dataset.adayCode);
+        if (!x) return;
+        tr.insertAdjacentHTML("afterend", detail(x)); tr.classList.add("open"); hydrateIcons(tr.nextElementSibling);
+        loadAdayNets(tr.nextElementSibling, x.code);
+      };
+      tr.onclick = toggle;
+      tr.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
+    });
   };
   draw();
+  $("[data-aday-sort]", box).onchange = (e) => { st.sort = e.target.value; draw(); };
   $("[data-aday-q]", box).oninput = (e) => { st.q = e.target.value; draw(); };
   $("[data-aday-type]", box).onchange = (e) => { st.type = e.target.value; draw(); };
   $("[data-aday-level]", box).onchange = (e) => { st.level = e.target.value; draw(); };
 }
 
+// Ekstra bilgi: YÖK'teki temel alan / bilim alanı / anahtar kelimeler, dizin kimlikleri (Scopus, ResearcherID, ORCID),
+// BM Sürdürülebilir Kalkınma Amaçları (OpenAlex yayın sınıflaması) ve ödüller (YÖK).
+function extraYokHtml(y, sec, pubs) {
+  const awards = sec.awards || [];
+  return `<div class="extra-info-grid" style="margin-top:18px">
+    <section class="card card-pad" id="yokAreaBox">${yokAreaHtml(y)}</section>
+    <section class="card card-pad" id="yokMetricsBox">${yokMetricsHtml(null, y)}</section>
+  </div>
+  <section class="card card-pad" id="yokSdgBox" style="margin-top:18px">${yokSdgHtml(null)}</section>
+  <section class="card card-pad" style="margin-top:18px"><h3>Ödüller <span class="count">${awards.length}</span></h3>${awards.length ? sectionView(awards) : `<p class="faint">YÖK'te ödül kaydı yok.</p>`}</section>`;
+}
+function yokAreaHtml(y) {
+  const field = (label, value, cls = "") => value ? `<div class="yk-field ${cls}"><small>${label}</small><div>${value}</div></div>` : "";
+  const keys = (y.keywords || []).map((k) => `<span class="chip">${esc(k)}</span>`).join("");
+  const body = field("Temel alan", esc(y.area || ""), "lead") + field("Bilim alanı", esc(y.field || "")) + field("Anahtar kelimeler", keys ? `<div class="chips">${keys}</div>` : "");
+  return `<h3>Araştırma alanları</h3>${body ? `<div class="yk-fields">${body}</div>` : `<p class="faint">YÖK'te alan bilgisi yok.</p>`}<p class="faint">Kaynak: YÖK Akademik</p>`;
+}
+// Metrikler: YÖK Akademik'in gösterdiği Web of Science ve Scopus sayıları (yayın, atıf, h-indeks) ve dizin kimlikleri.
+function yokMetricsHtml(d, y = {}) {
+  const m = d?.metrics || {}, ids = d?.ids || { scopus: y.scopus_id, researcher: y.researcher_id };
+  const date = (v) => v ? new Date(v).toLocaleDateString("tr-TR") : "";
+  const block = (cls, title, x, href) => `<div class="mt-box ${cls}"><h4>${title}${href ? `<a href="${esc(href)}" target="_blank" rel="noopener" title="Profili aç">${icon("external")}</a>` : ""}</h4>
+    ${x && (x.pubs != null || x.cites != null) ? `<dl><div><dt>Yayınlar</dt><dd>${fmtNum(x.pubs ?? 0)}</dd></div><div><dt>Atıflar</dt><dd>${fmtNum(x.cites ?? 0)}</dd></div><div><dt>H-indeks</dt><dd>${fmtNum(x.h ?? 0)}</dd></div></dl>${x.date ? `<small>Son güncelleme: ${esc(date(x.date))}</small>` : ""}`
+      : `<p class="faint">${d ? "YÖK'te kayıt yok." : "YÖK'ten okunuyor…"}</p>`}</div>`;
+  return `<h3>Metrikler</h3><div class="mt-grid">${block("wos", "Web of Science", m.wos, ids.researcher ? `https://www.webofscience.com/wos/author/record/${encodeURIComponent(ids.researcher)}` : "")}
+    ${block("scopus", "Scopus", m.scopus, ids.scopus ? `https://www.scopus.com/authid/detail.uri?authorId=${encodeURIComponent(ids.scopus)}` : "")}</div>
+    <div class="chips" style="margin-top:10px">${ids.scopus ? `<span class="chip">Scopus ID ${esc(ids.scopus)}</span>` : ""}${ids.researcher ? `<span class="chip">ResearcherID ${esc(ids.researcher)}</span>` : ""}${ids.orcid ? `<span class="chip">ORCID ${esc(ids.orcid)}</span>` : ""}${ids.scholar ? `<a class="chip" href="https://scholar.google.com/citations?user=${encodeURIComponent(ids.scholar)}" target="_blank" rel="noopener">Google Scholar ${icon("external")}</a>` : ""}</div>
+    <p class="faint">Kaynak: YÖK Akademik</p>`;
+}
+// BM Sürdürülebilir Kalkınma Amaçları: YÖK profilindeki amaçlar, resmî renkleriyle numaralı kutucuklar.
+const SDG_COLORS = ["#E5243B", "#DDA63A", "#4C9F38", "#C5192D", "#FF3A21", "#26BDE2", "#FCC30B", "#A21942", "#FD6925", "#DD1367", "#FD9D24", "#BF8B2E", "#3F7E44", "#0A97D9", "#56C02B", "#00689D", "#19486A"];
+function yokSdgHtml(d) {
+  const goals = d?.sdgs || [];
+  return `<h3>BM Sürdürülebilir Kalkınma Amaçları${goals.length ? ` <span class="count">${goals.length}</span>` : ""}</h3>${goals.length
+    ? `<div class="sdg-tiles">${goals.map((g, i) => `<div class="sdg-tile" style="--c:${SDG_COLORS[(g.id - 1) % 17]};--i:${i}" title="${esc(g.name)}"><b>${g.id}</b><span>${esc(g.name)}</span></div>`).join("")}</div>`
+    : `<p class="faint">${d ? "YÖK profilinde Sürdürülebilir Kalkınma Amacı kaydı yok." : "YÖK'ten okunuyor…"}</p>`}<p class="faint">Kaynak: YÖK Akademik</p>`;
+}
 function renderUni() {
   const d = S.uni, items = d.data.items;
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Üniversiteler", href: "#/universiteler" }, { label: d.data.name }]);
@@ -3371,8 +3636,10 @@ function renderUni() {
   $("#uMeta").innerHTML = `<span>Kaynak: YÖK Akademik</span>${d.data.home ? `<span>${esc(new URL(d.data.home).hostname.replace(/^www\./, ""))}</span>` : ""}`;
   $("#uLogo").innerHTML = organizationLogo("universities", d.id, d.data.name, "hero-logo");
   $("#uAct").innerHTML = organizationSaveButton("universities", d.id) + (d.data.home ? `<a class="btn sm" href="${esc(safeUrl(d.data.home))}" target="_blank" rel="noopener">${icon("globe")}Kurum sitesi</a>
-    <button class="btn sm" id="uNewPerson" type="button">${icon("plus")}Akademisyen ara</button>` : "");
+    <button class="btn sm" id="uNewPerson" type="button">${icon("plus")}Akademisyen ara</button>` : "")
+    + `<button class="btn sm" type="button" id="uRefresh" title="Yenilenecek bilgileri seç">${icon("refresh")}Yenile</button>`;
   if ($("#uNewPerson")) $("#uNewPerson").onclick = () => newPersonModal(d.data.home);
+  $("#uRefresh").onclick = () => { $("#uAct").hidden = true; refreshUniversityModal(d); };
   hydrateIcons($("#uAct"));
   $("#colFacN").textContent = items.length;
   $("#colFac .col-body").innerHTML = items.length ? `<div class="stagger">${items.map((u, i) => `<div class="unit ${d.fac === i ? "active" : ""}" data-unit="yfac" data-i="${i}" style="--i:${Math.min(i, 24)}" data-q="${esc(fold(u.name))}">
@@ -3847,13 +4114,13 @@ function renderProfile(r, chat) {
   const tabs = [
     ["pubs", "Yayınlar", r.unique_count], ["career", "Akademik geçmiş", (y.career || []).length + (y.education || []).length],
     ["courses", "Dersler", (sec.courses || []).length], ["theses", "Tezler", nTheses],
-    ["more", "Projeler ve diğer", ["projects", "awards", "patents", "memberships", "art"].reduce((s, k) => s + (sec[k] || []).length, 0)],
+    ["more", "Projeler", (sec.projects || []).length + trProjects.length],
     ["collab", "İş birlikleri", (y.collaborators || []).length + (r.industry || []).length],
-    ...(trProjects.length ? [["tubitak", "TÜBİTAK", trProjects.length]] : []), ["patents", "Patentler", patentCount(r.patents)],
+    ["patents", "Patentler", patentCount(r.patents)],
     ["score", "Doçentlik ve teşvik puanı", ""], ["interests", "Ekstra bilgi", ""], ["chat", "Asistan", ""],
   ];
-  const otherSections = [["projects", "Projeler", "briefcase"], ["awards", "Ödüller", "award"], ["patents", "Patentler", "file"],
-    ["memberships", "Üyelikler", "users"], ["art", "Sanatsal faaliyetler", "sparkle"]];
+  // Patentler kendi sekmesinde, ödüller Ekstra bilgi'de; burada projeler (YÖK + TR Dizin TÜBİTAK), üyelikler, sanat.
+  const otherSections = [["projects", "Projeler", "briefcase"], ["memberships", "Üyelikler", "users"], ["art", "Sanatsal faaliyetler", "sparkle"]];
   const pubSrc = (x) => ({ jid: r.job_id, pid: x.id, person: p.name });
   S.lists.pubs = r.publications;
   S.listMeta.pubs = { file: p.name, person: p.name, title: p.title, institution: p.institution, cats: true };
@@ -3903,7 +4170,7 @@ function renderProfile(r, chat) {
     <div class="panel active" data-panel="pubs">
       <div class="publication-actions"><div class="pub-scan-state" id="profileWosState" role="status"></div>${sourcePicker("profileSourcesPicker", PROFILE_SOURCES, r.refresh_preferences?.sources, true)}</div><div id="profilePublications"></div></div>
 
-    <div class="panel" data-panel="interests"><div class="extra-info-grid"><section class="card card-pad"><h3>Dergi çeyreği</h3><p class="extra-info-value" id="profileQuartiles">${quartileDistribution(r, qCounts)}</p><p class="faint">SJR sınıflaması, yayın yılına göre derginin en iyi alanı.</p></section><section class="card card-pad"><h3>Kaynak dağılımı</h3><p class="extra-info-value" id="profileSources">${esc(sourceDistribution(r))}</p></section></div><div class="card card-pad"><h3>İlgi alanları</h3><div class="chips interest-list">${heroInts.map(x => `<span class="chip">${esc(x)}</span>`).join("") || "İlgi alanı kaydı bulunamadı."}</div></div><div class="extra-info-grid" id="yokStatsBox" style="margin-top:18px"></div></div>
+    <div class="panel" data-panel="interests"><div class="extra-info-grid"><section class="card card-pad"><h3>Dergi çeyreği</h3><p class="extra-info-value" id="profileQuartiles">${quartileDistribution(r, qCounts)}</p><p class="faint">SJR sınıflaması, yayın yılına göre derginin en iyi alanı.</p></section><section class="card card-pad"><h3>Kaynak dağılımı</h3><p class="extra-info-value" id="profileSources">${esc(sourceDistribution(r))}</p></section></div><div class="extra-info-grid" id="yokStatsBox" style="margin-top:18px"></div>${extraYokHtml(y, sec, r.publications || [])}</div>
     <div class="panel" data-panel="career"><div class="grid-2">
       <div class="card card-pad"><div class="card-title">${icon("briefcase")}Akademik görevler</div>${timeline(y.career)}</div>
       <div class="card card-pad"><div class="card-title">${icon("cap")}Öğrenim</div>${timeline(y.education, "teal")}</div>
@@ -3918,9 +4185,11 @@ function renderProfile(r, chat) {
       ${tez.advised?.length ? `<div class="card card-pad"><div class="card-title">${icon("users")}Danışmanlık yaptığı tezler<span class="spacer"></span><span class="count">${tez.advised.length}</span><span class="badge tez">Tez Merkezi</span></div>${thesisList(tez.advised, true)}</div>`
         : `<div class="card card-pad"><div class="card-title">${icon("users")}Yönetilen tezler<span class="spacer"></span><span class="badge yok">YÖK</span></div>${sectionView(sec.theses)}</div>`}
     </div></div>
-    <div class="panel" data-panel="more"><div class="grid-2">
-      ${otherSections.filter(([k]) => (sec[k] || []).length).map(([k, l, ic]) => `<div class="card card-pad"><div class="card-title">${icon(ic)}${l}<span class="spacer"></span><span class="count">${(sec[k] || []).length}</span></div>${sectionView(sec[k])}</div>`).join("")}</div>
-      ${(() => { const none = otherSections.filter(([k]) => !(sec[k] || []).length).map(([, l]) => l); return none.length ? `<div class="empty-sections">${icon("info")}<span>YÖK'te kaydı bulunmayan: <b>${esc(none.join(", "))}</b>. Eski profillerde projeler okunamamış olabilir; <b>Yenile → Projeler</b> ile tekrar alınır.</span></div>` : ""; })()}</div>
+    <div class="panel" data-panel="more"><div class="stack">
+      <div class="card card-pad" data-projects-card><div class="card-title">${icon("briefcase")}Projeler<span class="spacer"></span><span class="count">${(sec.projects || []).length + trProjects.length}</span></div>
+        ${projectRows(sec.projects || [], trProjects, r.industry) || `<p class="faint" style="margin:0">YÖK'te ve TR Dizin'de proje kaydı yok. Eski profillerde projeler okunamamış olabilir; <b>Yenile → Projeler</b> ile tekrar alınır.</p>`}</div>
+      ${["memberships", "art"].filter((k) => (sec[k] || []).length).length ? `<div class="grid-2">${[["memberships", "Üyelikler", "users"], ["art", "Sanatsal faaliyetler", "sparkle"]].filter(([k]) => (sec[k] || []).length).map(([k, l, ic]) => `<div class="card card-pad"><div class="card-title">${icon(ic)}${l}<span class="spacer"></span><span class="count">${sec[k].length}</span><span class="badge yok">YÖK</span></div>${sectionView(sec[k])}</div>`).join("")}</div>` : ""}
+    </div></div>
 
     <div class="panel" data-panel="collab"><div class="stack"><div id="industryBox">${industryHtml(r.industry)}</div>${(y.collaborators || []).length ? `<div class="collabs stagger">${y.collaborators.map((c, i) => `
       <div class="collab cl-card" data-collab="${i}" style="--i:${i}">
@@ -3928,14 +4197,15 @@ function renderProfile(r, chat) {
         <div class="cl-person">${avatar(c.name, c.photo, "av cl-av")}<div><b>${esc(c.name)}</b><span>${esc(c.title || "")}</span></div></div></div>`).join("")}</div>`
       : `<div class="card">${emptyState("users", "İş birliği bilgisi yok", "YÖK'te birlikte çalıştığı kişi kaydı bulunamadı ya da profil eski sürümle hazırlandı.")}</div>`}</div></div>
 
-    <div class="panel" data-panel="tubitak"><div class="card card-pad" id="tubitakBox">${tubitakHtml(trProjects, r.industry)}</div></div>
-    <div class="panel" data-panel="patents"><div class="card card-pad" id="patentsBox">${r.patents ? personPatentsHtml(r.patents) : ""}</div></div>
+    <div class="panel" data-panel="patents"><div class="stack">${(sec.patents || []).length ? `<div class="card card-pad" data-yok-patents><div class="card-title">${icon("file")}Patentler<span class="spacer"></span><span class="count">${sec.patents.length}</span><span class="badge yok">YÖK</span></div>
+        <div class="proj-list">${sec.patents.map((x, i) => `<button type="button" class="proj-row" data-yok-patent="${i}"><span class="proj-src yok">YÖK</span><span class="chips">${(x.labels || []).map((l) => `<span class="chip">${esc(l)}</span>`).join("")}</span><b>${esc(x.title)}</b><small>${esc(x.extra || "")}</small></button>`).join("")}</div></div>` : ""}
+      <div class="card card-pad" id="patentsBox">${r.patents ? personPatentsHtml(r.patents) : ""}</div></div></div>
 
     <div class="panel" data-panel="score"><div id="scoreBox" class="t-score" data-job-id="${esc(r.job_id || "")}"></div></div>
     <div class="panel" data-panel="chat"><div class="card chat-wrap">
-      <div class="chat-head"><span class="chat-orb">${icon("sparkle")}</span><div><b>Profil asistanı</b><span>${esc(p.name)} · yalnız toplanan kaynaklardan, kimlikli yanıt</span></div></div>
+      <div class="chat-head"><span class="chat-orb">${icon("sparkle")}</span><div><b>Profil asistanı</b><span>${esc(p.name)} · toplanan kaynaklardan, kimlikli yanıt; veride yoksa tahmin olarak belirtir</span></div></div>
       <div class="thread" id="thread"><div class="msg bot"><span class="chat-orb sm">${icon("sparkle")}</span><div class="bubble">Merhaba! <b>${esc(p.name)}</b> hakkında yayınlar, dersler, tezler, iş birlikleri ya da araştırma alanları üzerine soru sorabilirsiniz.
-        Cevaplar yalnızca toplanan kaynaklara dayanır ve yayın kimlikleriyle gösterilir.</div></div></div>
+        Cevaplar önce toplanan kaynaklara dayanır ve yayın kimlikleriyle gösterilir; veride olmayan sorularda çıkarım ya da genel bilgi "tahmin" olarak belirtilir.</div></div></div>
       <div class="suggest">${["En çok atıf alan yayınları hangileri?", "Hangi dersleri veriyor?", "Danışmanlık yaptığı tezler hangi konularda?", "TÜBİTAK projeleri neler?", "Hangi firmalarla çalışmış?", "Son yıllarda hangi konulara yöneldi?", "En sık kimlerle çalışıyor?"].map((q) => `<button class="chip" data-ask="${esc(q)}" type="button">${esc(q)}</button>`).join("")}</div>
       <form class="composer" id="askForm"><div class="input">${icon("message")}<input id="question" placeholder="${esc(p.name)} hakkında bir şey sorun…" autocomplete="off"></div>
         <button class="btn primary" id="send" type="submit">${icon("send")}Gönder</button></form>
@@ -3948,6 +4218,7 @@ function renderProfile(r, chat) {
 
   $("#refreshProfileBtn").onclick = () => refreshProfileModal(r);
   loadYokStats(r.job_id);
+  bindProjectModals(r);
   bindSourcePicker($("#profileSourcesPicker"), (sources) => runProfileRefresh(r, ["publications"], sources));
   $("#favPersonBtn").onclick = async () => {
     const btn = $("#favPersonBtn");
@@ -4006,6 +4277,93 @@ function tubitakHtml(projects, industry) {
       ${firmsOf(x.title).map((f) => `<span class="chip teal">${icon("building")}${esc(f.name)}</span>`).join("")}
       <a class="chip" href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">TR Dizin ${icon("external")}</a></div>
       ${x.abstract ? `<details><summary>Proje özeti</summary><div class="abs">${esc(x.abstract)}</div></details>` : ""}</div>`).join("")}`;
+}
+
+// Proje penceresi (tam ekran): ekip, bütçe, konu/özet, tarihler, destek türü. Kaynak YÖK ya da TR Dizin (TÜBİTAK).
+const PROJECT_LABELS = { projeAdi: "Proje adı", projeTuruAd: "Proje türü", projeDurumuAd: "Durum", butcesi: "Bütçe", paraBirimi: "Para birimi",
+  baslangicTarihi: "Başlangıç", bitisTarihi: "Bitiş", bitisyil: "Bitiş yılı", ekip: "Ekip", projeKonusu: "Konu", konu: "Konu", ozet: "Özet",
+  projeOzeti: "Özet", destekleyenKurum: "Destekleyen kurum", kurumAdi: "Kurum", projeNo: "Proje no", projedekiGoreviAd: "Görevi", firmaPayi: "Firma payı", toplamABKatkisi: "Toplam AB katkısı", toplamMaliyet: "Toplam maliyet",
+  turkiyedenOrtaklar: "Türkiye'den ortaklar", ortaklar: "Ortaklar", anahtarKelimeler: "Anahtar kelimeler", kurulus: "Kuruluş" };
+const projectLabel = (k) => PROJECT_LABELS[k] || k.replace(/([a-zçğıöşü])([A-ZÇĞİÖŞÜ])/g, "$1 $2").replace(/^./, (c) => c.toLocaleUpperCase("tr-TR"));
+// Projeler listesi: YÖK ve TR Dizin (TÜBİTAK) kayıtları tek listede, tam satır; kaynağı kartın köşesinde.
+function projectRows(yok, tubitak, industry) {
+  const firmsOf = (title) => (industry || []).filter((e) => e.evidence.some((v) => v.type === "TÜBİTAK projesi" && v.text.includes(title)));
+  const a = yok.map((x, i) => `<button type="button" class="proj-row" data-project="yok:${i}"><span class="proj-src yok">YÖK</span>
+      <span class="chips">${(x.labels || []).map((l) => `<span class="chip">${esc(l)}</span>`).join("")}</span><b>${esc(x.title)}</b>
+      ${x.detail ? `<span class="proj-sub">${esc(String(x.detail).replace(/(\d+(?:[.,]\d+)?\s*[A-Z]{3}) \d+ · /, "$1 · "))}</span>` : ""}${x.extra ? `<small>${esc(x.extra)}</small>` : ""}</button>`);
+  const b = tubitak.map((x, i) => `<button type="button" class="proj-row" data-project="tubitak:${i}"><span class="proj-src tubitak">TÜBİTAK</span>
+      <span class="chips">${x.group ? `<span class="chip">${esc(x.group)}</span>` : ""}${x.role ? `<span class="chip blue">${esc(x.role)}</span>` : ""}${x.number ? `<span class="chip">No ${esc(x.number)}</span>` : ""}${firmsOf(x.title).map((f) => `<span class="chip teal">${esc(f.name)}</span>`).join("")}</span>
+      <b>${esc(x.title)}</b>${x.year ? `<small>${esc(String(x.year))}</small>` : ""}</button>`);
+  return a.length + b.length ? `<div class="proj-list">${a.join("")}${b.join("")}</div>` : "";
+}
+// Sekmeli kayıt penceresi (tam ekran): tabs = [[başlık, html], …]; boş sekmeler gösterilmez.
+function openRecordModal(source, title, chips, tabs) {
+  const shown = tabs.filter(([, html]) => html);
+  openModal(`<div class="project-modal"><div class="pm-head"><span class="proj-src ${source === "YÖK" ? "yok" : "tubitak"}">${esc(source)}</span>${chips.filter(Boolean).map((l) => `<span class="chip">${esc(l)}</span>`).join("")}</div>
+    <h2>${esc(title)}</h2>
+    <div class="pm-tabs" role="tablist">${shown.map(([label], i) => `<button type="button" role="tab" data-pm-tab="${i}" class="${i ? "" : "on"}">${esc(label)}</button>`).join("")}</div>
+    ${shown.map(([, html], i) => `<div class="pm-pane ${i ? "" : "on"}" data-pm-pane="${i}">${html}</div>`).join("")}</div>`);
+  const box = $(".modal-box"); box.classList.add("modal-full");
+  $$("[data-pm-tab]", box).forEach((b) => b.onclick = () => {
+    $$("[data-pm-tab]", box).forEach((x) => x.classList.toggle("on", x === b));
+    $$("[data-pm-pane]", box).forEach((x) => x.classList.toggle("on", x.dataset.pmPane === b.dataset.pmTab));
+  });
+}
+const pmRows = (rows) => { const html = rows.filter(([, v]) => v).map(([k, v, cls]) => `<div class="pm-row"><small>${esc(k)}</small><span class="${cls || ""}">${esc(String(v))}</span></div>`).join(""); return html ? `<div class="pm-table">${html}</div>` : ""; };
+const pmPeople = (people, ic = "user") => people.length ? `<div class="pm-people">${people.map((m) => `<button type="button" class="pm-person" data-person-name="${esc(m.name)}" title="Akademisyeni aç">${icon(ic)}<span><b>${esc(m.name)}</b>${m.unit ? `<small>${esc(m.unit)}</small>` : ""}</span>${m.role ? `<i class="pm-role ${/Yürütücü|Yönetici|Koordinatör/.test(m.role) ? "lead" : ""}">${esc(m.role)}</i>` : ""}</button>`).join("")}</div>` : "";
+const pmText = (text) => text ? `<div class="pm-text">${esc(text)}</div>` : "";
+function openProjectModal(x, source) {
+  const f = x.fields || {};
+  const budgetOf = (v) => { const t = String(v || "").trim(); const n = Number(t.replace(/[^\d.,]/g, "").replace(",", ".")); return !t || t === "0" ? "" : Number.isFinite(n) && n > 0 ? `${n.toLocaleString("tr-TR")} ${(t.match(/[A-Z]{3}/) || [""])[0] || "TRY"}`.trim() : t; };
+  const listTeam = (text) => String(text || "").split(/,\s*/).map((m) => m.trim()).filter((m) => m && !/^\+\d+$/.test(m)).map((m) => { const k = m.match(/^(.*?)\s*\(([^)]*)\)\s*$/); return k ? { name: k[1], role: k[2] } : { name: m, role: "" }; });
+  const draw = (d) => openRecordModal(source, d.title || x.title, [d.type, d.status].filter(Boolean), [
+    ["Genel bilgiler", pmRows([["Başlık", d.title || x.title], ["Tür", d.type], ["Durum", d.status], ["Başlangıç tarihi", d.start], ["Bitiş tarihi", d.end], ["Bütçe", d.budget, "pm-money"], ...(d.more || [])])
+      + (d.url ? `<a class="btn sm" style="margin-top:12px" href="${esc(d.url)}" target="_blank" rel="noopener">${icon("external")}${source === "CORDIS" ? "CORDIS kaydı" : "TR Dizin kaydı"}</a>` : "")],
+    [`Proje ekibi${d.team?.length ? ` (${d.team.length})` : ""}`, pmPeople(d.team || [])],
+    [d.subjectLabel || "Konu", pmText(d.subject) || (d.loading ? `<div class="loading-line"><span class="spinner"></span>YÖK'ten okunuyor…</div>` : "")],
+    ...(d.extraTabs || []),
+  ]);
+  if (source === "YÖK") {
+    const dates = String(x.extra || "").split(" · ");
+    const base = { title: x.title, type: (x.labels || [])[0] || "", status: (x.labels || [])[1] || "", start: dates[0] || "", end: dates[1] || "",
+      budget: budgetOf(f.butcesi || (String(x.detail || "").match(/^[\d.,]+\s*[A-Z]{3}/) || [""])[0]), team: listTeam(f.ekip || String(x.detail || "").split(" · ").slice(1).join(" · ")), subject: "", loading: true };
+    draw(base);
+    const jid = S.result?.job_id, opened = $(".project-modal");
+    if (!jid) return;
+    // Konu ve tam ekip YÖK'ün proje ayrıntısından (tek istek, kayıt başına saklanır).
+    api(`/api/jobs/${encodeURIComponent(jid)}/yok-record?${new URLSearchParams({ kind: "project", title: x.title })}`, { quiet: true })
+      .then((d) => { if (opened?.isConnected) draw({ ...base, ...d, budget: budgetOf(d.budget) || base.budget, team: d.team?.length ? d.team : base.team, loading: false }); })
+      .catch(() => { if (opened?.isConnected) draw({ ...base, loading: false, subject: "" }); });
+    return;
+  }
+  // TÜBİTAK (TR Dizin), TEYDEB ve CORDIS kayıtları: veri kayıtla birlikte gelir.
+  const more = Object.entries(f).filter(([k, v]) => v && !["ekip", "butcesi"].includes(k)).map(([k, v]) => [projectLabel(k), v]);
+  draw({ title: x.title, type: (x.labels || [])[0] || x.group || "", status: (x.labels || [])[1] || "", start: x.extra || String(x.year || ""), end: "", budget: f.toplamABKatkisi || "",
+    team: f.ekip ? listTeam(f.ekip) : x.role ? [{ name: S.result?.profile?.name || "", role: x.role }].filter((m) => m.name) : [], subject: x.abstract || "", subjectLabel: "Özet",
+    more: [["Proje no", x.number], ...more], url: safeUrl(x.url) });
+}
+// YÖK patent kaydı: genel bilgiler, başvuru ve buluş sahipleri, buluş özeti (özet ve sınıf YÖK'ün patent ayrıntısından).
+function openYokPatent(x) {
+  const people = (text) => String(text || "").split(",").map((n) => ({ name: n.trim() })).filter((m) => m.name);
+  const [applicants, inventors] = String(x.detail || "").split(" · ");
+  const [number, year] = String(x.extra || "").split(" · ");
+  const draw = (d) => openRecordModal("YÖK", d.title, [d.type, d.category].filter(Boolean), [
+    ["Genel bilgiler", pmRows([["Başlık", d.title], ["Patent no", d.number], ["Yıl", d.year], ["Dosya türü", d.type], ["Kategori", d.category], ["Patent sınıfı", d.classes]])],
+    ["Başvuru sahipleri", (d.applicants.length ? `<h4 class="pm-sub">Başvuru sahibi</h4>${pmPeople(d.applicants, "building")}` : "") + (d.inventors.length ? `<h4 class="pm-sub">Buluş sahipleri</h4>${pmPeople(d.inventors)}` : "")],
+    ["Buluş özeti", pmText(d.abstract) || (d.loading ? `<div class="loading-line"><span class="spinner"></span>YÖK'ten okunuyor…</div>` : "")],
+  ]);
+  const base = { title: x.title, number: number || "", year: year || "", type: (x.labels || []).at(-1) || "", category: (x.labels || [])[0] || "", classes: "", applicants: people(applicants), inventors: people(inventors), abstract: "", loading: true };
+  draw(base);
+  const jid = S.result?.job_id, opened = $(".project-modal");
+  if (!jid) return;
+  api(`/api/jobs/${encodeURIComponent(jid)}/yok-record?${new URLSearchParams({ kind: "patent", title: x.title })}`, { quiet: true })
+    .then((d) => { if (opened?.isConnected) draw({ ...base, ...d, applicants: (d.applicants || []).map((n) => ({ name: n })), inventors: (d.inventors || []).map((n) => ({ name: n })), loading: false }); })
+    .catch(() => { if (opened?.isConnected) draw({ ...base, loading: false }); });
+}
+function bindProjectModals(r) {
+  const y = r.profile?.yok || {}, yok = y.sections?.projects || [], tub = y.tr_projects || [], patents = y.sections?.patents || [];
+  $$("[data-project]").forEach((row) => row.onclick = () => { const [kind, i] = row.dataset.project.split(":"); const x = (kind === "yok" ? yok : tub)[+i]; if (x) openProjectModal(x, kind === "yok" ? "YÖK" : "TÜBİTAK"); });
+  $$("[data-yok-patent]").forEach((row) => row.onclick = () => { const x = patents[+row.dataset.yokPatent]; if (x) openYokPatent(x); });
 }
 
 // Patentler (EPO Open Patent Services). Anahtar (.env EPO_KEY/EPO_SECRET) yoksa sekme hiç görünmez.
@@ -4670,16 +5028,24 @@ async function viewLibrary(tab = "papers") {
 async function viewSystem() {
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Ayarlar" }]);
   setView(`<div class="section-head"><div><h1>Ayarlar</h1><p>Kullanılacak yapay zekâ, servislerin durumu ve REA'nın öğrendiği site tarifleri.</p></div></div>
-    <div class="card card-pad ai-card" id="aiCard">${skeleton(3)}</div>
-    <div class="card card-pad" id="speedCard">${skeleton(2)}</div>
-    <div class="card card-pad ai-card" id="searchCard">${skeleton(2)}</div>
-    <div class="grid-2"><div class="card card-pad"><div class="card-title">${icon("info")}Durum</div><div id="sysState">${skeleton(3)}</div></div>
-      <div class="card card-pad"><div class="card-title">${icon("settings")}Site tarifleri</div>
-        <p class="muted" style="margin:0 0 14px">REA sitelerin arka plandaki isteklerini öğrenir; site değişince yeniden öğrenir.</p>
-        <div class="actions"><button class="btn sm" type="button" data-recipes>Öğrenilen tarifler</button><button class="btn sm" type="button" data-scan>Değişiklikleri tara</button></div></div></div>`);
+    <div class="settings-stack">
+      <div class="settings-label">Yapay zekâ</div>
+      <div class="card card-pad ai-card" id="aiCard">${skeleton(3)}</div>
+      <div class="settings-label">Veri kaynakları</div>
+      <div class="settings-two"><div class="card card-pad" id="speedCard">${skeleton(2)}</div>
+        <div class="card card-pad ai-card" id="searchCard">${skeleton(2)}</div></div>
+      <div class="settings-label">Puan hesaplama</div>
+      <div class="card card-pad" id="scoreCard">${skeleton(3)}</div>
+      <div class="settings-label">Sistem</div>
+      <div class="settings-two"><div class="card card-pad"><div class="card-title">${icon("info")}Durum</div><div id="sysState">${skeleton(3)}</div></div>
+        <div class="card card-pad"><div class="card-title">${icon("settings")}Site tarifleri</div>
+          <p class="muted" style="margin:0 0 14px">REA sitelerin arka plandaki isteklerini öğrenir; site değişince yeniden öğrenir.</p>
+          <div class="actions"><button class="btn sm" type="button" data-recipes>Öğrenilen tarifler</button><button class="btn sm" type="button" data-scan>Değişiklikleri tara</button></div></div></div>
+    </div>`);
   aiSettingsCard();
   speedSettingsCard();
   searchSettingsCard();
+  scoreSettingsCard();
   let h = null;
   try { h = await api("/api/health"); } catch { /* aşağıda gösterilir */ }
   const box = $("#sysState");
@@ -4687,6 +5053,53 @@ async function viewSystem() {
   const row = (name, ok, text) => `<div class="sys-row"><span class="dot ${ok ? "ok" : "warn"}"></span><b>${esc(name)}</b><span class="muted">${esc(text)}</span></div>`;
   box.innerHTML = h ? [row("Yapay zekâ", h.llm_ready, h.llm), row("REA", h.rea, h.rea ? "Hazır" : "Kurulu değil"), row("Tarayıcı", h.chromium, h.chromium ? "Hazır" : "Kurulu değil"),
     row("Patentler (EPO)", h.patents, h.patents ? "Anahtar tanımlı" : "Anahtar yok; patent sekmeleri kapalı")].join("") : `<p class="muted">Sunucuya ulaşılamadı.</p>`;
+}
+
+// Doçentlik ve akademik teşvik puan tablosu (app/criteria/akademik_puan.json): yalnız sayılar düzenlenir.
+const SCORE_KEYS = { toplam_asgari: "Toplam asgari puan", doktora_sonrasi_asgari: "Doktora sonrası asgari", asgari: "Asgari", tavan: "Tavan", atif_basina: "Atıf başına puan",
+  ders_basina: "Ders başına puan", doktora: "Doktora tezi", yuksek_lisans: "Yüksek lisans tezi", q1: "Q1", q2: "Q2", q3: "Q3", q4: "Q4", sci_noq: "SCI · çeyrek bilinmiyor", sci: "SCI/SSCI/AHCI",
+  intl_other: "ESCI / Scopus / alan endeksi", intl_hakemli: "Diğer uluslararası hakemli", trdizin: "TR Dizin", ulusal_other: "Diğer ulusal hakemli", book_intl: "Uluslararası kitap",
+  book_nat: "Ulusal kitap", chapter_intl: "Uluslararası kitap bölümü", chapter_nat: "Ulusal kitap bölümü", conf_intl: "Uluslararası bildiri", conf_nat: "Ulusal bildiri",
+  "1": "1 yazar", "2": "2 yazar", "3": "3 yazar", "4": "4+ yazar" };
+async function scoreSettingsCard() {
+  const card = $("#scoreCard");
+  let cfg = null;
+  try { cfg = await api("/api/tools/score-criteria"); } catch { if (card) card.innerHTML = `<p class="muted">Puan tablosu okunamadı.</p>`; return; }
+  if (!card?.isConnected) return;
+  let tab = "docentlik";
+  const input = (path, value) => `<label class="sc-field"><span>${esc(SCORE_KEYS[path.at(-1)] || path.at(-1))}</span><input type="number" step="any" min="0" value="${esc(String(value))}" data-sc-path="${esc(path.join("."))}"></label>`;
+  const numbers = (obj, path) => Object.entries(obj).filter(([, v]) => typeof v === "number").map(([k, v]) => input([...path, k], v)).join("");
+  const block = (title, obj, path) => {
+    const own = numbers(obj, path), sub = Object.entries(obj).filter(([, v]) => v && typeof v === "object").map(([k, v]) => numbers(v, [...path, k])).join("");
+    return own || sub ? `<section class="sc-block"><h4>${esc(title)}</h4><div class="sc-fields">${own}${sub}</div></section>` : "";
+  };
+  const draw = (message = "") => {
+    const root = cfg[tab] || {};
+    const general = tab === "docentlik" ? block("Genel eşikler", Object.fromEntries(Object.entries(root).filter(([, v]) => typeof v === "number")), [tab]) + block("Yazar payı (yazar sayısına göre katsayı)", cfg.yazar_payi || {}, ["yazar_payi"])
+      : block("Genel eşikler", Object.fromEntries(Object.entries(root).filter(([, v]) => typeof v === "number")), [tab]) + block("Çeyrek katsayıları", root.q_katsayi || {}, [tab, "q_katsayi"]);
+    card.innerHTML = `<div class="card-title">${icon("award")}Doçentlik ve akademik teşvik puan tablosu<span class="spacer"></span>
+        <div class="t-seg" role="tablist"><button type="button" data-sc-tab="docentlik" aria-selected="${tab === "docentlik"}">Doçentlik</button><button type="button" data-sc-tab="tesvik" aria-selected="${tab === "tesvik"}">Akademik teşvik</button></div></div>
+      <p class="muted" style="margin:0 0 14px">Profillerdeki puan hesabı bu tabloyu kullanır. ${cfg.dogrulandi ? "" : "Tablo taslaktır; kendi temel alanının resmî ÜAK / teşvik tablosuna göre düzelt."}</p>
+      <div class="sc-grid">${general}${Object.entries(root.kalemler || {}).map(([k, v]) => block(v.ad || k, v, [tab, "kalemler", k])).join("")}</div>
+      <div class="actions" style="margin-top:14px"><button class="btn primary sm" type="button" data-sc-save>Kaydet</button><span class="muted" data-sc-status role="status">${esc(message)}</span></div>`;
+    hydrateIcons(card);
+    $$("[data-sc-tab]", card).forEach((b) => b.onclick = () => { collect(); tab = b.dataset.scTab; draw(); });
+    $("[data-sc-save]", card).onclick = async () => {
+      collect();
+      $("[data-sc-status]", card).textContent = "Kaydediliyor…";
+      try { cfg = await post("/api/tools/score-criteria", cfg); draw("Kaydedildi; açık profillerde puan sekmesi yeniden açılınca güncellenir."); }
+      catch (e) { $("[data-sc-status]", card).textContent = e.message || "Kaydedilemedi."; }
+    };
+  };
+  const collect = () => $$("[data-sc-path]", card).forEach((el) => {
+    const value = Number(el.value);
+    if (!Number.isFinite(value) || value < 0) return;
+    const keys = el.dataset.scPath.split(".");
+    let node = cfg;
+    keys.slice(0, -1).forEach((k) => { node = node?.[k]; });
+    if (node && typeof node[keys.at(-1)] === "number") node[keys.at(-1)] = value;
+  });
+  draw();
 }
 
 // Arama servisleri: Serper.dev ve Google Custom Search anahtarları. Anahtarlar sunucudan geri gelmez (yalnız kayıtlı mı).
@@ -4700,12 +5113,10 @@ async function searchSettingsCard() {
       <p class="muted" style="margin:0 0 12px">Anahtar girilen servisler ücretsiz arama motorlarından önce kullanılır; tarayıcı açmadıkları için engellenmezler. Ders bilgi paketi doğrudan okunan kurumlar arama kullanmaz.</p>
       <form class="ai-form" id="searchForm" autocomplete="off">
         <div class="field"><label for="serperKey">Serper.dev anahtarı</label><div class="input"><input id="serperKey" type="password" autocomplete="new-password" placeholder="${cfg.serper ? "Kayıtlı; değiştirmek için yazın" : "Anahtarı yapıştırın"}"></div></div>
-        <div class="field"><label for="cseKey">Google Custom Search anahtarı</label><div class="input"><input id="cseKey" type="password" autocomplete="new-password" placeholder="${cfg.google_cse ? "Kayıtlı; değiştirmek için yazın" : "Anahtarı yapıştırın"}"></div></div>
-        <div class="field"><label for="cseCx">Arama motoru kimliği (cx) <small>Custom Search için gerekli</small></label><div class="input"><input id="cseCx" value="${esc(cfg.google_cse_cx || "")}" placeholder="Programlanabilir Arama Motoru panelindeki kimlik"></div></div>
       </form>
       <div class="actions"><button class="btn primary sm" type="button" data-search-save>Kaydet</button>
         <button class="btn sm" type="button" data-search-test>Dene</button>
-        ${cfg.serper || cfg.google_cse ? `<button class="btn sm" type="button" data-search-clear>Anahtarları sil</button>` : ""}</div>
+        ${cfg.serper ? `<button class="btn sm" type="button" data-search-clear>Anahtarı sil</button>` : ""}</div>
       <p class="muted ai-note" data-search-status role="status">${esc(message)}</p>
       <p class="faint ai-note">Anahtarlar yalnızca bu bilgisayarda saklanır. Arama sorguları (kurum alan adı ve bölüm adı) seçilen servise gönderilir.</p>`;
     hydrateIcons(card);
@@ -4713,17 +5124,17 @@ async function searchSettingsCard() {
     const save = async (extra = {}) => {
       status("Kaydediliyor…");
       try {
-        cfg = await post("/api/settings/search", { serper_key: $("#serperKey").value, google_cse_key: $("#cseKey").value, google_cse_cx: $("#cseCx").value, ...extra });
+        cfg = await post("/api/settings/search", { serper_key: $("#serperKey").value, ...extra });
         draw("Kaydedildi.");
       } catch (e) { status(e.message || "Kaydedilemedi."); }
     };
     $("[data-search-save]", card).addEventListener("click", () => save());
-    $("[data-search-clear]", card)?.addEventListener("click", () => save({ serper_key: "", google_cse_key: "", clear: ["serper_key", "google_cse_key"] }));
+    $("[data-search-clear]", card)?.addEventListener("click", () => save({ serper_key: "", clear: ["serper_key"] }));
     $("[data-search-test]", card).addEventListener("click", async () => {
       status("Deneniyor…");
       try {
         const r = await post("/api/settings/search/test", {});
-        status(`Serper: ${r.results.serper} · Custom Search: ${r.results.google_cse}`);
+        status(`Serper: ${r.results.serper}`);
       } catch (e) { status(e.message || "Denenemedi."); }
     });
   };
@@ -4757,7 +5168,11 @@ async function loadYokStats(jobId) {
   const box = $("#yokStatsBox");
   if (!box || !jobId) return;
   let d = null;
-  try { d = await api(`/api/jobs/${encodeURIComponent(jobId)}/yok-stats`, { quiet: true }); } catch { return; }
+  try { d = await api(`/api/jobs/${encodeURIComponent(jobId)}/yok-stats`, { quiet: true }); } catch { d = null; }
+  const fill = (id, html) => { const el = document.getElementById(id); if (el) { el.innerHTML = html; hydrateIcons(el); } };
+  fill("yokMetricsBox", yokMetricsHtml(d || {}, S.result?.profile?.yok || {}));
+  fill("yokSdgBox", yokSdgHtml(d || {}));
+  if (d?.area || d?.field || d?.keywords?.length) fill("yokAreaBox", yokAreaHtml(d));
   if (!box.isConnected || !d || (!d.wos_yearly?.length && !d.types?.length)) return;
   const years = (d.wos_yearly || []).slice().sort((a, b) => a.year - b.year);
   const pubs = years.reduce((s, x) => s + x.pubs, 0), cites = years.reduce((s, x) => s + x.cites, 0);
@@ -4944,8 +5359,15 @@ function bindFirmAssistant(host, fid) {
 async function renderFirmOverview(fid, name, refresh = false) {
   const host = $("#firmOverview"); if (!host) return;
   if (!$(".overview-facts", host)) {
-    host.innerHTML = `<div class="university-overview-layout"><section class="card card-pad"><div class="section-head"><h2>Firma künyesi</h2><button class="btn sm" data-firm-refresh-facts type="button">${icon("refresh")}Eksik bilgileri yenile</button></div><div class="overview-facts"></div></section>${firmAssistantHtml({ name })}</div>`;
-    hydrateIcons(host); bindFirmAssistant(host, fid);
+    // Künye tam genişlikte; firma asistanı kendi sekmesinde.
+    host.innerHTML = `<section class="card card-pad"><div class="section-head"><h2>Firma künyesi</h2><button class="btn sm" data-firm-refresh-facts type="button">${icon("refresh")}Eksik bilgileri yenile</button></div><div class="overview-facts"></div></section>`;
+    hydrateIcons(host);
+    const aiHost = $("#firmAi");
+    if (aiHost && !aiHost.dataset.ready) {
+      aiHost.dataset.ready = "1";
+      aiHost.innerHTML = `<div class="ai-view"><aside class="ai-side"><div class="ai-view-intro"><span class="ai-orb">${icon("sparkle")}</span><div><h2>${esc(name)} hakkında sor</h2><p>Yanıtlar firmanın künyesinden, ortak yayınlardan, akademisyenlerden ve projelerden gelir.</p></div></div></aside><div class="ai-main">${firmAssistantHtml({ name })}</div></div>`;
+      hydrateIcons(aiHost); bindFirmAssistant(aiHost, fid);
+    }
     $("[data-firm-refresh-facts]", host).onclick = () => renderFirmOverview(fid, name, true);
   }
   const box = $(".overview-facts", host), button = $("[data-firm-refresh-facts]", host);
@@ -5029,17 +5451,23 @@ async function viewFirm(fid, refresh = false, supplied = null) {
       <div class="stat"><b>${fmtNum(d.papers)}</b><span>ortak yayın ve proje</span></div>
       <div class="stat src"><b>${Object.entries(d.by_source).map(([k, v]) => `${esc(k)} ${v}`).join(" · ") || "—"}</b><span>kaynak · ${esc(d.updated)}</span></div></div>
     <div class="tabs" role="tablist"><button class="tab active" data-tab="overview" type="button">Genel bakış</button><button class="tab" data-tab="people" type="button">Akademisyenler<span class="n">${fmtNum(people.length)}</span></button>
-      <button class="tab" data-tab="tubitak" type="button">TÜBİTAK<span class="n" id="tubitakN">${fmtNum(d.ardeb.length)}</span></button>
-      <button class="tab" data-tab="patents" type="button" hidden>Patentler<span class="n" id="patentsN">0</span></button></div>
+      <button class="tab" data-tab="tubitak" type="button">Projeler<span class="n" id="tubitakN">${fmtNum(d.ardeb.length)}</span></button>
+      <button class="tab" data-tab="patents" type="button" hidden>Patentler<span class="n" id="patentsN">0</span></button>
+      <button class="tab" data-tab="firmai" type="button">${icon("sparkle")}Asistan</button></div>
     <div class="panel active" data-panel="overview" id="firmOverview"></div>
     <div class="panel" data-panel="patents"><div class="card card-pad" id="firmPatentsBox"></div></div>
+    <div class="panel" data-panel="firmai" id="firmAi"></div>
     <div class="panel" data-panel="tubitak"><div class="stack">
+      <div class="card card-pad" id="firmWebBox"><div class="card-title">${icon("search")}İnternette öne çıkan projeler</div>
+        <div class="loading-line"><span class="spinner"></span>Firmanın bilinen projeleri aranıyor…</div></div>
+      <div class="card card-pad" id="cordisBox"><div class="card-title">${icon("globe")}AB projeleri</div>
+        <div class="loading-line"><span class="spinner"></span>CORDIS'ten firmanın katıldığı AB projeleri alınıyor…</div></div>
       <div class="card card-pad" id="teydebBox"><div class="card-title">${icon("briefcase")}TÜBİTAK TEYDEB projeleri</div>
         <div class="loading-line"><span class="spinner"></span>PRODİS'ten firmanın tamamlanmış sanayi Ar-Ge projeleri alınıyor (site yavaş, ~30 sn)…</div></div>
       <div class="card card-pad"><div class="card-title">${icon("cap")}TÜBİTAK ARDEB projeleri<span class="spacer"></span><span class="count">${d.ardeb.length}</span><span class="badge trdizin">TR Dizin</span></div>
         <p class="muted" style="margin:0 0 6px">Üniversitelerin yürüttüğü, özetinde firmanın iş birliği ifadesiyle (paydaş, ortak, birlikte…) geçtiği projeler.</p>
-        ${d.ardeb.map((x) => `<div class="thesis"><b>${esc(x.title)}</b><div class="chips"><span class="chip">${esc(x.year || "")}</span>${x.group ? `<span class="chip">${esc(x.group)}</span>` : ""}${x.number ? `<span class="chip">No ${esc(x.number)}</span>` : ""}
-          ${x.team.map((m) => `<span class="chip ${m.role === "Yürütücü" ? "blue" : ""}">${icon("user")}${esc(m.name)} · ${esc(m.role)}</span>`).join("")}
+        ${d.ardeb.map((x, i) => `<div class="thesis clickable" data-firm-project="ardeb:${i}"><b>${esc(x.title)}</b><div class="chips"><span class="chip">${esc(x.year || "")}</span>${x.group ? `<span class="chip">${esc(x.group)}</span>` : ""}${x.number ? `<span class="chip">No ${esc(x.number)}</span>` : ""}
+          ${x.team.map((m) => `<button type="button" class="chip ${m.role === "Yürütücü" ? "blue" : ""}" data-person-name="${esc(m.name)}" title="Akademisyeni aç">${icon("user")}${esc(m.name)} · ${esc(m.role)}</button>`).join("")}
           ${safeUrl(x.url) ? `<a class="chip" href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">TR Dizin ${icon("external")}</a>` : ""}</div>
           <div class="faint" style="font-style:italic;margin-top:6px">“${esc(x.quote)}”</div></div>`).join("") || `<p class="faint" style="margin:0">Özetinde bu firmanın iş birliği olarak geçtiği ARDEB projesi bulunamadı.</p>`}</div>
     </div></div>
@@ -5050,12 +5478,13 @@ async function viewFirm(fid, refresh = false, supplied = null) {
       : `<div class="card">${emptyState("users", d.pending ? "Akademisyenler alınıyor…" : "Akademisyen bulunamadı",
         d.pending ? "Firma bilgilerini inceleyebilirsiniz; yayın kaynakları hazır olduğunda kartlar burada görünecek." : "Açık kaynaklarda bu firmayla ortak yayını olan akademisyen yok ya da firma yayınlarda farklı adla geçiyor. Gizli sözleşmeler ve yayına dönüşmeyen işler görünmez.")}</div>`}</div>`);
   S.firmPeople = people;
+  S.firmProjects = { ardeb: d.ardeb || [], teydeb: S.firmProjects?.fid === fid ? S.firmProjects.teydeb : [], cordis: S.firmProjects?.fid === fid ? S.firmProjects.cordis : [], fid };
   renderFirmOverview(fid, f.name);
   typeText($(".identity-org h1"), f.name);
   $("#firmRefresh").onclick = () => viewFirm(fid, true);
   if (!d.pending) {
     const projectsTab = $('.tab[data-tab="tubitak"]'), patentsTab = $('.tab[data-tab="patents"]');
-    projectsTab?.addEventListener("click", () => loadTeydeb(fid, refresh, d.ardeb.length), { once: true });
+    projectsTab?.addEventListener("click", () => { loadTeydeb(fid, refresh, d.ardeb.length); loadCordis(fid, refresh); loadFirmWeb(fid, refresh); }, { once: true });
     if (patentsTab) { patentsTab.hidden = false; patentsTab.addEventListener("click", () => loadFirmPatents(fid, refresh), { once: true }); }
   }
   else {
@@ -5075,17 +5504,85 @@ async function loadTeydeb(fid, refresh, nArdeb) {
   try { t = await api(`/api/firms/${encodeURIComponent(fid)}/teydeb${refresh ? "?refresh=1" : ""}`); } catch (e) { t = { projects: [], error: e.message }; }
   const box = $("#teydebBox");
   if (!box || !location.hash.startsWith(`#/firma/${fid}`)) return;
-  $("#tubitakN").textContent = fmtNum(nArdeb + t.projects.length);
+  if (S.firmProjects?.fid === fid) S.firmProjects.teydeb = t.projects;
+  $("#tubitakN").textContent = fmtNum(nArdeb + t.projects.length + (S.firmProjects?.cordis?.length || 0));
   box.innerHTML = `<div class="card-title">${icon("briefcase")}TÜBİTAK TEYDEB projeleri<span class="spacer"></span><span class="count">${t.projects.length}</span><span class="badge">PRODİS</span></div>
     <p class="muted" style="margin:0 0 6px">Firmanın tamamlanmış sanayi Ar-Ge projeleri (TÜBİTAK Açık Bilim). Bu kayıtlarda proje ekibi ve üniversite ortağı yer almaz.</p>
     ${t.error ? `<div class="notice warn">${icon("info")}<div>${esc(t.error)}. Sonra tekrar deneyin.</div></div>` : ""}
-    ${t.projects.map((x) => `<div class="thesis"><b>${esc(x.title)}</b><div class="chips"><span class="chip">${esc(x.start || "")} – ${esc(x.end || "")}</span>
+    ${t.projects.map((x, i) => `<div class="thesis clickable" data-firm-project="teydeb:${i}"><b>${esc(x.title)}</b><div class="chips"><span class="chip">${esc(x.start || "")} – ${esc(x.end || "")}</span>
         ${x.field ? `<span class="chip blue">${esc(x.field)}</span>` : ""}${x.rd_sector ? `<span class="chip">${esc(x.rd_sector)}</span>` : ""}</div>
       ${x.keywords.length ? `<div class="chips" style="margin-top:6px">${x.keywords.slice(0, 10).map((k) => `<span class="chip teal">${esc(k)}</span>`).join("")}</div>` : ""}
       ${x.summary ? `<details><summary>Proje özeti</summary><div class="abs">${esc(x.summary)}${x.aim ? `\n\nAmaç: ${esc(x.aim)}` : ""}</div></details>` : ""}</div>`).join("")
       || (t.error ? "" : `<p class="faint" style="margin:0">PRODİS'te bu firma adıyla tamamlanmış proje bulunamadı.</p>`)}`;
   hydrateIcons(box);
 }
+
+// Firmanın bilinen projeleri: arama motoru sonuçları (başlık, kısa açıklama, kaynak). Yayına ve resmî proje
+// kayıtlarına girmeyen ürün/proje haberlerini gösterir.
+async function loadFirmWeb(fid, refresh) {
+  let t;
+  try { t = await api(`/api/firms/${encodeURIComponent(fid)}/web-projects${refresh ? "?refresh=1" : ""}`, { quiet: true }); } catch (e) { t = { items: [], error: e.message }; }
+  const box = $("#firmWebBox");
+  if (!box || !location.hash.startsWith(`#/firma/${fid}`)) return;
+  box.innerHTML = `<div class="card-title">${icon("search")}İnternette öne çıkan projeler<span class="spacer"></span><span class="count">${t.items.length}</span><span class="badge">Web araması</span></div>
+    <p class="muted" style="margin:0 0 10px">Arama motorundan: firmanın kamuoyunda bilinen proje ve ürünleri. Resmî kayıt değildir; kaynağı açıp doğrulayın.</p>
+    ${t.items.length ? `<div class="sv-web">${t.items.map((x) => `<a class="sv-web-card" href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener"><span class="sv-web-host">${icon("globe")}${esc(hostPath(safeUrl(x.url)).split("/")[0])}</span><b>${esc(x.title)}</b>${x.snippet ? `<p>${esc(x.snippet)}</p>` : ""}</a>`).join("")}</div>`
+      : `<p class="faint" style="margin:0">${esc(t.error || "Arama sonucu yok (arama servisi anahtarı Ayarlar'da tanımlı olmalı).")}</p>`}`;
+  hydrateIcons(box);
+}
+// AB projeleri (CORDIS açık verisi): firmanın koordinatör ya da katılımcı olduğu projeler.
+async function loadCordis(fid, refresh) {
+  let t;
+  try { t = await api(`/api/firms/${encodeURIComponent(fid)}/cordis${refresh ? "?refresh=1" : ""}`, { quiet: true }); } catch (e) { t = { projects: [], error: e.message }; }
+  const box = $("#cordisBox");
+  if (!box || !location.hash.startsWith(`#/firma/${fid}`)) return;
+  if (S.firmProjects?.fid === fid) S.firmProjects.cordis = t.projects;
+  const n = $("#tubitakN"); if (n) n.textContent = fmtNum((S.firmProjects?.ardeb?.length || 0) + (S.firmProjects?.teydeb?.length || 0) + t.projects.length);
+  const eur = (v) => v ? `${Number(v).toLocaleString("tr-TR")} €` : "";
+  box.innerHTML = `<div class="card-title">${icon("globe")}AB projeleri<span class="spacer"></span><span class="count">${t.projects.length}</span><span class="badge">CORDIS</span></div>
+    <p class="muted" style="margin:0 0 6px">Firmanın koordinatör ya da katılımcı olduğu Avrupa Birliği çerçeve programı projeleri (Horizon Europe, H2020, FP7).</p>
+    ${t.error ? `<div class="notice warn">${icon("info")}<div>${esc(t.error)}. Sonra tekrar deneyin.</div></div>` : ""}
+    ${t.projects.map((x, i) => `<div class="thesis clickable" data-firm-project="cordis:${i}"><b>${esc(x.acronym ? `${x.acronym} · ` : "")}${esc(x.title)}</b><div class="chips"><span class="chip">${esc(x.start.slice(0, 4))} – ${esc(x.end.slice(0, 4))}</span>
+        <span class="chip ${x.role === "Koordinatör" ? "blue" : ""}">${esc(x.role)}</span>${x.firm_grant ? `<span class="chip gold">Firma payı ${eur(x.firm_grant)}</span>` : ""}
+        ${x.turkish.slice(0, 4).map((u) => `<span class="chip teal">${icon(UNI_RX.test(u) ? "cap" : "building")}${esc(tTitle(u))}</span>`).join("")}</div></div>`).join("")
+      || (t.error ? "" : `<p class="faint" style="margin:0">CORDIS'te bu firmanın katıldığı AB projesi bulunamadı.</p>`)}`;
+  hydrateIcons(box);
+}
+// Firma sayfasında proje penceresi: ARDEB (ekip + özetteki iş birliği cümlesi), TEYDEB (özet, amaç, anahtar kelimeler), CORDIS (bütçe, ortaklar).
+function openFirmProject(kind, x) {
+  if (kind === "ardeb") {
+    openProjectModal({ title: x.title, labels: [x.group, "TÜBİTAK ARDEB"].filter(Boolean), extra: String(x.year || ""), abstract: x.quote ? `“${x.quote}”` : "", url: x.url,
+      fields: { ekip: x.team.map((m) => `${m.name} (${m.role})`).join(", "), projeNo: x.number || "" } }, "TÜBİTAK");
+  } else if (kind === "teydeb") {
+    openProjectModal({ title: x.title, labels: [x.field, x.rd_sector, "TÜBİTAK TEYDEB"].filter(Boolean), extra: [x.start, x.end].filter(Boolean).join(" – "),
+      abstract: [x.summary, x.aim && `Amaç: ${x.aim}`].filter(Boolean).join("\n\n"), fields: { anahtarKelimeler: (x.keywords || []).join(", "), kurulus: x.firm || "" } }, "TEYDEB");
+  } else {
+    const eur = (v) => v ? `${Number(v).toLocaleString("tr-TR")} €` : "";
+    openProjectModal({ title: `${x.acronym ? `${x.acronym} · ` : ""}${x.title}`, labels: [x.role, x.status].filter(Boolean), extra: [x.start, x.end].filter(Boolean).join(" – "), abstract: x.objective, url: x.url,
+      detail: eur(x.total_grant) ? `${eur(x.total_grant)} AB katkısı` : "",
+      fields: { firmaPayi: eur(x.firm_grant), toplamABKatkisi: eur(x.total_grant), toplamMaliyet: eur(x.total_cost), turkiyedenOrtaklar: x.turkish.map(tTitle).join(", "),
+        ortaklar: x.partners.slice(0, 30).map((o) => `${o.name}${o.country ? ` (${o.country})` : ""}`).join(", ") } }, "CORDIS");
+  }
+}
+document.addEventListener("click", (e) => {
+  // Proje ekibindeki / yayındaki akademisyen: firma sayfasında kişi penceresi, başka yerde akademisyen araması.
+  const who = e.target.closest("[data-person-name]");
+  if (who) {
+    e.preventDefault(); e.stopPropagation();
+    const name = who.dataset.personName.replace(/\s*\([^)]*\)\s*$/, "").trim(), key = nameKey(name);
+    const p = (S.firmPeople || []).find((x) => nameKey(x.name) === key);
+    if (p && location.hash.startsWith("#/firma/")) { openFirmPerson(p, p.chat_id ? S.chats.find((c) => c.id === p.chat_id) : null); return; }
+    const c = chatByName(name);
+    closeModal();
+    location.hash = c ? `#/profil/${c.id}` : `#/akademisyenler?q=${encodeURIComponent(name)}`;
+    return;
+  }
+  const row = e.target.closest("[data-firm-project]");
+  if (row && !e.target.closest("a, summary, details, button")) {
+    const [kind, i] = row.dataset.firmProject.split(":"), x = S.firmProjects?.[kind]?.[+i];
+    if (x) openFirmProject(kind, x);
+  }
+}, true);
 
 // =================================================================== site araçları
 async function showRecipes() {
@@ -5294,17 +5791,16 @@ window.addEventListener("hashchange", () => {
   document.fonts?.ready.then(() => { const a = $("#nav a.active"); if (a) setNav(a.dataset.nav); $("#navPill").classList.add("ready"); });
 })();
 
-async function renderUniversityOverview(refresh = false) {
+async function renderUniversityOverview(refresh = false, patentsToo = false) {
   const host = $("#universityOverview"), d = S.uni;
   if (!host || !d || (host.dataset.ready && !refresh)) return;
   host.dataset.ready = "1";
   if (!$(".overview-facts", host)) {
-    host.innerHTML = `<div class="university-overview-layout"><section class="card card-pad"><div class="section-head"><h2>Üniversite künyesi</h2><button class="btn sm" data-refresh-facts>${icon("refresh")}Eksik bilgileri yenile</button></div><div class="overview-facts"></div></section>${studentAssistantHtml(d)}</div>`;
-    bindStudentChat(d);
-    $("[data-refresh-facts]", host).onclick = () => renderUniversityOverview(true);
+    // Yenileme seçenekleri sayfanın dişli menüsündedir (renderUni).
+    host.innerHTML = `<section class="card card-pad"><div class="section-head"><h2>Üniversite künyesi</h2><span class="faint" data-refresh-facts></span></div><div class="overview-facts"></div></section>`;
   }
   const box = $(".overview-facts", host), button = $("[data-refresh-facts]", host);
-  button.disabled = true;
+  button.textContent = refresh ? "Yenileniyor…" : "";
   box.innerHTML = '<div class="loading-line"><span class="spinner"></span>Üniversite bilgileri alınıyor…</div>';
   try {
     const f = await api(`/api/universities/${encodeURIComponent(d.id)}/facts${refresh ? "?refresh=1" : ""}`, { quiet: true });
@@ -5313,9 +5809,12 @@ async function renderUniversityOverview(refresh = false) {
     const tabs = $$("[data-uf-tab]", box), panes = $$(".uf-pane", box);
     tabs.forEach((tab, i) => tab.onclick = () => { tabs.forEach(t => t.classList.toggle("on", t === tab)); panes.forEach((p, j) => p.classList.toggle("on", i === j)); });
     $(".uf-ink", box)?.remove(); hydrateIcons(host);
-    if (!f.academics) {
+    loadUniPatents(d, patentsToo);
+    loadUniExtra(d, patentsToo);
+    if (!f.academics || (refresh && !f.academics.titles?.length)) {
       try {
-        const ac = await api(`/api/universities/${encodeURIComponent(d.id)}/staff-counts`, { quiet: true });
+        // "Yenile"ye basıldıysa unvan dağılımı da YÖK'ten sayılır (unvan başına küçük bir istek).
+        const ac = await api(`/api/universities/${encodeURIComponent(d.id)}/staff-counts${refresh ? "?refresh=1" : ""}`, { quiet: true });
         if (!box.isConnected) return;
         const stat = $("[data-uf-staff-stat]", box), block = $("[data-uf-staff]", box);
         if (stat) stat.innerHTML = `<b>${count(ac.total)}</b><span>akademisyen</span>`;
@@ -5323,7 +5822,107 @@ async function renderUniversityOverview(refresh = false) {
       } catch { const stat = $("[data-uf-staff-stat]", box); if (stat) stat.innerHTML = '<b>—</b><span>akademisyen</span>'; }
     }
   } catch (e) { box.innerHTML = `<p class="notice warn">${esc(e.message)}</p>`; }
-  finally { button.disabled = false; }
+  finally { button.textContent = ""; }
+}
+// Aday bakışı: programa son yerleşen adayın netleri (YÖK Atlas, program tıklanınca tek istek; oturumda saklanır).
+const ADAY_NETS = new Map();
+async function loadAdayNets(row, code) {
+  const box = row?.querySelector("[data-aday-nets]");
+  if (!box || !code) return;
+  let d = ADAY_NETS.get(code);
+  if (!d) {
+    try { d = await api(`/api/atlas/nets/${encodeURIComponent(code)}`, { quiet: true }); ADAY_NETS.set(code, d); }
+    catch { if (box.isConnected) box.innerHTML = `<div class="aday-yrs-h">Son yerleşen adayın netleri</div><p class="faint">Net bilgisi şu an alınamadı.</p>`; return; }
+  }
+  if (!box.isConnected) return;
+  const years = (d.years || []).filter((y) => y.tests?.length);
+  if (!years.length) { box.innerHTML = `<div class="aday-yrs-h">Son yerleşen adayın netleri</div><p class="faint">Bu program için net bilgisi yayımlanmamış.</p>`; return; }
+  const names = [...new Set(years.flatMap((y) => y.tests.map((t) => t.name)))];
+  const n = (v, digits = 2) => v == null ? "—" : Number(v).toLocaleString("tr-TR", { maximumFractionDigits: digits });
+  box.innerHTML = `<div class="aday-yrs-h">Son yerleşen adayın netleri <small>(yıllara göre)</small></div><div class="tbl-wrap"><table class="aday-quota"><thead><tr><th>Yıl</th><th>Taban puan</th><th>OBP</th>${names.map((x) => `<th>${esc(x.replace(/^(TYT|AYT|YDT) /, "$1\u00a0"))}</th>`).join("")}</tr></thead>
+    <tbody>${years.map((y) => `<tr><td><b>${esc(String(y.year || ""))}</b></td><td>${n(y.score, 2)}</td><td>${n(y.obp, 1)}</td>${names.map((name) => `<td>${n(y.tests.find((t) => t.name === name)?.net)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+}
+// Üniversitede "Neyi yenileyelim?" penceresi (akademisyen profilindekiyle aynı düzen): yalnız seçilenler yenilenir.
+const UNI_REFRESH = [["facts", "Künye ve sayılar", "Rektör, şehir, kuruluş; öğrenci, bölüm ve araştırma sayıları", "layers"],
+  ["staff", "Kadro ve öğrenci dağılımı", "YÖK Akademik'ten unvan ve temel alan; YÖK İstatistik'ten öğrenci", "users"],
+  ["patents", "Patentler", "Üniversitenin başvuru sahibi olduğu patentler (EPO)", "file"],
+  ["atlas", "Aday bakışı", "YÖK Atlas programları, taban puan ve kontenjanlar", "grid"]];
+function refreshUniversityModal(d) {
+  openModal(`<form id="uniRefreshForm"><div class="modal-heading"><span class="modal-emblem">${icon("refresh")}</span><div><h2>Neyi yenileyelim?</h2><p class="muted">${esc(d.data.name)} · Yalnız seçtiğin bilgiler yeniden alınır.</p></div></div>
+    <div class="refresh-grid">${UNI_REFRESH.map(([id, title, desc, ic]) => `<label class="refresh-choice"><input type="checkbox" name="what" value="${id}" ${id === "facts" ? "checked" : ""}><span class="choice-icon">${icon(ic)}</span><span><b>${title}</b><small>${desc}</small></span></label>`).join("")}</div>
+    <p class="refresh-note">Kadro dağılımı YÖK Akademik'e birkaç küçük istek atar; öğrenci tablosu kayıtlıysa yeniden okunmaz.</p>
+    <div class="modal-footer"><button class="btn" type="button" data-close>Vazgeç</button><button class="btn primary" type="submit">${icon("refresh")}Seçilenleri yenile</button></div></form>`);
+  $("#uniRefreshForm [data-close]").onclick = closeModal;
+  $("#uniRefreshForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const what = new Set($$('#uniRefreshForm input[name="what"]:checked').map((x) => x.value));
+    closeModal();
+    if (!what.size) return;
+    if (what.has("atlas")) { d.atlas = null; api(`/api/universities/${encodeURIComponent(d.id)}/atlas?refresh=1`, { quiet: true }).then((a) => { d.atlas = a; if (S.uni === d && d.audience === "candidate") renderCandidateView(); }).catch(() => {}); }
+    if (what.has("patents")) { d.patents = null; if (d.audience === "patents") renderUniPatents(true); else api(`/api/universities/${encodeURIComponent(d.id)}/patents?refresh=1`, { quiet: true }).catch(() => {}); }
+    if (what.has("facts") || what.has("staff")) {
+      setUniversityAudience("overview");
+      if (what.has("facts")) await renderUniversityOverview(true); else await renderUniversityOverview();
+      if (what.has("staff")) loadUniExtra(d, true);
+    }
+    toast(`${icon("refresh")} Seçilen bilgiler yenileniyor.`);
+  };
+}
+// Üniversitenin Patentler sekmesi: başvuru sahibi olduğu patentler (EPO), aranabilir liste.
+async function renderUniPatents(refresh = false) {
+  const host = $("#uniPatents"), d = S.uni;
+  if (!host || !d) return;
+  if (!d.patents || refresh) {
+    host.innerHTML = `<div class="card card-pad"><div class="loading-line"><span class="spinner"></span>EPO'dan üniversitenin patentleri alınıyor…</div>${skeleton(3)}</div>`;
+    try { d.patents = await api(`/api/universities/${encodeURIComponent(d.id)}/patents${refresh ? "?refresh=1" : ""}`, { quiet: true }); }
+    catch (e) { d.patents = { enabled: true, items: [], error: e.message }; }
+    if (S.uni !== d || !host.isConnected) return;
+  }
+  const r = d.patents, n = $("#uniPatentsN"); if (n) n.textContent = r.items?.length ? fmtNum(r.items.length) : "";
+  host.innerHTML = !r.enabled ? `<div class="card">${emptyState("file", "Patent araması kapalı", "EPO anahtarı tanımlı değil (Ayarlar → Durum).")}</div>`
+    : `<div class="card card-pad"><div class="card-title">${icon("file")}Patentler<span class="spacer"></span><span class="count">${r.items.length}</span><span class="badge">EPO</span></div>
+      <p class="muted" style="margin:0 0 10px">Üniversitenin başvuru sahibi olduğu patentler (Espacenet; TR, EP ve WO yayınları). Aynı buluşun farklı ülkelerdeki yayınları tek satırdadır.</p>
+      ${r.items.length ? `<div class="toolbar"><div class="input">${icon("search")}<input id="uniPatQ" placeholder="Başlık ya da buluş sahibi ara"></div></div><div id="uniPatList">${r.items.map((x) => `<div data-fold="${esc(fold(`${x.title} ${x.title_en || ""} ${(x.inventors || []).join(" ")}`))}">${patentRow(x)}</div>`).join("")}</div>`
+        : `<p class="faint" style="margin:0">${esc(r.error || "Üniversitenin başvuru sahibi olduğu patent bulunamadı.")}</p>`}</div>`;
+  hydrateIcons(host);
+  const q = $("#uniPatQ"); if (q) q.oninput = () => { const v = fold(q.value); $$("#uniPatList > [data-fold]").forEach((n2) => { n2.hidden = !!v && !n2.dataset.fold.includes(v); }); };
+}
+// Üniversitenin başvuru sahibi olduğu patentler (EPO): genel bakışın "Araştırma" sekmesinde, varsa.
+async function loadUniPatents(d, refresh = false) {
+  const slot = () => $("[data-uf-patents]");
+  if (!slot()) return;
+  slot().innerHTML = `<div class="peek-h">Patentler</div><div class="loading-line"><span class="spinner"></span>EPO kayıtları okunuyor…</div>`;
+  try {
+    const r = await api(`/api/universities/${encodeURIComponent(d.id)}/patents${refresh ? "?refresh=1" : ""}`, { quiet: true });
+    const el = slot();
+    if (!el || S.uni !== d) return;
+    if (!r.enabled) { el.innerHTML = ""; return; }
+    el.innerHTML = r.items.length ? `<div class="peek-h">Patentler · ${fmtNum(r.items.length)} buluş</div>${r.items.slice(0, 8).map(patentRow).join("")}${r.items.length > 8 ? `<details><summary class="faint" style="cursor:pointer">${r.items.length - 8} patent daha</summary>${r.items.slice(8).map(patentRow).join("")}</details>` : ""}<p class="uf-src">Kaynak: EPO Open Patent Services (başvuru sahibi üniversite)</p>`
+      : `<div class="peek-h">Patentler</div><p class="uf-empty">${esc(r.error || "Üniversitenin başvuru sahibi olduğu patent bulunamadı.")}</p>`;
+    hydrateIcons(el);
+  } catch (e) { const el = slot(); if (el) el.innerHTML = `<div class="peek-h">Patentler</div><p class="uf-empty">${esc(e.message)}</p>`; }
+}
+// AI bakışı: üniversiteye sorulan sorular kaynaklı yanıtlanır (öğrenci asistanı, ayrı sekmede, geniş kutu).
+function renderAiView() {
+  const host = $("#aiView"), d = S.uni;
+  if (!host || !d || host.dataset.ready) return;
+  host.dataset.ready = "1";
+  const topics = [["cap", "Programlar ve dersler", ["Hangi lisans programları var?", "Bilgisayar Mühendisliği'nde ilk yıl hangi dersler var?", "Yüksek lisans programları neler?"]],
+    ["bookmark", "Ücret ve burslar", ["Ücret ve burs bilgileri neler?", "Başarı bursu koşulları neler?"]],
+    ["globe", "Değişim programları", ["Erasmus hakkında bilgi verir misin?", "Hangi ülkelerle anlaşma var?"]],
+    ["building", "Kampüs ve yaşam", ["Kampüse nasıl ulaşılır?", "Yurt imkânları neler?"]]];
+  host.innerHTML = `<div class="ai-view"><aside class="ai-side"><div class="ai-view-intro"><span class="ai-orb">${icon("sparkle")}</span><div><h2>${esc(d.data.name)} hakkında sor</h2><p>Yanıtlar üniversitenin resmî sayfalarından ve toplanan verilerden, kaynaklarıyla gelir.</p></div></div>
+      <div class="ai-topics">${topics.map(([ic, title, qs]) => `<section class="ai-topic"><h4>${icon(ic)}${esc(title)}</h4>${qs.map((q) => `<button type="button" data-ai-ask="${esc(q)}">${esc(q)}${icon("chevron")}</button>`).join("")}</section>`).join("")}</div></aside>
+    <div class="ai-main">${studentAssistantHtml(d)}</div></div>`;
+  hydrateIcons(host);
+  bindStudentChat(d);
+  drawStudentChat(d);
+  // Soldaki hazır sorular: soruyu kutuya yazar ve gönderir.
+  $$("[data-ai-ask]", host).forEach((b) => b.onclick = () => {
+    const input = $("#studentQuestion", host), form = $(".student-chat-form", host);
+    if (!input || !form) return;
+    input.value = b.dataset.aiAsk; form.requestSubmit();
+  });
 }
 async function openFirmPerson(person, chat) {
   let papers = person.papers || [];

@@ -38,11 +38,39 @@ ACADEMIC_TITLES = [
 _TITLE_RES = [(re.compile(rf"(?<![\w]){p}(?![\w])", re.I), n) for p, n in ACADEMIC_TITLES]
 
 
+# UTF-8 metnin Latin-1 / Windows-1252 diye okunmuş hâli ("ÃœNÄ°VERSÄ°TESÄ°"): Ã, Ä, Å ardından gelen ikinci bayt.
+_MOJIBAKE = re.compile(r"[\u00c3\u00c4\u00c5][\u0080-\u00bf\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u0192\u02c6\u02dc\u2013-\u203a\u20ac\u2122]")
+
+
+def fix_mojibake(text: str) -> str:
+    """Yanlış karakter koduyla okunmuş Türkçe metni onarır: "KARADENÄ°Z TEKNÄ°K ÃœNÄ°VERSÄ°TESÄ°" → "KARADENİZ TEKNİK
+    ÜNİVERSİTESİ". Yalnız tipik bozulma örüntüsü varsa ve dönüşüm temiz sonuç veriyorsa uygulanır."""
+    if not _MOJIBAKE.search(text):
+        return text
+    for codec in ("cp1252", "latin-1"):
+        try:
+            fixed = text.encode(codec).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if not _MOJIBAKE.search(fixed):
+            return fixed
+    # Metnin yalnız bir kısmı bozuksa parça parça onar.
+    def part(match):
+        chunk = match.group(0)
+        for codec in ("cp1252", "latin-1"):
+            try:
+                return chunk.encode(codec).decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+        return chunk
+    return _MOJIBAKE.sub(part, text)
+
+
 def clean(value) -> str:
     if value is None:
         return ""
     text = html.unescape(str(value)).replace("\xa0", " ").replace("​", "")
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+", " ", fix_mojibake(text)).strip()
 
 
 def lower_tr(value: str) -> str:

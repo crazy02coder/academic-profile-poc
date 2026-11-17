@@ -593,7 +593,7 @@ async def academic_stats(guid: str, refresh: bool = False) -> dict | None:
     dağılımı, toplam sayılar. Üç küçük istek; 30 gün saklanır. None: YÖK'e ulaşılamadı."""
     if not re.fullmatch(r"[0-9A-F]{16}", guid or ""):
         return None
-    key = f"stats-{guid}"
+    key = f"stats2-{guid}"
     cached = None if refresh else _load(key, 30 * 24 * 3600)
     if cached is not None:
         return cached
@@ -603,6 +603,13 @@ async def academic_stats(guid: str, refresh: bool = False) -> dict | None:
             yearly = await api(client, "/analiz/wos-yillik-istatistik", authorGuidId=guid) or []
             kinds = await api(client, "/analiz/yayin-tur-kapsam-dagilimi", authorGuidId=guid) or []
             totals = await api(client, "/analiz/total-count-by-academician", authorGuidId=guid) or []
+            # Profil sayfasındaki "Metrikler" (WoS / Scopus yayın, atıf, h-indeks), alan bilgisi ve BM Sürdürülebilir
+            # Kalkınma Amaçları: kayıtlı profil eski olsa da buradan gelir.
+            try:
+                detail = await api(client, "/akademisyen/detay", authorGuidId=guid) or {}
+                goals = await api(client, "/surdurulebilirlik/list", authorGuidId=guid) or []
+            except (httpx.HTTPError, ValueError):
+                detail, goals = {}, []
     except (httpx.HTTPError, ValueError):
         return _stale(key)
     finally:
@@ -613,9 +620,73 @@ async def academic_stats(guid: str, refresh: bool = False) -> dict | None:
         "types": [{"name": clean(r.get("turAdi") or ""), "national": r.get("ulusalSayi") or 0, "international": r.get("uluslararasiSayi") or 0}
                   for r in kinds if isinstance(r, dict) and r.get("turAdi")],
         "totals": {r.get("label"): r.get("count") or 0 for r in totals if isinstance(r, dict) and r.get("label")},
+        "metrics": {
+            "wos": {"pubs": _int(detail.get("wpublication")), "cites": _int(detail.get("watif")), "h": _int(detail.get("whindex")),
+                    "date": detail.get("wosResearcherDate") or ""},
+            "scopus": {"pubs": _int(detail.get("scPublication")), "cites": _int(detail.get("scAtif")), "h": _int(detail.get("scHindex")),
+                       "date": detail.get("scopusMetricDate") or ""},
+        },
+        "ids": {"scopus": detail.get("scopusId") or "", "researcher": detail.get("researcherId") or "", "orcid": detail.get("orcid") or "",
+                "scholar": detail.get("gscholar") or ""},
+        "area": clean(detail.get("temelAlanAd") or ""), "field": clean(detail.get("bilimAlanAd") or ""),
+        "keywords": [clean(detail[k]) for k in ("anahtarkelime1Ad", "anahtarkelime2Ad", "anahtarkelime3Ad") if detail.get(k)],
+        "sdgs": [{"id": r.get("sdgId"), "name": clean(r.get("sdgAdTr") or r.get("sdgAdEn") or "")} for r in goals
+                 if isinstance(r, dict) and r.get("sdgId")] if isinstance(goals, list) else [],
     }
     _save(key, out)
     return out
+
+
+def _int(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+async def record_detail(guid: str, kind: str, title: str) -> dict | None:
+    """Profildeki bir projenin ya da patentin YÖK'teki ayrıntısı (proje: konu ve tam ekip; patent: sınıf ve buluş
+    özeti). Kayıt kimliği listeden başlıkla bulunur (liste kişi başına bir kez alınır, 30 gün saklanır), ayrıntı
+    kayıt başına bir istek; yalnız kullanıcı kayda tıklayınca çalışır."""
+    if not re.fullmatch(r"[0-9A-F]{16}", guid or "") or kind not in {"project", "patent"} or not title:
+        return None
+    path, id_key, title_key = ("/proje", "projeId", "projeAdi") if kind == "project" else ("/patent", "patentId", "patentBaslik")
+    token = URGENT.set(True)
+    try:
+        async with _client(15) as client:
+            rows = _load(f"{kind}list-{guid}", 30 * 24 * 3600)
+            if rows is None:
+                found = await api(client, f"{path}/list", authorGuidId=guid, page=1, length=1000)
+                rows = (found.get("data") if isinstance(found, dict) else found) or []
+                _save(f"{kind}list-{guid}", rows)
+            want = fold(title)
+            row = next((r for r in rows if isinstance(r, dict) and fold(r.get(title_key) or "") == want), None)
+            if not row:
+                return None
+            rid = row.get(id_key)
+            detail = _load(f"{kind}-{rid}", 30 * 24 * 3600)
+            if detail is None:
+                detail = await api(client, f"{path}/detay", **{id_key: rid}) or {}
+                _save(f"{kind}-{rid}", detail)
+    except (httpx.HTTPError, ValueError):
+        return None
+    finally:
+        URGENT.reset(token)
+    merged = {**row, **(detail if isinstance(detail, dict) else {})}
+    if kind == "project":
+        team = [{"name": tr_title(" ".join(x for x in (m.get("yazarad"), m.get("yazarsoyad")) if x)), "role": clean(m.get("projedekiGoreviAd") or ""),
+                 "unit": tr_title(m.get("birimAdi") or "")} for m in merged.get("projeEkip") or [] if isinstance(m, dict)]
+        budget = clean(str(merged.get("butcesi") or ""))
+        return {"kind": kind, "title": clean(merged.get("projeAdi") or ""), "type": clean(merged.get("projeTuruAd") or ""),
+                "status": clean(merged.get("projeDurumuAd") or ""), "start": merged.get("baslangicTarihi") or "",
+                "end": merged.get("bitisTarihi") or merged.get("bitisyil") or "", "budget": "" if budget in ("", "0") else budget,
+                "team": team, "subject": clean(merged.get("projeKonusu") or "")}
+    split = lambda text: [clean(x) for x in str(text or "").split(",") if clean(x)]  # noqa: E731
+    return {"kind": kind, "title": clean(merged.get("patentBaslik") or ""), "number": clean(merged.get("patentNo") or ""),
+            "year": clean(str(merged.get("patentTarih") or "")), "type": clean(merged.get("patentDosyaTipi") or ""),
+            "category": clean(merged.get("kategoriAd") or ""), "classes": clean(merged.get("patentSinif") or ""),
+            "applicants": split(merged.get("patentBasvuruSahip")), "inventors": split(merged.get("patentBulusSahip")),
+            "abstract": clean(merged.get("bulusOzet") or "")}
 
 
 def public_person(p: dict, university: str = "") -> dict:

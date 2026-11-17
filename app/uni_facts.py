@@ -155,6 +155,49 @@ async def _wikidata(client, qid: str) -> dict:
 
 
 # ------------------------------------------------------------------ YÖK Akademik kadro sayıları
+async def _yok_staff_titles(uni: dict) -> dict:
+    """Unvan dağılımı, yalnız kullanıcı "Yenile"ye basınca: bir liste sayfasından unvan kimlikleri öğrenilir, sonra
+    unvan başına tek küçük sayım isteği atılır (en çok 7 istek; yok.gov.tr hız sınırından geçer). Üniversite sayfası
+    açılırken ÇALIŞMAZ — eskiden açılışta unvan başına istek IP engeline yol açmıştı."""
+    order = {label: i for i, (_, label) in enumerate(TITLES)}
+    scope = {"birimId": uni["birim_id"], "birimId_matchMode": "equals", **yokdir.ACTIVE}
+    async with yokdir._client() as client:
+        first = await yokdir.api(client, "/akademisyen/list", page=1, length=400, **scope) or {}
+        grand = first.get("totalElements")
+        if grand is None:
+            raise ValueError("YÖK arama sonucu okunamadı")
+        ids: dict[str, str] = {}
+        area_ids: dict[str, str] = {}
+        seen_areas: Counter = Counter()
+        for row in first.get("data") or []:
+            raw, tid = clean(row.get("kadroUnvanAdi") or ""), row.get("kadroUnvanId")
+            if raw and tid and raw not in ids:
+                ids[raw] = tid
+            area, aid = clean(row.get("temelAlanAd") or ""), row.get("temelAlanId")
+            if area and aid:
+                area_ids.setdefault(area, aid)
+                seen_areas[area] += 1
+        rows = []
+        for raw, tid in list(ids.items())[:6]:
+            d = await yokdir.api(client, "/akademisyen/list", page=1, length=1, kadroUnvanId=tid, kadroUnvanId_matchMode="equals", **scope) or {}
+            n = d.get("totalElements")
+            # Süzgeç yok sayılırsa toplam döner: o satır kullanılmaz.
+            if isinstance(n, int) and 0 < n < grand:
+                rows.append({"title": yokdir.YOK_TITLES.get(raw, yokdir.tr_title(raw)), "count": n})
+        # Temel alanlara göre dağılım: ilk sayfada görülen alanlar (en sık 12) için alan başına tek sayım isteği.
+        areas = []
+        for area, _ in seen_areas.most_common(12):
+            d = await yokdir.api(client, "/akademisyen/list", page=1, length=1, temelAlanId=area_ids[area], temelAlanId_matchMode="equals", **scope) or {}
+            n = d.get("totalElements")
+            if isinstance(n, int) and 0 < n < grand:
+                areas.append({"name": re.sub(r"\s*Temel Alanı$", "", area), "count": n})
+    rest = grand - sum(r["count"] for r in rows)
+    if rows and rest > 0:
+        rows.append({"title": "Diğer", "count": rest})
+    return {"total": grand, "titles": sorted(rows, key=lambda r: order.get(r["title"], 9)),
+            "areas": sorted(areas, key=lambda r: -r["count"])}
+
+
 async def _yok_staff(uni: dict) -> dict:
     """Üniversitenin aktif akademisyen sayısı ve unvan dağılımı (YÖK API; unvan başına tek küçük istek)."""
     order = {label: i for i, (_, label) in enumerate(TITLES)}
@@ -176,11 +219,23 @@ async def _yok_staff(uni: dict) -> dict:
 _STAFF_TASKS: dict[str, asyncio.Task] = {}
 
 
-async def staff_counts(uid: str) -> dict | None:
-    """Kadro sayıları (30 gün önbellek); aynı üniversite için tek tarama çalışır."""
+async def staff_counts(uid: str, titles: bool = False) -> dict | None:
+    """Kadro sayıları (30 gün önbellek); aynı üniversite için tek tarama çalışır. titles=True (kullanıcı "Yenile"ye
+    bastı): unvan dağılımı kayıtta yoksa YÖK'ten sayılır."""
     cached = yokdir._load(f"staff-{uid}", ROLE_TTL)
-    if cached:
+    if cached and ((cached.get("titles") and "areas" in cached) or not titles):
         return cached
+    if titles:
+        uni = await yokdir._university(uid)
+        if not uni:
+            return None
+        async with _LOCKS.setdefault(f"staff-{uid}", asyncio.Lock()):
+            again = yokdir._load(f"staff-{uid}", ROLE_TTL)
+            if again and again.get("titles") and "areas" in again:
+                return again
+            data = await _yok_staff_titles(uni)
+            yokdir._save(f"staff-{uid}", data)
+            return data
     task = _STAFF_TASKS.get(uid)
     if task is None:
         async def run():
@@ -310,6 +365,11 @@ async def facts(uid: str, refresh: bool = False) -> dict | None:
                     out["units"] = await yokdir.unit_summary(uid)
                 except httpx.HTTPError:
                     out["units"] = None
+                if out["units"] is not None and not out["units"].get("departments"):
+                    # Kadro henüz taranmadı: bölüm (lisans programı) sayısı YÖK Atlas'tan, olmazsa hazır veri setinden.
+                    n, source = await _department_count(uni)
+                    if n:
+                        out["units"].update(departments=n, scanned=out["units"].get("faculties") or 1, departments_source=source)
             await asyncio.gather(research(), units())
         out["checked_at"] = time.time()
         if not out["errors"]:
@@ -318,7 +378,45 @@ async def facts(uid: str, refresh: bool = False) -> dict | None:
     return _with_staff(out)
 
 
+async def _department_count(uni: dict) -> tuple[int, str]:
+    """Lisans programı sayısı: dil/öğretim türü varyantları ("(İngilizce)", "(İÖ)") tek program sayılır."""
+    from . import atlas, poc_dataset
+    try:
+        data = await atlas.programs(uni["name"])
+    except Exception:  # noqa: BLE001 — Atlas yardımcıdır
+        data = None
+    names = {re.sub(r"\s*\(.*?\)", "", fold(p["name"])).strip() for p in (data or {}).get("programs") or [] if p.get("level") == "Lisans"}
+    if names:
+        return len(names), "YÖK Atlas"
+    try:
+        found = poc_dataset.university(uni.get("home") or "")
+    except Exception:  # noqa: BLE001
+        found = None
+    if found:
+        n = len({poc_dataset.unit_key(d.get("name") or "")[0] for f in found.get("faculties") or [] for d in f.get("departments") or [] if d.get("name")})
+        if n:
+            return n, "hazır veri seti"
+    return 0, ""
+
+
 def _with_staff(out: dict) -> dict:
+    # Öğrenci sayıları: YÖK İstatistik kaydı varsa (ağsız) künyedeki Vikipedi sayılarının yerine geçer — günceldir ve
+    # düzeylere göre kırılım içerir.
+    try:
+        from . import yok_istatistik
+        row = yok_istatistik.cached(out.get("name") or "")
+        if row and row["total"]["total"]:
+            scale = dict(out.get("scale") or {})
+            year = row.get("year", "")
+            scale["students"] = {"value": row["total"]["total"], "year": year}
+            for key in ("associate", "undergrad", "graduate", "doctoral"):
+                if row[key]["total"]:
+                    scale[key] = {"value": row[key]["total"], "year": year}
+                else:
+                    scale.pop(key, None)
+            out = {**out, "scale": scale, "sources": {**(out.get("sources") or {}), "students": "YÖK İstatistik"}}
+    except Exception:  # noqa: BLE001 — kayıt yardımcıdır
+        pass
     staff = yokdir._load(f"staff-{out['id']}", ROLE_TTL)
     out["academics"] = staff
     if staff:

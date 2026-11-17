@@ -19,6 +19,7 @@ from .yok_rate import HOOKS
 API = "https://yokatlas.yok.gov.tr/api"
 DIR = ROOT / "data" / "atlas"
 TTL = 30 * 24 * 3600
+VERSION = 2  # program kaydının biçimi: değişince kayıtlı üniversiteler bir kez yeniden alınır
 EMPTY_FILTERS = {"puanTuru": None, "universiteId": [], "birimGrupId": [], "ilKodu": [], "birimTuruId": None,
                  "universiteTuru": None, "bursOraniId": None, "ogrenimTuruId": None, "kilavuzKodu": None,
                  "minBasariSirasi": None, "maxBasariSirasi": None}
@@ -92,6 +93,17 @@ def _program(row: dict, year: int, announced: bool) -> dict:
         "study": clean(row.get("ogrenimTuruAdi") or ""), "duration": row.get("ogrenimSuresi"),
         "scholarship": clean(row.get("bursOraniAdi") or "") or "Ücretsiz", "quota": _num(row.get("kontenjan")),
         "accreditation": clean(row.get("akreditasyon") or ""), "district": clean(row.get("ilceAdi") or ""), "years": years,
+        # Atlas'ın program ayrıntısındaki diğer alanlar (aynı satırda gelir, ek istek yok)
+        "city": clean(row.get("ilAdi") or ""), "uni_type": clean(row.get("universiteTuru") or ""), "fee": _num(row.get("ucret")),
+        "uni_accreditation": clean(row.get("uniAkreditasyon") or ""), "tyc": clean(str(row.get("tyc") or "")),
+        "applied": clean(str(row.get("uygulamaliEgitimModeli") or "")), "hierarchy": str(row.get("birimHiyerarsi") or ""),
+        "staff": {k: n for k, f in (("prof", "prof"), ("doc", "doc"), ("dou", "dou"), ("ogr_gor", "ogrGor"), ("ar_gor", "arGor"))
+                  if (n := _num(row.get(f))) is not None},
+        "quotas": [{"name": name, "quota": q, "placed": _num(row.get(placed))} for name, quota, placed in (
+            ("Genel", "kontenjan", "gkY"), ("Okul birincisi", "kontenjanObs", "obkY"), ("Şehit / gazi yakını", "kontenjanSgy", "sgyY"),
+            ("34 yaş üstü kadın", "kontenjanY34", "y34"), ("Depremzede", "kontenjanDep", "dprmY")) if (q := _num(row.get(quota)))],
+        "conditions": [{"code": str(code), "text": clean(str(text))[:1500]} for item in row.get("kosulList") or [] if isinstance(item, dict)
+                       for code, text in item.items()][:30],
     }
 
 
@@ -102,7 +114,7 @@ async def programs(university: str, refresh: bool = False) -> dict | None:
     if not key:
         return None
     cached = None if refresh else _load(f"programs-{key}")
-    if cached is not None:
+    if cached is not None and cached.get("v") == VERSION:
         return cached
     try:
         async with _client() as client:
@@ -117,8 +129,37 @@ async def programs(university: str, refresh: bool = False) -> dict | None:
         return _load(f"programs-{key}", stale=True)
     year = int(found.get("yil") or time.localtime().tm_year)
     rows = [_program(r, year, announced) for r in found.get("content") or [] if r.get("birimAdi")]
-    data = {"university": university, "year": year, "announced": announced, "programs": rows,
+    data = {"v": VERSION, "university": university, "year": year, "announced": announced, "programs": rows,
             "source": "https://yokatlas.yok.gov.tr/", "checked_at": time.time()}
     if rows:
         _save(f"programs-{key}", data)
+    return data
+
+
+NET_FIELDS = (("tytTrkNet", "TYT Türkçe"), ("tytSosNet", "TYT Sosyal"), ("tytMatNet", "TYT Matematik"), ("tytFenNet", "TYT Fen"),
+              ("aytMatNet", "AYT Matematik"), ("aytFizNet", "AYT Fizik"), ("aytKimNet", "AYT Kimya"), ("aytBioNet", "AYT Biyoloji"),
+              ("aytTdeNet", "AYT Edebiyat"), ("aytTrh1Net", "AYT Tarih-1"), ("aytCog1Net", "AYT Coğrafya-1"), ("aytTrh2Net", "AYT Tarih-2"),
+              ("aytCog2Net", "AYT Coğrafya-2"), ("aytFelNet", "AYT Felsefe grubu"), ("aytDinNet", "AYT Din kültürü"), ("ydtYdilNet", "YDT Yabancı dil"))
+
+
+async def nets(code: str) -> dict | None:
+    """Programa son yerleşen adayın netleri, yıllara göre (Atlas "Yerleşen Son Kişinin Netleri"). Program başına tek
+    istek, yalnız program tıklanınca; 30 gün saklanır."""
+    if not re.fullmatch(r"\d{6,12}", str(code)):
+        return None
+    cached = _load(f"nets-{code}")
+    if cached is not None:
+        return cached
+    try:
+        async with _client() as client:
+            found = (await client.post(f"{API}/netler/search", json={"filters": {"kilavuzKodu": int(code)}, "page": 0, "size": 10})).json()
+    except (httpx.HTTPError, ValueError):
+        return _load(f"nets-{code}", stale=True)
+    years = []
+    for row in found.get("content") or []:
+        tests = [{"name": label, "net": n} for field, label in NET_FIELDS if (n := _num(row.get(field))) is not None]
+        years.append({"year": row.get("yil"), "score_type": clean(row.get("puanTuru") or ""), "score": _num(row.get("tabanPuan")),
+                      "obp": _num(row.get("obp")), "tests": tests})
+    data = {"code": str(code), "years": sorted(years, key=lambda y: -(y["year"] or 0))}
+    _save(f"nets-{code}", data)
     return data

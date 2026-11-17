@@ -304,6 +304,24 @@ def provider_order() -> tuple[str, ...]:
     return providers + ("brave_page",)
 
 
+def _plan() -> tuple[str, ...]:
+    """Bu arama için motor sırası. Önce Brave arama sayfası; ama Brave son isteğinden bu yana bekleme süresi (GAPS,
+    10 sn) dolmadıysa, dinleniyorsa (429) ya da şu an başka bir aramaya ayrıldıysa bu arama Brave'i hiç beklemeden
+    anahtarlı servise (Serper) gider. Brave'e ayrılan arama boş dönerse sıradaki motor yine Serper'dir. Böylece Brave'e
+    10 saniyede en çok bir istek gider, hiçbir arama sırada beklemez."""
+    order = provider_order()
+    rest = tuple(x for x in order if x != "brave_page")
+    if "brave_page" not in order:
+        return rest
+    state, now = _state("brave_page"), time.monotonic()
+    gap = GAPS.get("brave_page", MIN_GAP)
+    ready = now >= state["blocked_until"] and now - state["last"] >= gap and now >= state.get("reserved_until", 0)
+    if not ready:
+        return rest
+    state["reserved_until"] = now + gap  # bu 10 saniyelik pencere bu aramaya ayrıldı
+    return ("brave_page",) + rest
+
+
 async def site_results(domain_url: str, query: str, log=None, k: int = 6,
                        *, providers: tuple[str, ...] | None = None) -> list[dict]:
     """Başlık/açıklama/kaynak bağlantısını birlikte korur; site: kapsamı değişmez."""
@@ -311,7 +329,7 @@ async def site_results(domain_url: str, query: str, log=None, k: int = 6,
     if not root or not query.strip() or k <= 0:
         return []
     q = f"site:{root} {' '.join(query.split())}"
-    providers = provider_order() if providers is None else providers
+    providers = _plan() if providers is None else providers
     for provider in providers:
         rows = _site_rows(await _provider(provider, q, log), root)
         if rows:
@@ -326,14 +344,31 @@ async def site_results_race(domain_url: str, query: str, log=None, k: int = 6) -
     if not root or not query.strip() or k <= 0:
         return []
     q = f"site:{root} {' '.join(query.split())}"
-    tasks = [asyncio.create_task(_provider(provider, q, log)) for provider in provider_order()]
-    for done in asyncio.as_completed(tasks):
+    # Motorlar _plan sırasıyla denenir (önce Brave, penceresi doluysa Serper); sonuç veren ilk motor kullanılır.
+    # Eskiden bütün motorlar aynı anda soruluyordu: her arama Brave'e de gidiyor, istek sınırını dolduruyordu.
+    for provider in _plan():
         try:
-            rows = _site_rows(await done, root)
+            rows = _site_rows(await _provider(provider, q, log), root)
         except Exception:
             continue
         if rows:
             return rank_results(rows, query)[:k]
+    return []
+
+
+async def web_results(query: str, log=None, k: int = 8) -> list[dict]:
+    """Site kısıtı olmadan arama: sağlayıcılar sırayla (anahtarlı olanlar önce), sonuç veren ilk motorun satırları
+    (başlık, kısa açıklama, adres). Öğrenci rehberinin lisans dışı başlıkları kullanır."""
+    if not query.strip() or k <= 0:
+        return []
+    for provider in _plan():
+        try:
+            rows = await _provider(provider, " ".join(query.split()), log)
+        except Exception:  # noqa: BLE001 — sıradaki motor denenir
+            continue
+        rows = [r for r in rows if isinstance(r, dict) and str(r.get("url") or r.get("href") or "").startswith(("http://", "https://"))]
+        if rows:
+            return [{**r, "url": r.get("url") or r.get("href")} for r in rows[:k]]
     return []
 
 

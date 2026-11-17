@@ -153,19 +153,28 @@ async def _openalex(client, g: dict) -> tuple[list[dict], str]:
 
     at_firm = _at_firm(g, ids)
     works: dict[str, dict] = {}
-    for f in filters:
+    gate, quota = asyncio.Semaphore(3), False
+
+    async def one(f: str) -> None:
+        # Süzgeçler (kurum kaydı + her ad için ham adres araması) aynı anda, en çok üç istek; sayfalar sırayla.
+        nonlocal quota
         for page in (1, 2):
-            r = await client.get(f"{OPENALEX}/works", params={
-                "filter": f"{f},institutions.type:education", "per-page": 200, "page": page,
-                "sort": "publication_year:desc", **OPENALEX_PARAMS,
-                "select": "id,doi,display_name,publication_year,authorships,cited_by_count,abstract_inverted_index"})
+            async with gate:
+                if quota:
+                    return
+                r = await client.get(f"{OPENALEX}/works", params={
+                    "filter": f"{f},institutions.type:education", "per-page": 200, "page": page,
+                    "sort": "publication_year:desc", **OPENALEX_PARAMS,
+                    "select": "id,doi,display_name,publication_year,authorships,cited_by_count,abstract_inverted_index"})
             if r.status_code == 429:
-                return _openalex_rows(works.values(), at_firm), QUOTA
+                quota = True
+                return
             batch = (r.json().get("results") or []) if r.status_code == 200 else []
             works.update((w["id"], w) for w in batch)
             if len(batch) < 200:
                 break
-    return _openalex_rows(works.values(), at_firm), ""
+    await asyncio.gather(*(one(f) for f in filters))
+    return _openalex_rows(works.values(), at_firm), QUOTA if quota else ""
 
 
 TURKEY = re.compile(r"t[uü]rk[iı]ye|turkey|\bTR\b", re.I)
@@ -264,10 +273,27 @@ def _openalex_rows(works, at_firm) -> list[dict]:
     return rows
 
 
+async def _trdizin_pages(client, names: list[str], pages: int, doc_type: str = "") -> list[dict]:
+    """Her ad için TR Dizin sonuç sayfaları: adlar aynı anda (en çok üç istek), bir adın sayfaları sırayla ve yalnız
+    önceki sayfa doluysa. Eskiden bütün istekler tek sıra halindeydi; çok adlı firmalarda açılış bu yüzden uzuyordu."""
+    gate = asyncio.Semaphore(3)
+
+    async def one(name: str) -> list[dict]:
+        out = []
+        for page in range(1, pages + 1):
+            async with gate:
+                batch = await trsources.trdizin_search(client, name, 100, page, doc_type=doc_type)
+            out += batch
+            if len(batch) < 100:
+                break
+        return out
+    return [h for part in await asyncio.gather(*(one(name) for name in names)) for h in part]
+
+
 async def _trdizin(client, g: dict) -> tuple[list[dict], str]:
     rows = []
     try:
-        hits = [h for name in _names(g) for page in (1, 2) for h in await trsources.trdizin_search(client, name, 100, page)]
+        hits = await _trdizin_pages(client, _names(g), 2)
     except httpx.HTTPError as exc:
         return [], f"TR Dizin: {type(exc).__name__}"
 
@@ -303,12 +329,7 @@ async def _ardeb(client, g: dict) -> tuple[list[dict], list[dict], str]:
     """
     hits: dict = {}
     try:
-        for name in _names(g):
-            for page in (1, 2, 3):
-                batch = await trsources.trdizin_search(client, name, 100, page, doc_type="PROJECT")
-                hits.update((h.get("id"), h) for h in batch)
-                if len(batch) < 100:
-                    break
+        hits.update((h.get("id"), h) for h in await _trdizin_pages(client, _names(g), 3, "PROJECT"))
     except httpx.HTTPError as exc:
         return [], [], f"TÜBİTAK ARDEB: {type(exc).__name__}"
     rows, projects = [], []
@@ -494,6 +515,95 @@ async def firm_teydeb(fid: str, refresh: bool = False) -> dict | None:
         FIRMS_DIR.mkdir(parents=True, exist_ok=True)
         _path(fid, "teydeb").write_text(json.dumps({"v": CACHE_V, "ts": time.time(), "projects": projects}, ensure_ascii=False))
     return {"projects": projects, "error": error}
+
+
+# ------------------------------------------------------------------ AB projeleri (CORDIS açık verisi)
+CORDIS = "https://cordis.europa.eu/search"
+
+
+def _as_list(value) -> list:
+    return value if isinstance(value, list) else [value] if value else []
+
+
+async def _cordis(g: dict) -> tuple[list[dict], str]:
+    """Firmanın katılımcı ya da koordinatör olduğu AB (Horizon, FP7…) projeleri. Kayıt, yalnız katılımcı kuruluşlardan
+    biri resmi listedeki bu firmayla eşleşiyorsa alınır (adın geçtiği başka projeler elenir)."""
+    hits: dict[str, dict] = {}
+    try:
+        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}) as client:
+            for name in _names(g)[:3]:
+                quoted = name.replace("'", " ")
+                r = await client.get(CORDIS, params={"q": f"contenttype='project' AND '{quoted}'", "p": 1, "num": 50, "format": "json"})
+                if r.status_code != 200:
+                    return [], f"CORDIS {r.status_code}"
+                for hit in _as_list(((r.json().get("hits") or {}).get("hit"))):
+                    project = (hit or {}).get("project") or {}
+                    if project.get("id"):
+                        hits[str(project["id"])] = project
+    except (httpx.HTTPError, ValueError) as exc:
+        return [], f"CORDIS: {type(exc).__name__}"
+    out = []
+    for pid, project in hits.items():
+        orgs = _as_list((((project.get("relations") or {}).get("associations") or {}).get("organization")))
+        own = next((o for o in orgs if isinstance(o, dict) and industry.match(clean(o.get("legalName") or "")) is g), None)
+        if not own:
+            continue
+        attrs = own.get("@attributes") or {}
+
+        def money(value):
+            try:
+                return round(float(value)) or None
+            except (TypeError, ValueError):
+                return None
+        partners = [{"name": clean(o.get("legalName") or ""), "country": ((o.get("address") or {}).get("country") or ""),
+                     "role": (o.get("@attributes") or {}).get("type") or ""} for o in orgs if isinstance(o, dict) and o is not own and o.get("legalName")]
+        out.append({"id": pid, "acronym": clean(project.get("acronym") or ""), "title": clean(project.get("title") or ""),
+                    "start": (project.get("startDate") or "")[:10], "end": (project.get("endDate") or "")[:10],
+                    "status": clean(project.get("status") or ""), "role": "Koordinatör" if attrs.get("type") == "coordinator" else "Katılımcı",
+                    "firm_grant": money(attrs.get("ecContribution")), "total_grant": money(project.get("ecMaxContribution")),
+                    "total_cost": money(project.get("totalCost")), "objective": clean(project.get("objective") or project.get("teaser") or "")[:4000],
+                    "partners": partners[:60], "turkish": [x["name"] for x in partners if x["country"] == "TR"][:20],
+                    "url": f"https://cordis.europa.eu/project/id/{pid}"})
+    return sorted(out, key=lambda x: x["start"], reverse=True), ""
+
+
+async def firm_cordis(fid: str, refresh: bool = False) -> dict | None:
+    g = _groups().get(fid)
+    if not g:
+        return None
+    cached = None if refresh else _cached(fid, "cordis")
+    if cached:
+        return {"projects": cached["projects"], "error": ""}
+    projects, error = await _cordis(g)
+    if not error:
+        FIRMS_DIR.mkdir(parents=True, exist_ok=True)
+        _path(fid, "cordis").write_text(json.dumps({"v": CACHE_V, "ts": time.time(), "projects": projects}, ensure_ascii=False))
+    return {"projects": projects, "error": error}
+
+
+async def firm_web_projects(fid: str, refresh: bool = False) -> dict | None:
+    """Firmanın bilinen projeleri: arama motoru sonuçları (başlık, kısa açıklama, adres); 7 gün saklanır."""
+    from .websearch import web_results
+    g = _groups().get(fid)
+    if not g:
+        return None
+    cached = None if refresh else _cached(fid, "web")
+    if cached:
+        return {"items": cached["items"], "error": ""}
+    found = await asyncio.gather(web_results(f"{g['name']} projeleri", None, 8), web_results(f"{g['name']} Ar-Ge projesi geliştirdi", None, 6),
+                                 return_exceptions=True)
+    items, seen = [], set()
+    for part in found:
+        for row in part if isinstance(part, list) else []:
+            url, title = row.get("url") or "", clean(row.get("title") or "")
+            if not url or url in seen or not title or fold(g["name"]).split()[0] not in fold(f"{title} {row.get('snippet') or ''}"):
+                continue
+            seen.add(url)
+            items.append({"title": title[:200], "snippet": clean(row.get("snippet") or row.get("body") or "")[:400], "url": url})
+    if items:
+        FIRMS_DIR.mkdir(parents=True, exist_ok=True)
+        _path(fid, "web").write_text(json.dumps({"v": CACHE_V, "ts": time.time(), "items": items[:12]}, ensure_ascii=False))
+    return {"items": items[:12], "error": ""}
 
 
 async def firm_patents(fid: str, refresh: bool = False) -> dict | None:

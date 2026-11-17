@@ -25,10 +25,13 @@ CAG_BUDGET_TOKENS = int(os.getenv("CAG_BUDGET_TOKENS", "30000"))  # ücretsiz ka
 MODES = {"auto": "Otomatik", "rag": "RAG", "cag": "CAG", "hybrid": "Hibrit"}
 logger = logging.getLogger(__name__)
 
-SYSTEM = ("Sen 'Akademik İz' asistanısın. Kullanıcı tek bir akademisyen hakkında soru soruyor. YALNIZCA verilen "
-          "BİLGİ TABANI'ndaki bilgilere dayanarak Türkçe, kısa ve net cevap ver. Bir yayına dayanan her cümlenin "
-          "sonuna [P#] koy. Bilgi tabanında olmayan bir şey sorulursa 'Toplanan veride bu bilgi yok' de; uydurma. "
-          "E-posta/telefon verme.")
+SYSTEM = ("Sen 'Akademik İz' asistanısın. Kullanıcı tek bir akademisyen hakkında soru soruyor. Türkçe, kısa ve net "
+          "cevap ver. Önce verilen BİLGİ TABANI'na dayan; bir yayına dayanan her cümlenin sonuna [P#] koy. "
+          "Soru bilgi tabanında doğrudan yoksa cevapsız bırakma: bilgi tabanındaki verilerden akıl yürüterek çıkarım yap "
+          "(ör. yaş sorulursa lisans/doktora yıllarından yaklaşık bir aralık hesapla ve hesabı bir cümleyle göster) ya da "
+          "yaygın bilinen genel bilgini kullan; böyle cümlelerde bunun 'tahmin' ya da 'genel bilgi' olduğunu açıkça yaz. "
+          "Bilgi tabanında olmayan yayın, proje, ödül, tarih ya da sayı uydurma. Çıkarım yapacak hiçbir dayanak yoksa "
+          "bunu söyle ve kullanıcının neye bakabileceğini öner. E-posta/telefon verme.")
 
 
 GLOBAL_Q = re.compile(r"\b(kac|sayi|sayisi|toplam|en cok|en az|en fazla|atif|yillara|yil yil|dagilim|kimlerle|kiminle|"
