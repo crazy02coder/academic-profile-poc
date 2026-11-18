@@ -14,12 +14,12 @@ import time
 import httpx
 
 from .config import ROOT
-from .text import clean
+from .text import clean, fold
 
 DIR = ROOT / "data" / "campus"
 TTL = 90 * 24 * 3600
 RADIUS = 1200  # metre
-VERSION = 3  # kayıt biçimi (2: toplu taşıma hatları; 3: hat kimlikleri — hat ayrıntısı için)
+VERSION = 5  # kayıt biçimi (… 4: merkez OpenStreetMap kaydından; 5: eczane, kafe, AVM ayrı gruplar, konumlu tam liste)
 LINE_RADIUS = 700  # hatlar için: kampüse bu kadar yakından geçen güzergâhlar
 MODES = {"subway": "Metro", "light_rail": "Hafif raylı", "tram": "Tramvay", "train": "Tren", "monorail": "Monoray", "funicular": "Füniküler",
          "ferry": "Vapur", "trolleybus": "Troleybüs", "bus": "Otobüs", "share_taxi": "Dolmuş / minibüs"}
@@ -29,8 +29,9 @@ OVERPASS_SERVERS = ("https://overpass.openstreetmap.fr/api/interpreter", "https:
                     "https://overpass.private.coffee/api/interpreter", "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
                     "https://overpass.kumi.systems/api/interpreter")
 # Sorgu sunucularının hepsi düşerse: adres arama servisi (Nominatim) ile grup başına bir arama (en çok 40 sonuç).
-NOMINATIM_PHRASES = {"rail": ["railway station", "tram stop"], "ferry": ["ferry terminal"], "bus": ["bus stop"], "dorm": ["dormitory"],
-                     "library": ["library"], "food": ["restaurant", "cafe"], "health": ["pharmacy", "hospital"], "sport": ["sports centre"]}
+NOMINATIM_PHRASES = {"rail": ["railway station", "tram stop"], "ferry": ["ferry terminal"], "bus": ["bus stop"], "cafe": ["cafe"],
+                     "food": ["restaurant"], "pharmacy": ["pharmacy"], "health": ["hospital"], "mall": ["mall", "supermarket"],
+                     "dorm": ["dormitory"], "library": ["library"], "sport": ["sports centre"]}
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 
 # (anahtar, başlık, Overpass süzgeçleri)
@@ -38,12 +39,17 @@ GROUPS = [
     ("rail", "Metro, tren ve tramvay", ['node["railway"~"station|halt|tram_stop"]', 'node["station"="subway"]']),
     ("ferry", "Vapur ve iskele", ['node["amenity"="ferry_terminal"]']),
     ("bus", "Otobüs durakları", ['node["highway"="bus_stop"]']),
+    ("cafe", "Kafeler", ['nwr["amenity"="cafe"]']),
+    ("food", "Restoran ve yemek", ['nwr["amenity"~"restaurant|fast_food|food_court"]']),
+    ("pharmacy", "Eczaneler", ['nwr["amenity"="pharmacy"]']),
+    ("health", "Hastane ve klinik", ['nwr["amenity"~"hospital|clinic|doctors"]']),
+    ("mall", "AVM ve market", ['nwr["shop"~"mall|department_store|supermarket"]']),
     ("dorm", "Yurtlar", ['nwr["building"="dormitory"]', 'nwr["amenity"="student_accommodation"]', 'nwr["tourism"="hostel"]']),
     ("library", "Kütüphaneler", ['nwr["amenity"="library"]']),
-    ("food", "Yeme-içme", ['node["amenity"~"restaurant|cafe|fast_food"]']),
-    ("health", "Sağlık", ['nwr["amenity"~"hospital|clinic|pharmacy"]']),
     ("sport", "Spor", ['nwr["leisure"~"sports_centre|fitness_centre|swimming_pool|stadium"]']),
 ]
+# AVM'ler kampüsten biraz uzakta olabilir: bu grup daha geniş alanda aranır.
+WIDE = {"mall": 3000}
 
 
 def _distance(a: tuple[float, float], b: tuple[float, float]) -> int:
@@ -53,8 +59,29 @@ def _distance(a: tuple[float, float], b: tuple[float, float]) -> int:
 
 
 async def _center(uid: str) -> tuple[float, float, str] | None:
-    """(enlem, boylam, kaynak). Önce künyedeki Wikidata koordinatı, yoksa Nominatim araması."""
+    """(enlem, boylam, kaynak). Önce OpenStreetMap'te üniversitenin kendi kaydı (amenity=university/college/school ya
+    da üniversite binası; adı tutmalı) — yerleşkenin gerçek yeri budur. Yoksa künyedeki Wikidata koordinatı (bazı
+    kurumlarda yanlış ya da eski yeri gösterir), o da yoksa ad aramasının ilk sonucu."""
     from . import uni_facts, yokdir
+    uni = await yokdir._university(uid)
+    rows = []
+    if uni:
+        try:
+            async with httpx.AsyncClient(timeout=20, headers=UA) as client:
+                r = await client.get(NOMINATIM, params={"q": uni["name"], "format": "jsonv2", "limit": 8, "countrycodes": "tr"})
+            rows = r.json() if r.status_code == 200 else []
+        except (httpx.HTTPError, ValueError):
+            rows = []
+    words = {w for w in fold((uni or {}).get("name") or "").split() if len(w) > 2 and w != "universitesi"}
+
+    def campus(row: dict) -> bool:
+        kind = (row.get("category"), row.get("type"))
+        named = words and words <= set(fold(row.get("name") or row.get("display_name") or "").replace(",", " ").split())
+        return bool(named) and (kind[0] == "amenity" and kind[1] in {"university", "college", "school"} or kind == ("building", "university")
+                                or kind == ("office", "educational_institution"))
+    hit = next((row for row in rows if isinstance(row, dict) and campus(row)), None)
+    if hit:
+        return float(hit["lat"]), float(hit["lon"]), "OpenStreetMap"
     try:
         facts = await uni_facts.facts(uid)
     except Exception:  # noqa: BLE001 — künye yardımcıdır
@@ -62,13 +89,7 @@ async def _center(uid: str) -> tuple[float, float, str] | None:
     coords = ((facts or {}).get("identity") or {}).get("coords")
     if isinstance(coords, list) and len(coords) == 2:
         return float(coords[0]), float(coords[1]), "Wikidata"
-    uni = await yokdir._university(uid)
-    if not uni:
-        return None
-    async with httpx.AsyncClient(timeout=20, headers=UA) as client:
-        r = await client.get(NOMINATIM, params={"q": uni["name"], "format": "jsonv2", "limit": 1, "countrycodes": "tr"})
-    rows = r.json() if r.status_code == 200 else []
-    if rows:
+    if rows and isinstance(rows[0], dict):
         return float(rows[0]["lat"]), float(rows[0]["lon"]), "OpenStreetMap"
     return None
 
@@ -87,8 +108,8 @@ async def around(uid: str, refresh: bool = False) -> dict | None:
     if not center:
         return None
     lat, lon, source = center
-    parts = "".join(f"{flt}(around:{RADIUS},{lat},{lon});" for _, _, filters in GROUPS for flt in filters)
-    query = f"[out:json][timeout:25];({parts});out center tags 600;"
+    parts = "".join(f"{flt}(around:{WIDE.get(key, RADIUS)},{lat},{lon});" for key, _, filters in GROUPS for flt in filters)
+    query = f"[out:json][timeout:25];({parts});out center tags 1200;"
     elements = None
     async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=4), headers=UA) as client:
         for server in OVERPASS_SERVERS:
@@ -102,25 +123,34 @@ async def around(uid: str, refresh: bool = False) -> dict | None:
     exact = elements is not None
     if elements is None:
         elements = await _nominatim_points(lat, lon)
-    lines = await _lines(lat, lon) if exact else []
+    lines = await _lines(lat, lon) if exact else None
+    lines_ok = lines is not None
+    lines = lines or []
 
     def kind(tags: dict) -> str:
         if tags.get("_group"):
             return tags["_group"]
-        if tags.get("amenity") == "ferry_terminal":
+        amenity, shop = tags.get("amenity"), tags.get("shop")
+        if amenity == "ferry_terminal":
             return "ferry"
         if tags.get("highway") == "bus_stop":
             return "bus"
         if tags.get("railway") in {"station", "halt", "tram_stop"} or tags.get("station") == "subway":
             return "rail"
-        if tags.get("building") == "dormitory" or tags.get("amenity") == "student_accommodation" or tags.get("tourism") == "hostel":
+        if tags.get("building") == "dormitory" or amenity == "student_accommodation" or tags.get("tourism") == "hostel":
             return "dorm"
-        if tags.get("amenity") == "library":
+        if amenity == "library":
             return "library"
-        if tags.get("amenity") in {"restaurant", "cafe", "fast_food"}:
+        if amenity == "cafe":
+            return "cafe"
+        if amenity in {"restaurant", "fast_food", "food_court"}:
             return "food"
-        if tags.get("amenity") in {"hospital", "clinic", "pharmacy"}:
+        if amenity == "pharmacy":
+            return "pharmacy"
+        if amenity in {"hospital", "clinic", "doctors"}:
             return "health"
+        if shop in {"mall", "department_store", "supermarket"}:
+            return "mall"
         if tags.get("leisure"):
             return "sport"
         return ""
@@ -134,7 +164,9 @@ async def around(uid: str, refresh: bool = False) -> dict | None:
             continue
         found[key].append({"name": clean(tags.get("name:tr") or tags.get("name") or ""), "lat": point[0], "lon": point[1],
                            "distance": _distance((lat, lon), point),
-                           "note": clean(tags.get("network") or tags.get("operator") or tags.get("cuisine") or tags.get("amenity") or "")[:60]})
+                           "note": clean({"mall": "AVM", "department_store": "Mağaza", "supermarket": "Market"}.get(tags.get("shop") or "", "")
+                                         or tags.get("cuisine") or tags.get("network") or tags.get("operator") or "")[:60],
+                           "hours": clean(tags.get("opening_hours") or "")[:80]})
     groups = []
     for key, label, _ in GROUPS:
         rows = sorted(found[key], key=lambda x: x["distance"])
@@ -144,13 +176,14 @@ async def around(uid: str, refresh: bool = False) -> dict | None:
                 seen.add(row["name"])
                 named.append(row)
         if rows:
-            groups.append({"key": key, "label": label, "count": len(rows), "nearest": rows[0]["distance"], "items": named[:6]})
-    data = {"center": {"lat": lat, "lon": lon, "source": source}, "radius": RADIUS, "groups": groups, "capped": not exact, "lines": lines,
+            groups.append({"key": key, "label": label, "count": len(rows), "nearest": rows[0]["distance"], "items": named[:40]})
+    data = {"v": VERSION, "center": {"lat": lat, "lon": lon, "source": source}, "radius": RADIUS, "groups": groups, "capped": not exact, "lines": lines,
             # Yol tarifi: kullanıcının konumundan kampüse toplu taşıma güzergâhı (harita uygulamasında açılır)
             "directions": f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}&travelmode=transit",
             "map": f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"}
-    if not groups:
-        return data  # çevre verisi alınamadı: harita yine gösterilir, kayıt yazılmaz (sonraki açılışta yeniden denenir)
+    if not groups or not lines_ok:
+        data["v"] = 0  # eksik veri: gösterilir ama kayda yazılmaz, sonraki açılışta yeniden denenir
+        return data
     try:
         DIR.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"ts": time.time(), "v": VERSION, "data": data}, ensure_ascii=False), encoding="utf-8")
@@ -159,21 +192,14 @@ async def around(uid: str, refresh: bool = False) -> dict | None:
     return data
 
 
-async def _lines(lat: float, lon: float) -> list[dict]:
+async def _lines(lat: float, lon: float) -> list[dict] | None:
     """Kampüsün yakınından geçen toplu taşıma hatları (OpenStreetMap güzergâh kayıtları): tür, hat numarası, ad ve
     nereden nereye gittiği. Gidiş-dönüş aynı hat tek satırdır. Sorgu sunucusu yanıt vermezse boş liste."""
     kinds = "|".join(MODES)
     query = f'[out:json][timeout:20];relation["type"="route"]["route"~"^({kinds})$"](around:{LINE_RADIUS},{lat},{lon});out tags 300;'
-    elements = []
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=4), headers=UA) as client:
-        for server in OVERPASS_SERVERS[:3]:
-            try:
-                r = await client.post(server, data={"data": query})
-                if r.status_code == 200:
-                    elements = r.json().get("elements") or []
-                    break
-            except (httpx.HTTPError, ValueError):
-                continue
+    elements = await _overpass(query, 12)
+    if elements is None:
+        return None  # sorgu sunucusu yanıt vermedi: "hat yok" diye kaydedilmez
     found: dict[tuple, dict] = {}
     for el in elements:
         tags = el.get("tags") or {}
@@ -259,7 +285,13 @@ async def line_detail(relation_id: int) -> dict | None:
     nodes = {e["id"]: e.get("tags") or {} for e in elements if e.get("type") == "node"}
     stops, seen = [], set()
     for member in relation.get("members") or []:
-        if member.get("type") != "node" or not str(member.get("role") or "").startswith(("stop", "platform")):
+        if member.get("type") != "node":
+            continue
+        tags = nodes.get(member["ref"]) or {}
+        # Durak: rolü stop/platform olan ya da (rol yazılmamışsa) durak/peron etiketi taşıyan üye.
+        marked = str(member.get("role") or "").startswith(("stop", "platform")) or tags.get("highway") == "bus_stop" \
+            or tags.get("public_transport") in {"stop_position", "platform", "station"} or tags.get("railway") in {"station", "stop", "halt", "tram_stop"}
+        if not marked:
             continue
         name = clean((nodes.get(member["ref"]) or {}).get("name:tr") or (nodes.get(member["ref"]) or {}).get("name") or "")
         if name and name not in seen:
@@ -286,7 +318,7 @@ async def scene(uid: str) -> dict | None:
     path = DIR / f"{uid}.3d.json"
     try:
         saved = json.loads(path.read_text(encoding="utf-8"))
-        if time.time() - saved.get("ts", 0) < TTL:
+        if time.time() - saved.get("ts", 0) < TTL and saved.get("v") == VERSION:
             return saved["data"]
     except (OSError, ValueError, KeyError):
         pass
@@ -336,7 +368,7 @@ async def scene(uid: str) -> dict | None:
     if buildings:
         try:
             DIR.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"ts": time.time(), "data": data}, ensure_ascii=False), encoding="utf-8")
+            path.write_text(json.dumps({"ts": time.time(), "v": VERSION, "data": data}, ensure_ascii=False), encoding="utf-8")
         except OSError:
             pass
     return data

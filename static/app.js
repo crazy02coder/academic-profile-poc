@@ -1521,7 +1521,7 @@ function openModal(html) {
   $(".welcome-toast")?.remove();
   const modal = $("#modal"), box = $(".modal-box", modal), wasHidden = modal.hidden;
   if (modal.hidden) modalPreviousFocus = document.activeElement;
-  box.classList.remove("modal-full");
+  box.classList.remove("modal-full", "modal-wide");
   $("#modalBody").innerHTML = html; hydrateIcons($("#modalBody"));
   box.removeAttribute("aria-labelledby");
   const title = $("h2", box);
@@ -2954,120 +2954,250 @@ function studentSectionResult(data, section) {
       ${links.length > (hasItems ? 4 : 8) ? `<details class="student-links sv-more"><summary>${links.length - (hasItems ? 4 : 8)} sayfa daha</summary><div class="sv-previews">${links.slice(hasItems ? 4 : 8).map(linkPreviewCard).join("")}</div></details>` : ""}</div>` : ""}`;
 }
 // Kampüs çevresi (OpenStreetMap): harita + yakındaki toplu taşıma, yurt, kütüphane, yeme-içme, sağlık noktaları.
+// Kampüs kartlarının ikonları (ulaşım türleri ve yer grupları); 24x24, çizgi ikon.
+const CAMPUS_SVG = {
+  transit: '<rect x="4" y="3" width="16" height="14" rx="3"/><path d="M4 10h16M9 21l-2-4M15 21l2-4"/><circle cx="8.5" cy="13.5" r="1"/><circle cx="15.5" cy="13.5" r="1"/>',
+  subway: '<rect x="5" y="3" width="14" height="14" rx="4"/><path d="M5 10h14M8 21l2-4M16 21l-2-4M10 6h4"/><circle cx="9" cy="13.5" r="1"/><circle cx="15" cy="13.5" r="1"/>',
+  tram: '<rect x="5" y="6" width="14" height="12" rx="3"/><path d="M5 12h14M9 3l3 3l3-3M8 21l1-3M16 21l-1-3"/><circle cx="9" cy="15" r="1"/><circle cx="15" cy="15" r="1"/>',
+  train: '<rect x="4" y="3" width="16" height="15" rx="2"/><path d="M4 11h16M12 3v8M7 21l2-3M17 21l-2-3"/><circle cx="8" cy="14.5" r="1"/><circle cx="16" cy="14.5" r="1"/>',
+  bus: '<rect x="3" y="4" width="18" height="13" rx="3"/><path d="M3 11h18M7 17v3M17 17v3M3 8H2M22 8h-1"/><circle cx="7.5" cy="14" r="1"/><circle cx="16.5" cy="14" r="1"/>',
+  ferry: '<path d="M3 15l2 5h14l2-5l-9-3zM6 13V7h12v6M10 7V4h4v3"/><path d="M2 22c2 0 2-1 4-1s2 1 4 1s2-1 4-1s2 1 4 1s2-1 4-1"/>',
+  cafe: '<path d="M4 9h13v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5zM17 10h1.5a2.5 2.5 0 0 1 0 5H17M8 3v3M12 3v3"/>',
+  pharmacy: '<rect x="3" y="3" width="18" height="18" rx="4"/><path d="M12 7v10M7 12h10"/>',
+  mall: '<path d="M5 8h14l-1 12H6zM9 8V6a3 3 0 0 1 6 0v2"/>',
+  dorm: '<path d="M3 20V8l9-5l9 5v12M3 20h18M9 20v-6h6v6"/>',
+  library: '<path d="M4 4h6a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4zM20 4h-6a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h6z"/>',
+  sport: '<circle cx="12" cy="12" r="9"/><path d="M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18M3 12h18"/>',
+};
+const campusIcon = (key) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${CAMPUS_SVG[key] || CAMPUS_SVG.transit}</svg>`;
+const campusDist = (v) => v >= 1000 ? `${(v / 1000).toLocaleString("tr-TR", { maximumFractionDigits: 1 })} km` : `${fmtNum(v)} m`;
+const TRANSIT_RAIL = ["subway", "light_rail", "train", "monorail"], TRANSIT_TRAM = ["tram", "funicular"];
+// Haritanın altındaki düğme kartlar: her biri kendi penceresini açar. [anahtar, başlık, ikon, renk, içindeki gruplar]
+const CAMPUS_CARDS = [["transit", "Ulaşım", "transit", "#d92d20", ["rail", "bus", "ferry"]], ["food", "Kafe ve yeme-içme", "cafe", "#b54708", ["cafe", "food"]],
+  ["health", "Eczane ve sağlık", "pharmacy", "#067647", ["pharmacy", "health"]], ["mall", "AVM ve market", "mall", "#7a5af8", ["mall"]],
+  ["dorm", "Yurtlar", "dorm", "#0a97d9", ["dorm"]], ["library", "Kütüphaneler", "library", "#3b5bdb", ["library"]], ["sport", "Spor", "sport", "#e8590c", ["sport"]]];
 function campusMapHtml(m) {
   if (!m?.center) return "";
-  const { lat, lon } = m.center, d = 0.012;
-  const src = `https://www.openstreetmap.org/export/embed.html?bbox=${lon - d * 1.6},${lat - d},${lon + d * 1.6},${lat + d}&layer=mapnik&marker=${lat},${lon}`;
-  const dist = (v) => v >= 1000 ? `${(v / 1000).toLocaleString("tr-TR", { maximumFractionDigits: 1 })} km` : `${fmtNum(v)} m`;
-  const ICONS = { rail: "layers", ferry: "globe", bus: "grid", dorm: "building", library: "book", food: "sparkle", health: "plus", sport: "award" };
-  // Kampüse ulaşım: her ulaşım türü tam satır; hatlar kart olarak dizilir, karta basınca durakları açılır.
-  CAMPUS_LINES.length = 0;
+  const { lat, lon } = m.center, d = 0.011;
+  const src = `https://www.openstreetmap.org/export/embed.html?bbox=${lon - d * 2.2},${lat - d},${lon + d * 2.2},${lat + d}&layer=mapnik&marker=${lat},${lon}`;
+  CAMPUS.map = m;
+  const group = (key) => (m.groups || []).find((g) => g.key === key);
+  const cards = CAMPUS_CARDS.map(([key, title, ic, color, keys], i) => {
+    const gs = keys.map(group).filter(Boolean), n = gs.reduce((a, g) => a + g.count, 0);
+    const lines = key === "transit" ? (m.lines || []).length : 0;
+    if (!n && !lines) return "";
+    const nearest = gs.length ? Math.min(...gs.map((g) => g.nearest)) : null;
+    const sub = key === "transit" ? [lines && `${fmtNum(lines)} hat`, n && `${fmtNum(n)} durak`].filter(Boolean).join(" · ") : gs.map((g) => `${fmtNum(g.count)} ${g.label.toLocaleLowerCase("tr-TR")}`).join(" · ");
+    return `<button type="button" class="campus-btn" data-campus-open="${key}" style="--c:${color};--i:${i}"><span class="campus-btn-ic">${campusIcon(ic)}</span><span class="campus-btn-main"><b>${esc(title)}</b><small>${esc(sub)}</small></span>
+      <span class="campus-btn-side">${nearest != null ? `<em>${campusDist(nearest)}</em><small>en yakını</small>` : ""}</span>${icon("chevron")}</button>`;
+  }).join("");
+  return `<div class="sv-group"><div class="sv-group-head"><b>Kampüs ve çevresi</b><span>${fmtNum(m.radius)} m içinde · OpenStreetMap</span></div>
+    <div class="campus-view"><div class="campus-view-tabs"><button type="button" class="on" data-campus-view="2d">Harita</button><button type="button" data-campus-view="3d">3B görünüm</button></div>
+      <iframe title="Kampüs haritası" loading="lazy" src="${esc(src)}"></iframe><div class="campus-3d" data-campus-3d hidden></div></div>
+    <div class="campus-btns">${cards || '<p class="faint">Yakın çevrede kayıtlı nokta bulunamadı.</p>'}</div>
+    <div class="campus-foot">${m.directions ? `<a class="btn sm primary" href="${esc(m.directions)}" target="_blank" rel="noopener">${icon("map")}Bulunduğum yerden yol tarifi al (toplu taşıma)</a>` : ""}
+      <a class="sv-src" href="${esc(m.map)}" target="_blank" rel="noopener">${icon("external")}Haritayı OpenStreetMap'te aç</a></div></div>`;
+}
+const CAMPUS = { map: null }, CAMPUS_LINES = [], CAMPUS_NEAR = new Set();
+// Ulaşım türüne özel canlandırma: hat boyunca ilerleyen belirgin araç (metro/tren dizisi, tramvay, otobüs, vapur).
+function transitAnim(mode) {
+  const rail = TRANSIT_RAIL.includes(mode), tram = TRANSIT_TRAM.includes(mode), ferry = mode === "ferry";
+  const stops = [40, 120, 200, 280, 360].map((x) => `<circle class="ta-stop" cx="${x}" cy="54" r="5"/>`).join("");
+  const car = (x, w) => `<rect class="ta-body" x="${x}" y="-30" width="${w}" height="26" rx="7"/><rect class="ta-stripe" x="${x}" y="-12" width="${w}" height="4"/>${Array.from({ length: Math.floor((w - 10) / 13) }, (_, k) => `<rect class="ta-win" x="${x + 7 + k * 13}" y="-25" width="9" height="9" rx="2"/>`).join("")}`;
+  const wheels = (...xs) => xs.map((x) => `<circle class="ta-wheel" cx="${x}" cy="-2" r="4.5"/><circle class="ta-hub" cx="${x}" cy="-2" r="1.6"/>`).join("");
+  const vehicle = ferry
+    ? `<g class="ta-vehicle ta-boat"><path class="ta-body" d="M-46 -6h92l-14 18h-64z"/><rect class="ta-cabin" x="-28" y="-24" width="52" height="18" rx="4"/>${[-22, -8, 6].map((x) => `<rect class="ta-win" x="${x}" y="-19" width="9" height="8" rx="2"/>`).join("")}<rect class="ta-body" x="-6" y="-36" width="12" height="12" rx="2"/><path class="ta-stripe-line" d="M-40 2h80"/></g>`
+    : rail ? `<g class="ta-vehicle">${car(-88, 56)}${car(-28, 56)}${car(32, 56)}<path class="ta-nose" d="M88 -30q14 2 14 26h-14z"/>${wheels(-74, -46, -14, 14, 46, 74)}</g>`
+    : tram ? `<g class="ta-vehicle">${car(-46, 92)}<path class="ta-panto" d="M-10 -30l10 -14l10 14M-14 -44h28"/>${wheels(-30, 0, 30)}</g>`
+    : `<g class="ta-vehicle">${car(-40, 80)}<rect class="ta-win ta-front" x="26" y="-26" width="11" height="13" rx="2"/><rect class="ta-door" x="-6" y="-24" width="11" height="20" rx="2"/>${wheels(-22, 24)}</g>`;
+  return `<svg class="transit-anim ${esc(mode)}" viewBox="0 0 400 68" aria-hidden="true">
+    ${ferry ? `<path class="ta-wave" d="M-40 56q10 -8 20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0"/><path class="ta-wave ta-wave2" d="M-40 63q10 -6 20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0"/>` : `<line class="ta-rail" x1="0" y1="54" x2="400" y2="54"/><line class="ta-track" x1="0" y1="54" x2="400" y2="54"/>${stops}`}
+    <g transform="translate(0 ${ferry ? 44 : 50})">${vehicle}</g></svg>`;
+}
+// Yer listesi (kafe, eczane, AVM…): ad, not, çalışma saati, uzaklık; satıra basınca haritada açılır.
+function campusPlaces(g, color) {
+  const items = [...g.items].sort((a, b) => (b.note === "AVM") - (a.note === "AVM") || a.distance - b.distance);
+  return `<div class="place-list">${items.map((x, i) => `<a class="place-row" style="--i:${Math.min(i, 24)};--c:${color}" href="https://www.openstreetmap.org/?mlat=${x.lat}&mlon=${x.lon}#map=18/${x.lat}/${x.lon}" target="_blank" rel="noopener">
+      <span class="place-no">${i + 1}</span><span class="place-main"><b>${esc(x.name)}</b>${x.note || x.hours ? `<small>${esc([x.note, x.hours].filter(Boolean).join(" · "))}</small>` : ""}</span><em>${campusDist(x.distance)}</em>${icon("external")}</a>`).join("")}</div>
+    ${g.count > items.length ? `<p class="faint" style="margin:10px 0 0">Haritada adı yazılı ${items.length} nokta listelendi; toplam ${fmtNum(g.count)} nokta var.</p>` : ""}`;
+}
+// Sekmeli kampüs penceresi: tabs = [{ label, icon, color, html }]
+function openCampusModal(title, sub, color, iconKey, tabs) {
+  const shown = tabs.filter((t) => t.html);
+  openModal(`<div class="campus-modal" style="--c:${color}"><header class="campus-modal-head"><span class="campus-btn-ic big">${campusIcon(iconKey)}</span><div><h2>${esc(title)}</h2><p>${esc(sub)}</p></div></header>
+    ${shown.length > 1 ? `<div class="campus-tabs" role="tablist">${shown.map((t, k) => `<button type="button" role="tab" data-cm-tab="${k}" class="${k ? "" : "on"}" style="--c:${t.color || color}"><span>${campusIcon(t.icon)}</span>${esc(t.label)}${t.count != null ? `<small>${fmtNum(t.count)}</small>` : ""}</button>`).join("")}</div>` : ""}
+    ${shown.map((t, k) => `<div class="campus-pane ${k ? "" : "on"}" data-cm-pane="${k}" style="--c:${t.color || color}">${t.html}</div>`).join("")}</div>`);
+  const box = $(".modal-box"); box.classList.add("modal-wide"); hydrateIcons(box);
+  $$("[data-cm-tab]", box).forEach((b) => b.onclick = () => {
+    $$("[data-cm-tab]", box).forEach((t) => t.classList.toggle("on", t === b));
+    $$("[data-cm-pane]", box).forEach((t) => t.classList.toggle("on", t.dataset.cmPane === b.dataset.cmTab));
+  });
+}
+const MODE_COLOR = { subway: "#d92d20", light_rail: "#d92d20", monorail: "#d92d20", train: "#b54708", tram: "#7a5af8", funicular: "#7a5af8", ferry: "#0a97d9", bus: "#067647", trolleybus: "#067647", share_taxi: "#067647" };
+const MODE_ICON2 = { subway: "subway", light_rail: "subway", monorail: "subway", train: "train", tram: "tram", funicular: "tram", ferry: "ferry", bus: "bus", trolleybus: "bus", share_taxi: "bus" };
+// Ulaşım penceresi: kaç ulaşım türü varsa o kadar sekme; her sekmede o türün aracı, yakın duraklar ve hatlar.
+function openCampusTransit() {
+  const m = CAMPUS.map; if (!m) return;
+  CAMPUS_LINES.length = 0; CAMPUS_NEAR.clear();
+  const stopsOf = (key) => (m.groups || []).find((g) => g.key === key);
+  ["rail", "bus", "ferry"].forEach((k) => (stopsOf(k)?.items || []).forEach((x) => { if (x.distance <= 500) CAMPUS_NEAR.add(fold(x.name)); }));
   const byMode = new Map();
   (m.lines || []).forEach((x) => { if (!byMode.has(x.mode)) byMode.set(x.mode, { label: x.label, rows: [] }); byMode.get(x.mode).rows.push(x); });
+  // Hattı kayıtlı olmayan ama durağı olan türler de sekme olur (ör. yalnız iskele).
+  if (stopsOf("ferry") && !byMode.has("ferry")) byMode.set("ferry", { label: "Vapur", rows: [] });
+  if (stopsOf("bus") && !byMode.has("bus")) byMode.set("bus", { label: "Otobüs", rows: [] });
+  if (stopsOf("rail") && ![...byMode.keys()].some((k) => TRANSIT_RAIL.includes(k) || TRANSIT_TRAM.includes(k))) byMode.set("subway", { label: "Raylı sistem", rows: [] });
   const routeOf = (x) => x.ends?.length === 2 ? `${x.ends[0]} → ${x.ends[1]}` : String(x.name || "").replace(x.ref || "\u0000", "").replace(/^[\s:\-–]+/, "") || x.name || "";
-  const card = (x) => { CAMPUS_LINES.push(x); return `<button type="button" class="line-card" data-campus-line="${CAMPUS_LINES.length - 1}" title="Durakları göster"><b class="line-ref ${esc(x.mode)}">${esc(x.ref || x.label)}</b><span>${esc(routeOf(x))}</span>${icon("chevron")}</button>`; };
-  const transit = byMode.size || m.directions ? `<div class="sv-group"><div class="sv-group-head"><b>Kampüse ulaşım</b><span>${(m.lines || []).length ? `${fmtNum(m.lines.length)} hat · kampüse 700 m içinde geçenler · hatta basınca durakları açılır` : "Toplu taşıma"}</span></div>
-    ${byMode.size ? [...byMode].map(([mode, g]) => `<section class="line-mode"><header><b class="line-ref ${esc(mode)}">${esc(g.label)}</b><span>${g.rows.length} hat</span></header><div class="line-cards">${g.rows.map(card).join("")}</div></section>`).join("")
-      : `<p class="faint">Haritada bu yerleşkeden geçen kayıtlı toplu taşıma hattı bulunamadı; aşağıdaki duraklara ve yol tarifine bakabilirsin.</p>`}
-    ${m.directions ? `<a class="btn sm primary" style="margin-top:12px" href="${esc(m.directions)}" target="_blank" rel="noopener">${icon("map")}Bulunduğum yerden yol tarifi al (toplu taşıma)</a>` : ""}</div>` : "";
-  return `${transit}<div class="sv-group"><div class="sv-group-head"><b>Kampüs çevresi</b><span>${fmtNum(m.radius)} m içinde · OpenStreetMap</span></div>
-    <div class="campus-map"><div class="campus-view"><div class="campus-view-tabs"><button type="button" class="on" data-campus-view="2d">Harita</button><button type="button" data-campus-view="3d">3B görünüm</button></div>
-        <iframe title="Kampüs haritası" loading="lazy" src="${esc(src)}"></iframe><div class="campus-3d" data-campus-3d hidden></div></div>
-      <div class="campus-groups">${(m.groups || []).map((g, i) => `<article class="campus-group" style="--i:${i}"><header>${icon(ICONS[g.key] || "map")}<b>${esc(g.label)}</b><span>${fmtNum(g.count)}</span></header>
-        <small>En yakını ${dist(g.nearest)}</small>${g.items.length ? `<ul>${g.items.slice(0, 4).map((x) => `<li><span>${esc(x.name)}</span><em>${dist(x.distance)}</em></li>`).join("")}</ul>` : ""}</article>`).join("")
-        || '<p class="faint">Yakın çevrede kayıtlı nokta bulunamadı.</p>'}</div></div>
-    <a class="sv-src" href="${esc(m.map)}" target="_blank" rel="noopener">${icon("external")}Haritayı OpenStreetMap'te aç</a></div>`;
+  const tabs = [...byMode].map(([mode, g]) => {
+    const stopGroup = stopsOf(mode === "ferry" ? "ferry" : ["bus", "trolleybus", "share_taxi"].includes(mode) ? "bus" : "rail");
+    const stops = (stopGroup?.items || []).slice(0, 8);
+    return { label: g.label, icon: MODE_ICON2[mode] || "transit", color: MODE_COLOR[mode] || "#067647", count: g.rows.length || stopGroup?.count,
+      html: `<div class="transit-hero ${esc(mode)}">${transitAnim(mode)}<div><b>${esc(g.label)}</b><span>${[g.rows.length && `${g.rows.length} hat`, stopGroup && `${fmtNum(stopGroup.count)} durak`, stopGroup && `en yakını ${campusDist(stopGroup.nearest)}`].filter(Boolean).join(" · ")}</span></div></div>
+        ${stops.length ? `<h4 class="campus-sub">Kampüse en yakın duraklar</h4><div class="stop-chips">${stops.map((x) => `<a class="stop-chip" href="https://www.openstreetmap.org/?mlat=${x.lat}&mlon=${x.lon}#map=18/${x.lat}/${x.lon}" target="_blank" rel="noopener"><b>${esc(x.name)}</b><em>${campusDist(x.distance)}</em></a>`).join("")}</div>` : ""}
+        ${g.rows.length ? `<h4 class="campus-sub">Hatlar <small>hatta basınca durakları açılır</small></h4><div class="line-acc">${g.rows.map((x) => { CAMPUS_LINES.push(x); return `<details class="line-item" data-line-item="${CAMPUS_LINES.length - 1}"><summary><b class="line-ref ${esc(x.mode)}">${esc(x.ref || x.label)}</b><span>${esc(routeOf(x))}</span>${icon("chevron")}</summary><div class="line-body"></div></details>`; }).join("")}</div>`
+          : `<p class="faint" style="margin-top:12px">Bu tür için haritada kayıtlı hat güzergâhı yok; yakın duraklar yukarıda.</p>`}` };
+  });
+  openCampusModal("Kampüse ulaşım", `${S.uni?.data?.name || ""} · ${[...byMode.values()].map((g) => g.label).join(", ")}`, "#d92d20", "transit", tabs.length ? tabs
+    : [{ label: "Ulaşım", icon: "transit", html: `<p class="faint">Haritada bu yerleşke için kayıtlı toplu taşıma durağı ya da hattı bulunamadı.</p>` }]);
+  const box = $(".modal-box");
+  if (m.directions) $(".campus-modal", box).insertAdjacentHTML("beforeend", `<a class="btn sm primary" style="justify-self:start" href="${esc(m.directions)}" target="_blank" rel="noopener">${icon("map")}Bulunduğum yerden yol tarifi al</a>`);
+  hydrateIcons(box);
+  $$("[data-line-item]", box).forEach((el) => el.addEventListener("toggle", () => { if (el.open && !el.dataset.ready) { el.dataset.ready = "1"; loadLineStops(el, CAMPUS_LINES[+el.dataset.lineItem]); } }));
 }
-const CAMPUS_LINES = [];
-// Hat ayrıntısı: sıralı duraklar (gidiş / dönüş), işletmeci ve varsa sefer aralığı.
-async function openCampusLine(x) {
-  const head = `<div class="pm-head"><b class="line-ref ${esc(x.mode)}">${esc(x.ref || x.label)}</b><span class="chip">${esc(x.label)}</span>${x.network ? `<span class="chip">${esc(x.network)}</span>` : ""}</div><h2>${esc(x.ends?.length === 2 ? `${x.ends[0]} → ${x.ends[1]}` : x.name)}</h2>`;
-  openModal(`<div class="project-modal">${head}<div class="loading-line"><span class="spinner"></span>Duraklar OpenStreetMap'ten okunuyor…</div></div>`);
-  const opened = $(".project-modal");
+// Hattın durakları (pencere içinde, hat satırının altında açılır): gidiş ve dönüş yönü, kampüse yakın duraklar işaretli.
+async function loadLineStops(el, x) {
+  const body = $(".line-body", el);
+  body.innerHTML = `<div class="loading-line"><span class="spinner"></span>Duraklar okunuyor…</div>`;
   const parts = await Promise.all((x.ids || []).slice(0, 2).map((id) => api(`/api/campus/line/${encodeURIComponent(id)}`, { quiet: true }).catch(() => null)));
-  if (!opened?.isConnected) return;
-  const ways = parts.filter((d) => d && d.stops?.length);
-  const info = ways[0] || parts.find(Boolean) || {};
-  const stopsHtml = (d) => `<ol class="line-stops">${d.stops.map((n, i) => `<li class="${i === 0 || i === d.stops.length - 1 ? "end" : ""}"><i></i><span>${esc(n)}</span></li>`).join("")}</ol>`;
-  const tabs = ways.map((d) => [`${d.from || d.stops[0]} → ${d.to || d.stops.at(-1)} (${d.stops.length} durak)`, stopsHtml(d)]);
-  const facts = pmRows([["Hat", info.ref || x.ref], ["Ad", info.name || x.name], ["İşletmeci", info.operator], ["Ağ", info.network || x.network], ["Sefer aralığı", info.interval], ["Çalışma saatleri", info.hours], ["Süre", info.duration]]);
-  openRecordModal(x.label, x.ends?.length === 2 ? `${x.ends[0]} → ${x.ends[1]}` : (info.name || x.name), [x.ref, info.network || x.network], [
-    ...tabs, ["Hat bilgisi", facts + (info.url ? `<a class="btn sm" style="margin-top:12px" href="${esc(info.url)}" target="_blank" rel="noopener">${icon("external")}OpenStreetMap'te aç</a>` : "")],
-    ...(ways.length ? [] : [["Duraklar", `<p class="faint">Bu hat için OpenStreetMap'te durak sırası kayıtlı değil ya da şu an okunamadı.</p>`]]),
-  ]);
+  if (!body.isConnected) return;
+  const ways = parts.filter((d) => d && d.stops?.length), info = ways[0] || parts.find(Boolean) || {};
+  const near = (n) => { const k = fold(n); return CAMPUS_NEAR.has(k) || [...CAMPUS_NEAR].some((v) => v.length > 4 && (k.includes(v) || v.includes(k))); };
+  const meta = [["İşletmeci", info.operator], ["Sefer aralığı", info.interval], ["Çalışma saatleri", info.hours]].filter(([, v]) => v);
+  body.innerHTML = `${meta.length ? `<div class="line-meta">${meta.map(([k, v]) => `<span><small>${k}</small><b>${esc(v)}</b></span>`).join("")}</div>` : ""}
+    ${ways.length ? `<div class="line-ways">${ways.map((d) => `<section><h5>${esc(d.from || d.stops[0])} → ${esc(d.to || d.stops.at(-1))} <small>${d.stops.length} durak</small></h5>
+      <ol class="line-stops">${d.stops.map((n, k) => `<li class="${k === 0 || k === d.stops.length - 1 ? "end" : ""} ${near(n) ? "near" : ""}" style="--i:${Math.min(k, 30)}"><i></i><span>${esc(n)}</span>${near(n) ? "<em>kampüse yakın</em>" : ""}</li>`).join("")}</ol></section>`).join("")}</div>`
+      : `<p class="faint">Bu hat için OpenStreetMap'te durak sırası kayıtlı değil ya da şu an okunamadı.</p>`}`;
 }
-// 3B kampüs görünümü (three.js): OpenStreetMap binaları yükseklikleriyle; sürükleyerek döndür, tekerlekle yakınlaş.
+function openCampusCard(key) {
+  const m = CAMPUS.map; if (!m) return;
+  if (key === "transit") { openCampusTransit(); return; }
+  const def = CAMPUS_CARDS.find((c) => c[0] === key); if (!def) return;
+  const [, title, ic, color, keys] = def, ICON = { cafe: "cafe", food: "cafe", pharmacy: "pharmacy", health: "pharmacy", mall: "mall", dorm: "dorm", library: "library", sport: "sport" };
+  let tabs = keys.map((k) => (m.groups || []).find((g) => g.key === k)).filter(Boolean).map((g) => ({ label: g.label, icon: ICON[g.key] || ic, count: g.count, html: campusPlaces(g, color) }));
+  if (key === "mall" && tabs[0]) {
+    // AVM ve marketler ayrı sekmede.
+    const g = (m.groups || []).find((x) => x.key === "mall"), malls = g.items.filter((x) => x.note !== "Market"), markets = g.items.filter((x) => x.note === "Market");
+    tabs = [malls.length && { label: "AVM ve mağaza", icon: "mall", count: malls.length, html: campusPlaces({ ...g, items: malls, count: malls.length }, color) },
+      markets.length && { label: "Marketler", icon: "mall", count: markets.length, html: campusPlaces({ ...g, items: markets, count: markets.length }, color) }].filter(Boolean);
+  }
+  openCampusModal(title, `${S.uni?.data?.name || ""} · kampüs çevresi`, color, ic, tabs);
+}
+// 3B kampüs görünümü (three.js): binalar zeminden yükselerek gelir, gölgeli; kamera yukarıdan süzülerek yerleşir.
+// Sürükle: döndür · Sağ tık/Shift+sürükle: kaydır · Tekerlek: yakınlaş · Bina üstüne gel: adı.
 async function mountCampus3d(host, uid) {
   if (host.dataset.ready) return;
   host.dataset.ready = "1";
-  host.innerHTML = `<div class="loading-line"><span class="spinner"></span>Binalar OpenStreetMap'ten okunuyor…</div>`;
+  host.innerHTML = `<div class="loading-line" style="padding:16px"><span class="spinner"></span>Binalar OpenStreetMap'ten okunuyor…</div>`;
   let data, THREE;
   try { [data, THREE] = await Promise.all([api(`/api/universities/${encodeURIComponent(uid)}/campus3d`, { quiet: true }), import("/static/vendor/three.module.min.js")]); }
   catch (e) { host.dataset.ready = ""; host.innerHTML = `<p class="faint" style="padding:16px">3B görünüm şu an hazırlanamadı (${esc(e.message || "veri alınamadı")}).</p>`; return; }
   if (!host.isConnected) return;
-  host.innerHTML = `<canvas></canvas><div class="campus-3d-tip" data-3d-tip>Sürükle: döndür · Tekerlek: yakınlaş · Binanın üstüne gel: adı</div>`;
+  host.innerHTML = `<canvas></canvas><div class="campus-3d-tip" data-3d-tip>Sürükle: döndür · Shift+sürükle: kaydır · Tekerlek: yakınlaş</div><div class="campus-3d-legend"><span><i style="background:#4263eb"></i>Üniversite</span><span><i style="background:#ced4da"></i>Diğer binalar</span><span><i style="background:#e03131"></i>Kampüs</span></div>`;
   const canvas = $("canvas", host), dark = document.documentElement.dataset.theme === "dark" || document.body.classList.contains("dark");
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(dark ? 0x0f1622 : 0xeaf1f8);
-  scene.fog = new THREE.Fog(scene.background, 700, 1500);
-  const camera = new THREE.PerspectiveCamera(42, 1, 1, 4000);
-  scene.add(new THREE.HemisphereLight(0xffffff, dark ? 0x1b2433 : 0xbfd0e0, 1.15));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.4); sun.position.set(-300, 520, 240); scene.add(sun);
-  const ground = new THREE.Mesh(new THREE.CircleGeometry(data.radius * 1.35, 64), new THREE.MeshLambertMaterial({ color: dark ? 0x18212f : 0xdfe7ee }));
-  ground.rotation.x = -Math.PI / 2; scene.add(ground);
+  renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = dark ? .95 : 1.12;
+  const scene = new THREE.Scene(), R = data.radius;
+  const sky = dark ? 0x0d1420 : 0xdcebf7;
+  scene.background = new THREE.Color(sky); scene.fog = new THREE.Fog(sky, R * 2.2, R * 5);
+  const camera = new THREE.PerspectiveCamera(38, 1, 2, R * 12);
+  scene.add(new THREE.HemisphereLight(dark ? 0x8fa4c4 : 0xffffff, dark ? 0x141b27 : 0xc8d6e2, dark ? .75 : .95));
+  const sun = new THREE.DirectionalLight(dark ? 0xcfdcff : 0xfff3df, dark ? 1.25 : 1.75);
+  sun.position.set(-R * .9, R * 1.5, R * .7); sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048); sun.shadow.bias = -.0004;
+  Object.assign(sun.shadow.camera, { left: -R * 1.3, right: R * 1.3, top: R * 1.3, bottom: -R * 1.3, near: 1, far: R * 5 });
+  scene.add(sun);
+  const std = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: .85, metalness: .02, ...extra });
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(R * 1.5, 96), std(dark ? 0x172130 : 0xe9eef3, { roughness: 1 }));
+  ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
   const shape = (pts) => { const sh = new THREE.Shape(); pts.forEach(([x, y], i) => (i ? sh.lineTo(x, y) : sh.moveTo(x, y))); return sh; };
-  const flat = (pts, color, y) => { const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape(pts)), new THREE.MeshLambertMaterial({ color })); mesh.rotation.x = -Math.PI / 2; mesh.position.y = y; scene.add(mesh); };
-  (data.greens || []).forEach((pts) => flat(pts, dark ? 0x1f3b2c : 0xbfe3c0, .3));
-  (data.water || []).forEach((pts) => flat(pts, dark ? 0x1d3f5c : 0x9fd0f0, .35));
-  // Yollar: her parça, genişliğinde ince bir şerit.
-  const roadMat = new THREE.MeshLambertMaterial({ color: dark ? 0x2c3a4d : 0xffffff }), pathMat = new THREE.MeshLambertMaterial({ color: dark ? 0x3a4658 : 0xf3e9d2 });
+  const flat = (pts, material, y) => { const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape(pts)), material); mesh.rotation.x = -Math.PI / 2; mesh.position.y = y; mesh.receiveShadow = true; scene.add(mesh); };
+  const green = std(dark ? 0x1e3a2b : 0xb9e2bd, { roughness: 1 }), blue = std(dark ? 0x1c4263 : 0x9ccdf0, { roughness: .35, metalness: .1 });
+  (data.greens || []).forEach((pts) => flat(pts, green, .3));
+  (data.water || []).forEach((pts) => flat(pts, blue, .35));
+  const roadMat = std(dark ? 0x2b384a : 0xffffff, { roughness: 1 }), pathMat = std(dark ? 0x394557 : 0xf1e6cc, { roughness: 1 });
   (data.roads || []).forEach((r) => { for (let k = 1; k < r.p.length; k += 1) {
     const [x1, y1] = r.p[k - 1], [x2, y2] = r.p[k], len = Math.hypot(x2 - x1, y2 - y1); if (len < .5) continue;
-    const seg = new THREE.Mesh(new THREE.PlaneGeometry(len, r.w), r.f ? pathMat : roadMat);
-    seg.rotation.x = -Math.PI / 2; seg.rotation.z = Math.atan2(y2 - y1, x2 - x1); seg.position.set((x1 + x2) / 2, r.f ? .5 : .6, -(y1 + y2) / 2); scene.add(seg);
+    const seg = new THREE.Mesh(new THREE.PlaneGeometry(len + r.w * .5, r.w), r.f ? pathMat : roadMat);
+    seg.rotation.x = -Math.PI / 2; seg.rotation.z = Math.atan2(y2 - y1, x2 - x1); seg.position.set((x1 + x2) / 2, r.f ? .5 : .65, -(y1 + y2) / 2); seg.receiveShadow = true; scene.add(seg);
   } });
-  const uniMat = new THREE.MeshLambertMaterial({ color: 0x3b5bdb }), mat = new THREE.MeshLambertMaterial({ color: dark ? 0x56657a : 0xc9d3de }), hot = new THREE.MeshLambertMaterial({ color: 0xf59f00 });
+  // Binalar: üniversite binaları mavi; diğerleri yüksekliğe göre hafifçe tonlanmış açık gri. Kenar çizgileri hatları belirginleştirir.
+  const uniMat = std(0x4263eb, { roughness: .55 }), hot = std(0xf59f00, { roughness: .5, emissive: 0x5a3a00 });
+  const tones = (dark ? [0x4b5a70, 0x56667d, 0x62738b] : [0xdfe4ea, 0xd3d9e0, 0xc6cdd6]).map((c) => std(c));
+  const edgeMat = new THREE.LineBasicMaterial({ color: dark ? 0x1b2533 : 0x8794a3, transparent: true, opacity: .45 });
   const buildings = [];
   (data.buildings || []).forEach((b) => {
     let geo; try { geo = new THREE.ExtrudeGeometry(shape(b.p), { depth: b.h, bevelEnabled: false }); } catch { return; }
-    const mesh = new THREE.Mesh(geo, b.u ? uniMat : mat);
-    mesh.rotation.x = -Math.PI / 2; mesh.userData = { name: b.n, base: b.u ? uniMat : mat, h: b.h }; scene.add(mesh); buildings.push(mesh);
+    const base = b.u ? uniMat : tones[b.h > 24 ? 2 : b.h > 12 ? 1 : 0];
+    const mesh = new THREE.Mesh(geo, base);
+    mesh.rotation.x = -Math.PI / 2; mesh.castShadow = true; mesh.receiveShadow = true;
+    const cx = b.p.reduce((a, q) => a + q[0], 0) / b.p.length, cy = b.p.reduce((a, q) => a + q[1], 0) / b.p.length;
+    mesh.userData = { name: b.n, base, h: b.h, delay: Math.hypot(cx, cy) / R * 900 };
+    mesh.scale.z = .001;
+    if (b.u || b.h > 14) mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo, 30), edgeMat));
+    scene.add(mesh); buildings.push(mesh);
   });
-  const pin = new THREE.Mesh(new THREE.ConeGeometry(9, 26, 16), new THREE.MeshLambertMaterial({ color: 0xe03131 })); pin.rotation.x = Math.PI; pin.position.set(0, 60, 0); scene.add(pin);
-  // Basit yörünge denetimi: açı (theta), eğim (phi), uzaklık.
-  const view = { theta: -.6, phi: 1.0, dist: data.radius * 1.9 };
-  const place = () => { camera.position.set(view.dist * Math.sin(view.phi) * Math.sin(view.theta), view.dist * Math.cos(view.phi), view.dist * Math.sin(view.phi) * Math.cos(view.theta)); camera.lookAt(0, 0, 0); };
-  let drag = null, raf = 0, idle = true, last = null;
-  const size = () => { const w = host.clientWidth, h = host.clientHeight || 360; renderer.setSize(w, h, false); camera.aspect = w / Math.max(1, h); camera.updateProjectionMatrix(); };
-  const frame = () => {
+  // Kampüs işareti: yerde nabız gibi büyüyen halka + süzülen iğne.
+  const pin = new THREE.Mesh(new THREE.ConeGeometry(10, 30, 20), std(0xe03131, { emissive: 0x4a0d0d })); pin.rotation.x = Math.PI; scene.add(pin);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(14, 18, 48), new THREE.MeshBasicMaterial({ color: 0xe03131, transparent: true, opacity: .7, side: THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 1.2; scene.add(ring);
+  // Kamera: hedef noktası çevresinde yörünge (theta, phi, dist) + kaydırma (target).
+  const target = new THREE.Vector3(0, 0, 0), view = { theta: -.9, phi: .35, dist: R * 3.4 }, goal = { theta: -.55, phi: 1.02, dist: R * 1.75 };
+  const place = () => { camera.position.set(target.x + view.dist * Math.sin(view.phi) * Math.sin(view.theta), view.dist * Math.cos(view.phi), target.z + view.dist * Math.sin(view.phi) * Math.cos(view.theta)); camera.lookAt(target); };
+  let drag = null, raf = 0, idle = true, last = null; const started = performance.now(), calm = calmMotion();
+  const size = () => { const w = host.clientWidth, h = host.clientHeight || 460; renderer.setSize(w, h, false); camera.aspect = w / Math.max(1, h); camera.updateProjectionMatrix(); };
+  const ease = (t) => 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 3);
+  const frame = (now) => {
     raf = 0;
     if (!host.isConnected) { renderer.dispose(); return; }
-    if (idle && !calmMotion()) view.theta += .0018;
-    pin.position.y = 60 + Math.sin(performance.now() / 420) * 5;
+    const t = now - started, intro = calm ? 1 : ease(t / 2200);
+    if (idle) {
+      // Giriş: kamera yukarıdan süzülür; sonra yavaşça döner.
+      view.phi = .35 + (goal.phi - .35) * intro; view.dist = R * 3.4 + (goal.dist - R * 3.4) * intro;
+      view.theta = -.9 + (goal.theta + .9) * intro + (calm ? 0 : Math.max(0, t - 2200) * .00006);
+    }
+    buildings.forEach((b) => { if (b.scale.z < 1) b.scale.z = calm ? 1 : Math.max(.001, ease((t - b.userData.delay) / 900)); });
+    pin.position.y = 62 + Math.sin(now / 420) * 5;
+    const pulse = (now / 1600) % 1; ring.scale.setScalar(1 + pulse * 2.2); ring.material.opacity = .7 * (1 - pulse);
     place(); renderer.render(scene, camera);
     if (!host.hidden) raf = requestAnimationFrame(frame);
   };
   const kick = () => { if (!raf) raf = requestAnimationFrame(frame); };
-  canvas.onpointerdown = (e) => { drag = { x: e.clientX, y: e.clientY }; idle = false; canvas.setPointerCapture(e.pointerId); };
+  canvas.oncontextmenu = (e) => e.preventDefault();
+  canvas.onpointerdown = (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; idle = false; canvas.setPointerCapture(e.pointerId); };
   canvas.onpointerup = () => { drag = null; };
-  const ray = new THREE.Raycaster(), mouse = new THREE.Vector2(), tip = $("[data-3d-tip]", host);
+  const ray = new THREE.Raycaster(), mouse = new THREE.Vector2(), tip = $("[data-3d-tip]", host), TIP = tip.textContent;
   canvas.onpointermove = (e) => {
-    if (drag) { view.theta -= (e.clientX - drag.x) * .006; view.phi = Math.min(1.5, Math.max(.2, view.phi - (e.clientY - drag.y) * .005)); drag = { x: e.clientX, y: e.clientY }; return; }
+    if (drag) {
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (drag.pan) { const k = view.dist / 700, c = Math.cos(view.theta), sn = Math.sin(view.theta); target.x = Math.max(-R, Math.min(R, target.x - (dx * c + dy * sn) * k)); target.z = Math.max(-R, Math.min(R, target.z - (dy * c - dx * sn) * k)); }
+      else { view.theta -= dx * .006; view.phi = Math.min(1.5, Math.max(.15, view.phi - dy * .005)); }
+      drag.x = e.clientX; drag.y = e.clientY; return;
+    }
     const r = canvas.getBoundingClientRect(); mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     ray.setFromCamera(mouse, camera);
-    const hit = ray.intersectObjects(buildings)[0]?.object || null;
+    const hit = ray.intersectObjects(buildings, false)[0]?.object || null;
     if (hit !== last) { if (last) last.material = last.userData.base; if (hit) hit.material = hot; last = hit;
-      tip.textContent = hit ? `${hit.userData.name || "Adsız bina"} · yaklaşık ${Math.round(hit.userData.h)} m` : "Sürükle: döndür · Tekerlek: yakınlaş · Binanın üstüne gel: adı"; }
+      tip.textContent = hit ? `${hit.userData.name || "Adsız bina"} · yaklaşık ${Math.round(hit.userData.h)} m` : TIP; }
   };
-  canvas.onwheel = (e) => { e.preventDefault(); idle = false; view.dist = Math.min(data.radius * 3.2, Math.max(120, view.dist * (1 + Math.sign(e.deltaY) * .08))); };
+  canvas.onwheel = (e) => { e.preventDefault(); idle = false; view.dist = Math.min(R * 3.6, Math.max(90, view.dist * (1 + Math.sign(e.deltaY) * .09))); };
   new ResizeObserver(() => { size(); kick(); }).observe(host);
   host._kick = kick; size(); kick();
 }
 document.addEventListener("click", (e) => {
-  const line = e.target.closest("[data-campus-line]");
-  if (line) { const x = CAMPUS_LINES[+line.dataset.campusLine]; if (x) openCampusLine(x); return; }
+  const open = e.target.closest("[data-campus-open]");
+  if (open) { openCampusCard(open.dataset.campusOpen); return; }
   const tab = e.target.closest("[data-campus-view]");
   if (tab) {
     const wrap = tab.closest(".campus-view"), three = tab.dataset.campusView === "3d", box = $("[data-campus-3d]", wrap);
