@@ -61,7 +61,6 @@
     { sel: '#nav [data-nav="firmalar"]', side: "right", title: "Firmalar", text: "Ar-Ge yapan firmalar. Bir firmayı açınca hangi akademisyenlerle çalıştığını, projelerini ve patentlerini görürsünüz." },
     { sel: '#nav [data-nav="ara"]', side: "right", title: "Konu bul", text: "Bir araştırma konusu yazarsınız; o konuda yazılmış yayınlar ve o alanda çalışan kişiler listelenir." },
     { sel: '#nav [data-nav="danisman"]', side: "right", title: "Danışman bul", text: "Tez ya da proje için konu yazarsınız; o konuda yayını olan akademisyenler önerilir." },
-    { sel: '#nav [data-nav="library3d"]', side: "right", title: "Kütüphane", text: "Açık erişimli kitap ve kaynakların gezilebildiği ayrı bir sayfa. Yeni sekmede açılır." },
     { sel: '#nav [data-nav="kutuphane"]', side: "right", title: "Kütüphanem", text: "Yıldızladığınız yayınlar ile favorilere eklediğiniz akademisyen, üniversite ve firmalar burada toplanır." },
     { sel: '.side-foot [data-nav="sistem"]', side: "right", title: "Ayarlar", text: "Yapay zekâ anahtarı, arama servisleri ve tarama hızı buradan ayarlanır. Rehberin son bölümünde ayrıntısıyla anlatılacak." },
     { sel: "#env", side: "right", title: "Durum göstergesi", text: "Yapay zekânın hazır olup olmadığını gösterir. <b>Yeşil</b> nokta hazır demektir; kapalıysa analiz ve sohbet özellikleri çalışmaz, diğer her şey çalışmaya devam eder." },

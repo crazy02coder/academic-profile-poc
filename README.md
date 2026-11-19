@@ -80,6 +80,8 @@ Sağlayıcı, API adresi ve anahtar yalnızca **Ayarlar** sayfasından girilir (
 | **Kütüphanem** | Kaydedilen makaleler, akademisyenler, üniversiteler ve firmalar. Yayın listeleri dışa aktarılabilir. |
 | **Sistem** | Servis durumu (yapay zekâ, REA, tarayıcı, EPO), öğrenilen site tarifleri, değişiklik taraması. |
 
+Üç boyutlu okuma salonu ve açık erişim kitap arşivi ayrı bir projeye taşındı: [ostimlibrary](https://github.com/crazy02coder/ostimlibrary).
+
 **Profil sekmeleri:** Genel bakış, Yayınlar, Akademik geçmiş, Dersler, Tezler, Projeler ve diğer, İş birlikleri, Patentler, Asistan. **Yenile** penceresinde YÖK profili, kurum sayfası, yayınlar, akademik geçmiş, dersler, tezler, projeler, iş birlikleri ve patentler ayrı seçilir. Yayınlar seçilirse taranacak kaynaklar da belirlenir. Yayın sekmesindeki **Kaynaklar** menüsü aynı seçimi doğrudan başlatır; tablo başlığındaki kaynak filtresi ise yalnız görünümü süzer. Seçilmeyen bilgiler, eski yayın kimlikleri, sohbet ve favoriler korunur; kaynak hatası eski kayıtları silmez. Bağımsız seçili yayın kaynakları paralel çalışır. Kayıtlı profili açmak WoS veya EPO taramasını yeniden başlatmaz.
 
 **Öğrenci bakışı:** İlk açılış yalnız kapalı accordion başlıklarını gösterir; toplu site taraması veya model isteği başlatmaz. **Lisans programları → fakülte → bölüm** yolunda program/ders içeriği ile akademik kadro ayrı açılır. Bölüm listesi seçilen fakültenin YÖK kadrosundan türetilir; öğrenci görünümü için yayın/atıf metrikleri veya akademisyen profilleri toplanmaz. Kadro alt başlığı bu listeyi gösterir. Program ve ders içeriği ise ilgili alt başlık açılınca, fakülte ve bölüm bağlamıyla üniversitenin resmî sitesinden okunur.

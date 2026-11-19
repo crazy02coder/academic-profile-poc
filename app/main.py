@@ -40,10 +40,8 @@ import httpx
 
 from . import directory, firms, industry, library, patents, profile_refresh, publication_status, quartiles, trsources, unit_publications, wiki_units, wos, wos_enrichment, wos_verification, yokdir
 
-from .library_routes import router as library_router
 
 app = FastAPI(title="Akademik İz")
-app.include_router(library_router)
 from .tools_routes import router as tools_router  # noqa: E402
 app.include_router(tools_router)
 logger = logging.getLogger(__name__)
@@ -487,22 +485,6 @@ async def pipeline(job: dict, data: JobIn):
 @app.get("/")
 async def index():
     return FileResponse(ROOT / "static" / "index.html")
-
-
-@app.get("/kutuphane")
-async def library_page():
-    """3B kütüphane: incelenen makaleler, kaydedilenler, konular ve gündem; yeni sekmede açılır."""
-    return FileResponse(ROOT / "static" / "library.html", headers={"Cache-Control": "no-cache"})
-
-
-def _wos_activity() -> dict:
-    """Read local task registries without creating a scan or opening WoS."""
-    active_jobs = sum(not task.done() for tasks in (wos.TASKS, library._TOPIC_TASKS)
-                      for task in tasks.values())
-    pending_jobs = sum(1 for job in JOBS.values()
-                       if job.get("expects_wos") and not job["done"] and not job["task"].done())
-    pending_jobs += sum(not task.done() for task in unit_publications.TASKS.values())
-    return {"active_jobs": active_jobs, "pending_jobs": pending_jobs}
 
 
 @app.get("/api/health")
