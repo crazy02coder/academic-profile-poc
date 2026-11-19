@@ -2,6 +2,8 @@
 # Tek komut: bash run.sh  → http://127.0.0.1:8000   (Linux, macOS ve Windows'ta Git Bash)
 set -euo pipefail
 cd "$(dirname "$0")"
+# Windows'ta Python dosyaları varsayılan olarak yerel kod sayfasıyla (cp1254) açar; veri dosyaları UTF-8'dir.
+export PYTHONUTF8=1
 # Python 3.11+ gerekir. Sanal ortamın Python'u Linux/macOS'ta .venv/bin, Windows'ta .venv/Scripts altındadır.
 PY=.venv/bin/python
 [ -x .venv/Scripts/python.exe ] && PY=.venv/Scripts/python.exe

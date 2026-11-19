@@ -1,2 +1,3 @@
 # Kabuk betikleri Windows kopyasinda da LF kalir (CRLF ile bash calistirmaz).
 *.sh text eol=lf
+*.bat text eol=crlf
