@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 
 import certifi
 
-from .config import CACHE_DIR
+from .config import CACHE_DIR, curl_path
 
 import scrapling.fetchers  # noqa: E402,F401 - logger'ı kurması için önce import edilir
 
@@ -233,7 +233,7 @@ async def fetch_static(url: str, log=None, timeout: int = 20) -> Page:
                   headers=TR_HEADERS)
     bundle = _bundle_cache.get(host) or augmented_bundle()
     if bundle:
-        kwargs["verify"] = bundle
+        kwargs["verify"] = curl_path(bundle)
     try:
         resp = await AsyncFetcher.get(url, **kwargs)
     except Exception as exc:  # noqa: BLE001
@@ -241,7 +241,7 @@ async def fetch_static(url: str, log=None, timeout: int = 20) -> Page:
             raise
         if log:
             await log("TLS zinciri eksik (sunucu ara sertifikayı göndermiyor) → AIA ile tamamlanıyor, doğrulama açık kalıyor.")
-        kwargs["verify"] = await asyncio.to_thread(repaired_bundle, url)
+        kwargs["verify"] = curl_path(await asyncio.to_thread(repaired_bundle, url))
         resp = await AsyncFetcher.get(url, **kwargs)
     return Page(url=str(resp.url), status=resp.status, html=resp.html_content or "", via="scrapling.fetcher", selector=resp)
 

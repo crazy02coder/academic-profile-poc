@@ -24,6 +24,42 @@ def _load_env(path: Path) -> None:
 
 _load_env(ROOT / ".env")
 
+
+def curl_path(path) -> str:
+    """libcurl (Scrapling'in kullandığı curl_cffi) Windows'ta ASCII dışı harf içeren dosya yolunu açamaz
+    ("C:/Users/Bahadır/…" → curl 77: sertifika dosyası okunamadı). Böyle bir yol için aynı dosyanın kısa (8.3) adı,
+    o da yoksa ASCII bir klasördeki kopyası döndürülür; diğer sistemlerde yol aynen kalır."""
+    path = str(path)
+    if os.name != "nt" or path.isascii():
+        return path
+    try:
+        import ctypes
+        buffer = ctypes.create_unicode_buffer(1024)
+        if ctypes.windll.kernel32.GetShortPathNameW(path, buffer, 1024) and buffer.value.isascii():
+            return buffer.value
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # diskte kısa adlar kapalı: dosya ASCII bir klasöre kopyalanır
+        import shutil
+        folder = Path(os.environ.get("PROGRAMDATA") or "C:/ProgramData") / "akademik-iz"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / Path(path).name
+        if not target.exists() or target.stat().st_mtime < Path(path).stat().st_mtime:
+            shutil.copyfile(path, target)
+        return str(target) if str(target).isascii() else path
+    except OSError:
+        return path
+
+
+if os.name == "nt":
+    # Scrapling'in varsayılan kök sertifika dosyası sanal ortamın içindedir; yol ASCII değilse curl onu açamaz.
+    try:
+        import certifi
+        if not certifi.where().isascii():
+            os.environ.setdefault("CURL_CA_BUNDLE", curl_path(certifi.where()))
+    except Exception:  # noqa: BLE001
+        pass
+
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", "gemini-3.5-flash-lite")
 # Kota/yoğunluk hatasında sırayla denenecek modeller
