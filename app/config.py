@@ -29,7 +29,6 @@ GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", "gemini-3.5-flash-lite")
 # Kota/yoğunluk hatasında sırayla denenecek modeller
 GEMINI_FALLBACKS = [m.strip() for m in os.getenv(
     "GEMINI_FALLBACKS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash").split(",") if m.strip()]
-GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
 LLM_MODE = os.getenv("LLM_MODE", "auto")  # auto | mock
 
 USER_AGENT = "AkademikIz/2.0 (academic research PoC; mailto:akademik-iz@example.org)"

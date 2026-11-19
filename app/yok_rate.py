@@ -1,7 +1,7 @@
 """yok.gov.tr (akademik, tez, açık bilim…) için tek, süreçler arası hız sınırlayıcı.
 
 İki istek arası en az ve 60 saniyede en fazla istek sayısı Ayarlar'daki YÖK hızı kademesinden (1-5) gelir. Zaman damgaları
-data/yok/_rate.json'da, dosya kilidiyle (fcntl) paylaşılır; aynı makinedeki tüm uvicorn/betik süreçleri
+data/yok/_rate.json'da, dosya kilidiyle (fcntl; Windows'ta msvcrt) paylaşılır; aynı makinedeki tüm uvicorn/betik süreçleri
 aynı bütçeyi kullanır. httpx istemcilerine `event_hooks=HOOKS` ile bağlanır: yönlendirmeler dahil
 yok.gov.tr'ye giden her istek sayılır, başka alan adları etkilenmez.
 """
@@ -9,9 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import fcntl
 import json
+import os
 import time
+
+try:
+    import fcntl  # Linux / macOS
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 
 from .config import ROOT
 
@@ -76,11 +82,36 @@ def is_yok(host: str | None) -> bool:
     return host == "yok.gov.tr" or host.endswith(".yok.gov.tr")
 
 
+def _lock(handle) -> None:
+    """Süreçler arası dışlayıcı kilit; alınana kadar bekler."""
+    if fcntl is not None:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        return
+    handle.seek(0)
+    while True:
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # dosyanın ilk baytı kilitlenir
+            return
+        except OSError:
+            time.sleep(0.02)
+
+
+def _unlock(handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        return
+    handle.seek(0)
+    try:
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+
+
 def _reserve(urgent: bool = False) -> float:
     """Yer varsa şimdiye bir istek yazar ve 0 döndürür; yoksa beklenmesi gereken saniyeyi döndürür."""
     DIR.mkdir(parents=True, exist_ok=True)
     with open(_LOCK_FILE, "a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _lock(lock)
         try:
             try:
                 stamps = [float(t) for t in json.loads(_RATE_FILE.read_text())]
@@ -102,7 +133,7 @@ def _reserve(urgent: bool = False) -> float:
             tmp.replace(_RATE_FILE)
             return 0.0
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            _unlock(lock)
 
 
 async def throttle() -> None:

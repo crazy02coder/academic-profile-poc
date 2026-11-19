@@ -52,7 +52,7 @@ OpenAlex anahtarsız da çalışır ama IP başına günlük ortak bütçe (~100
 
 | Araç | Sürüm | Not |
 |---|---|---|
-| Python | 3.11+ | |
+| Python | 3.11+ | Linux, macOS ve Windows (Git Bash ile `bash run.sh`) |
 | Node.js | 22.19+ / 24.11+ | REA için. Yoksa sistem REA'sız çalışır (aşağıya bak). |
 
 **Modeller**
@@ -61,9 +61,8 @@ OpenAlex anahtarsız da çalışır ama IP başına günlük ortak bütçe (~100
 |---|---|
 | Analiz, sohbet, sayfa okuma | `gemini-3.5-flash` |
 | Kısa işler (link seçimi) | `gemini-3.5-flash-lite` |
-| RAG gömme | `gemini-embedding-001` (768 boyut) |
 
-Sağlayıcı, API adresi ve anahtar yalnızca **Ayarlar** sayfasından girilir (Gemini, ChatGPT, Claude ya da OpenAI uyumlu kendi sunucunuz); yapay zekâ için `.env` okunmaz. Ayarlar git'e girmeyen `.ai-settings.json` dosyasında durur; anahtarlar arayüze geri gönderilmez. Claude'da gömme modeli olmadığından sohbet yayınları kelime aramasıyla bulur.
+Sağlayıcı, API adresi ve anahtar yalnızca **Ayarlar** sayfasından girilir (Gemini, ChatGPT, Claude ya da OpenAI uyumlu kendi sunucunuz); yapay zekâ için `.env` okunmaz. Ayarlar git'e girmeyen `.ai-settings.json` dosyasında durur; anahtarlar arayüze geri gönderilmez.
 
 Ücretsiz katmanda kota (429) ve yoğunluk (503) hataları olağandır. Hata alan istek sıradaki modelle (`GEMINI_FALLBACKS`) yeniden denenir; kotası dolan model 60 sn atlanır.
 
@@ -141,7 +140,7 @@ Seçili bölümün ders tablosu veya ders kodu/adı/açıklaması içeren katalo
         │
         ├──────────► Analiz         "Yapay zekâ ile analiz et" denince; her cümle bir yayın kimliğine bağlı
         │
-        └──────────► Sohbet         soru tipine göre CAG, RAG veya Hibrit otomatik seçilir
+        └──────────► Sohbet         kişinin bilgi tabanı doğrudan modele verilir
 ```
 
 Her aşama arayüzde canlı akar. Ham teknik loglar **"Teknik ayrıntılar"** altında kapalı durur.
@@ -367,15 +366,12 @@ Kaynak EPO Open Patent Services'tir (Espacenet'in verisi; EP, WO ve TR yayınlar
 
 ---
 
-## Sohbet: CAG, RAG, Hibrit
+## Sohbet
 
-Profil çıktıktan sonra kişi hakkında soru sorulabilir. Yöntemi soru tipi belirler:
-
-| Yöntem | Ne zaman | Nasıl |
-|---|---|---|
-| **CAG** | Genel sorular ("ana araştırma alanı ne?") | Tüm profil modelin bağlamına konur; önek her soruda aynı olduğu için Gemini örtük önbelleği tekrarlarda kullanılır. |
-| **RAG** | Ayrıntı soruları ("2019'da hangi dergide yayın yaptı?") | BM25 (Türkçe kök + TR↔EN genişletme) ve gömme araması, RRF ile birleştirilir. |
-| **Hibrit** | İkisinin arası | Çekirdek profil + ilgili parçalar. |
+Profil çıktıktan sonra kişi hakkında soru sorulabilir. Kişinin bilgi tabanı (profil, istatistik, analiz, bütün yayınlar ve
+özetler) her soruda modele doğrudan verilir; ayrı bir arama ya da gömme (embedding) adımı yoktur. Önek her soruda aynı
+olduğu için sağlayıcının örtük önbelleği tekrarlarda kullanılır. Bilgi tabanı `CHAT_BUDGET_TOKENS` sınırını aşarsa yayın
+listesinin tamamı korunur, özetler sığdığı kadar eklenir.
 
 Sohbetler `data/chats/` altında saklanır; profille birlikte açılır ve silinebilir. Cevaplardaki `[P#]` atıfları yayın listesindeki sıradır; profil yenilenip liste değişince numaralar güncellenir, listeden düşen yayının numarası yerine adı yazılır.
 
@@ -391,9 +387,8 @@ Hepsi isteğe bağlı ortam değişkenleri:
 | `GEMINI_MODEL` | `gemini-3.5-flash` | Ana model |
 | `GEMINI_FAST_MODEL` | `gemini-3.5-flash-lite` | Kısa işler |
 | `GEMINI_FALLBACKS` | `gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash` | Hata/kota durumunda sırayla denenir |
-| `GEMINI_EMBED_MODEL` | `gemini-embedding-001` | RAG gömme modeli |
 | `LLM_MODE` | `auto` | `mock` modeli devre dışı bırakır |
-| `CAG_BUDGET_TOKENS` | `30000` | Bu sınırı aşan bilgi tabanında CAG yerine Hibrit |
+| `CHAT_BUDGET_TOKENS` | `30000` | Sohbette modele verilen bilgi tabanının üst sınırı; aşılırsa özetler sığdığı kadar eklenir |
 | `OPENALEX_API_KEY` | — | OpenAlex kişisel bütçesi |
 | `OPENALEX_MAILTO` | `akademik-iz@example.org` | OpenAlex isteklerindeki iletişim adresi |
 | `EPO_KEY` / `EPO_SECRET` | — | Patentler (EPO OPS) |
@@ -431,7 +426,7 @@ app/
   dedup.py         tekilleştirme (TR↔EN dahil)
   consensus.py     kaynaklar arası doğrulama
   analysis.py      kanıtlı araştırma analizi
-  chat.py          CAG / RAG / Hibrit sohbet
+  chat.py          Profil sohbeti (bilgi tabanı doğrudan modele)
   paper.py         yayın detayı ve özet
 
   industry.py      akademisyen → firma: sanayi iş birlikleri
@@ -444,7 +439,7 @@ app/
   search_worker.py süre aşımında sonlandırılabilen ddgs işçisi
   google_search.py Google sonuç sayfası (Playwright + REA)
   net.py           erişim katmanı: TLS zincir onarımı, duvar ve yumuşak 404 tespiti
-  llm.py           Gemini istemcisi (JSON şeması, akış, embedding, model zinciri)
+  llm.py           Gemini istemcisi (JSON şeması, akış, model zinciri)
   text.py          Türkçe metin işleme: kök, unvan, ad eşleşmesi, dil tespiti
 scripts/
   import_arge.py   Bakanlık Excel dosyalarını data/arge_merkezleri.json'a çevirir

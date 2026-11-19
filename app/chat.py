@@ -1,28 +1,22 @@
-"""Profil sohbeti: RAG, CAG ve Hibrit (CAG çekirdek + RAG ayrıntı) bilgi katmanı.
+"""Profil sohbeti: kişinin bilgi tabanı doğrudan modele verilir.
 
-  RAG    — her soruda ilgili yayınlar getirilir: Türkçe-duyarlı BM25 + vektör araması
-           (Gemini embedding) Reciprocal Rank Fusion ile birleştirilir. Bağlam küçük.
-  CAG    — kişinin TÜM bilgi tabanı (profil, istatistik, analiz, bütün yayınlar ve
-           özetler) sabit bir önek olarak verilir. Önek her soruda bayt bayt aynı
-           olduğundan Gemini örtük önbelleğini yeniden kullanır; arama hatası olmaz.
-  Hibrit — CAG çekirdeği (profil + istatistik + analiz + tüm başlıklar, önbellekli)
-           + soruya göre RAG ile getirilen özetler (önekten SONRA eklenir, önbelleği bozmaz).
-  Otomatik — tam bilgi tabanı CAG bütçesine sığıyorsa CAG, sığmıyorsa Hibrit.
+Bilgi tabanı (profil, istatistik, analiz, bütün yayınlar ve özetler) sistem talimatından sonra sabit bir önek olarak
+gönderilir; önek her soruda bayt bayt aynı olduğundan sağlayıcının örtük önbelleği tekrarlarda kullanılır. Ayrı bir
+getirme (arama, gömme vektörü) adımı yoktur. Bilgi tabanı CHAT_BUDGET_TOKENS sınırını aşarsa yayın listesinin tamamı
+korunur, özetler listedeki sırayla sığdığı kadar eklenir.
 """
 from __future__ import annotations
 
-import math
 import logging
 import os
 import re
-import time
 from collections import Counter
 from typing import AsyncIterator
 
-from .text import content_tokens, expand_bilingual, fold, stem_tr
+from .text import fold
 
-CAG_BUDGET_TOKENS = int(os.getenv("CAG_BUDGET_TOKENS", "30000"))  # ücretsiz katmanın dakika token sınırını zorlamadan
-MODES = {"auto": "Otomatik", "rag": "RAG", "cag": "CAG", "hybrid": "Hibrit"}
+# Modele verilen bilgi tabanının üst sınırı (ücretsiz katmanın dakika token sınırını zorlamamak için).
+BUDGET_TOKENS = int(os.getenv("CHAT_BUDGET_TOKENS", "30000"))
 logger = logging.getLogger(__name__)
 
 SYSTEM = ("Sen 'Akademik İz' asistanısın. Kullanıcı tek bir akademisyen hakkında soru soruyor. Türkçe, kısa ve net "
@@ -34,22 +28,8 @@ SYSTEM = ("Sen 'Akademik İz' asistanısın. Kullanıcı tek bir akademisyen hak
           "bunu söyle ve kullanıcının neye bakabileceğini öner. E-posta/telefon verme.")
 
 
-GLOBAL_Q = re.compile(r"\b(kac|sayi|sayisi|toplam|en cok|en az|en fazla|atif|yillara|yil yil|dagilim|kimlerle|kiminle|"
-                      r"ortak yazar|birlikte|genel|alanlari|ozetle|ozet|kariyer|unvan|bolum|kurum|orcid|son yayin|"
-                      r"en yeni|en son|ilk yayin|liste|tum|butun|hepsi|yonelim|odak|degisim|trend|h ?ind(?:ex|eks)\w*|"
-                      r"how many|most cited|overall|all)\b")
-# Türkçe eklemeli: kökler önek olarak eşleşir ("yöntemi", "yöntemlerini" → yontem)
-DETAIL_Q = re.compile(r"\b(neden|yontem|teknik|veri ?seti|dataset|deney|detay|ayrinti|anlat|acikla|ne yap|ne bul|"
-                      r"bulgu|sonuc|amac|katki|mimari|algoritma|model(?:i|ini|ler)\b|how|method|approach|what did)")
-
-
 def est_tokens(text: str) -> int:
     return max(1, len(text) // 3)  # Türkçe/İngilizce karışık metin için kaba tahmin
-
-
-def _doc(p: dict) -> str:
-    return " ".join([p["title"], *(v["title"] for v in p.get("variants", [])), p.get("venue") or "",
-                     p.get("abstract", "")[:1200], " ".join(p.get("labels") or []), " ".join(p.get("authors") or [])])
 
 
 class Knowledge:
@@ -59,15 +39,10 @@ class Knowledge:
         self.result = result
         self.prof = result["profile"]
         self.papers = result["publications"]
-        self.by_id = {p["id"]: p for p in self.papers}
-        self.docs = [content_tokens(_doc(p)) for p in self.papers]
-        self.df = Counter(t for d in self.docs for t in set(d))
-        self.avg = (sum(len(d) for d in self.docs) / len(self.docs)) if self.docs else 1
-        self.vectors: list[list[float]] | None = None
         self.core = self._core()
         self.full = self._full()
 
-    # ---------------------------------------------------------------- CAG metinleri
+    # ---------------------------------------------------------------- bilgi tabanı metinleri
     def _header(self) -> list[str]:
         prof, papers, an = self.prof, self.papers, self.result["analysis"]
         years = Counter(p["year"] for p in papers if p["year"])
@@ -149,117 +124,29 @@ class Knowledge:
         return "\n".join(lines)
 
     def _full(self) -> str:
-        lines = [self.core, "", "YAYIN ÖZETLERİ:"]
+        """Çekirdek + yayın özetleri. Bütçe aşılırsa özetler listedeki sırayla sığdığı kadar eklenir; kalanların
+        yalnız künyesi (çekirdekteki satırı) modele gider."""
+        lines, used, left = [self.core, "", "YAYIN ÖZETLERİ:"], est_tokens(self.core), 0
         for p in self.papers:
-            if p.get("abstract"):
-                lines.append(f"[{p['id']}] {p['abstract'][:900]}")
+            if not p.get("abstract"):
+                continue
+            line = f"[{p['id']}] {p['abstract'][:900]}"
+            if used + est_tokens(line) > BUDGET_TOKENS:
+                left += 1
+                continue
+            used += est_tokens(line)
+            lines.append(line)
+        if left:
+            lines.append(f"(Bağlam sınırı nedeniyle {left} yayının özeti eklenmedi; künyeleri yukarıdaki listededir.)")
+        self.trimmed = left
         return "\n".join(lines)
 
-    # ----------------------------------------------------------------- RAG getirme
-    def bm25(self, question: str) -> list[tuple[float, str]]:
-        q = [stem_tr(t) for t in expand_bilingual(content_tokens(question))]
-        n = len(self.docs)
-        scores = []
-        for p, d in zip(self.papers, self.docs):
-            tf = Counter(d)
-            s = 0.0
-            for t in q:
-                if t in tf:
-                    idf = math.log(1 + (n - self.df[t] + 0.5) / (self.df[t] + 0.5))
-                    s += idf * tf[t] * 2.2 / (tf[t] + 1.2 * (0.25 + 0.75 * len(d) / self.avg))
-            if s > 0:
-                scores.append((s, p["id"]))
-        return sorted(scores, reverse=True)
-
-    async def dense(self, question: str, llm) -> list[tuple[float, str]]:
-        if not llm.available or not llm.embed_model or not self.papers:
-            return []
-        if self.vectors is None:
-            self.vectors = await llm.embed([_doc(p)[:1500] for p in self.papers]) or []
-        if not self.vectors:
-            return []
-        # TR→EN sorgu genişletme: İngilizce yayın özetleriyle eşleşmeyi güçlendirir
-        extra = " ".join(t for t in expand_bilingual(content_tokens(question)) if t.isascii())
-        qv = await llm.embed([f"{question} {extra}"], task="RETRIEVAL_QUERY")
-        if not qv:
-            return []
-        q = qv[0]
-        qn = math.sqrt(sum(x * x for x in q)) or 1
-        out = []
-        for p, v in zip(self.papers, self.vectors):
-            vn = math.sqrt(sum(x * x for x in v)) or 1
-            out.append((sum(a * b for a, b in zip(q, v)) / (qn * vn), p["id"]))
-        return sorted(out, reverse=True)
-
-    async def retrieve(self, question: str, llm, k: int = 6) -> tuple[list[dict], dict]:
-        """BM25 + vektör → RRF (k=60)."""
-        lex = self.bm25(question)
-        den = await self.dense(question, llm)
-        fused: dict[str, float] = {}
-        for ranking in (lex[:30], den[:30]):
-            for rank, (_, pid) in enumerate(ranking):
-                fused[pid] = fused.get(pid, 0.0) + 1.0 / (60 + rank + 1)
-        ids = [pid for pid, _ in sorted(fused.items(), key=lambda kv: -kv[1])][:k] or [p["id"] for p in self.papers[:k]]
-        info = {"retriever": "BM25+vektör (RRF)" if den else "BM25", "lexical_hits": len(lex),
-                "dense": bool(den), "retrieved": ids}
-        return [self.by_id[i] for i in ids], info
-
-    def choose(self, mode: str, question: str = "") -> tuple[str, str]:
-        """(yöntem, gerekçe). Elle seçim yoksa SORU TİPİNE göre yönlendirir:
-
-          bütüne bakan (sayma, sıralama, dağılım, profil) → CAG (bütün liste gerekir)
-          belirli konu/ayrıntı (bir yöntem, bir çalışma, bir terim) → RAG (birkaç yayın yeter)
-          ikisi birden ("en çok atıf alan makalesinde ne yaptı") → Hibrit
-        Tam bilgi tabanı CAG bütçesine sığmıyorsa CAG yerine Hibrit kullanılır.
-        """
-        if mode in ("rag", "cag", "hybrid"):
-            return mode, "elle seçildi"
-        fits = est_tokens(self.full) <= CAG_BUDGET_TOKENS
-        whole = "cag" if fits else "hybrid"
-        q = fold(question)
-        is_global = bool(GLOBAL_Q.search(q))
-        is_detail = bool(DETAIL_Q.search(q))
-        hits = self.bm25(question)
-        topical = bool(hits) and hits[0][0] >= 2.5  # soruda yayınlarda geçen belirgin bir konu var
-        if is_global and (is_detail or topical and len(hits) <= 6):
-            return "hybrid", "hem bütüne hem ayrıntıya bakan soru"
-        if is_global:
-            return whole, "bütüne bakan soru (sayma/sıralama/genel profil)"
-        if is_detail or topical:
-            return "rag", "belirli bir konu/ayrıntı sorusu"
-        return whole, "genel soru"
 
 
-def _details(papers: list[dict]) -> str:
-    return "\n".join(f"[{p['id']}] ({p['year'] or '?'}; {p.get('venue') or '-'}; atıf {p.get('citations') or 0}) "
-                     f"{p['title']} — {p.get('abstract', '')[:600]}" for p in papers)
-
-
-async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: str, meta: dict,
-                 on_stage=None) -> AsyncIterator[str]:
-    """Seçilen moda göre bağlamı kurar, cevabı akıtır; `meta`ya ölçümleri yazar."""
-    started = time.time()
-    used, why = kb.choose(mode, question)
-    meta.update({"mode": used, "route": why, "requested": mode, "full_tokens": est_tokens(kb.full)})
-    if used == "cag":
-        prefix = SYSTEM + "\n\nBİLGİ TABANI (tam, önbellekli):\n" + kb.full
-        tail = ""
-    elif used == "hybrid":
-        if on_stage:
-            await on_stage("İlgili yayınlar hazırlanıyor (BM25 ve varsa embedding modeli)…")
-        papers, info = await kb.retrieve(question, llm)
-        meta.update(info)
-        prefix = SYSTEM + "\n\nBİLGİ TABANI (çekirdek, önbellekli):\n" + kb.core
-        tail = "SORUYLA İLGİLİ AYRINTILAR (RAG):\n" + _details(papers) + "\n\n"
-    else:  # rag
-        if on_stage:
-            await on_stage("İlgili yayınlar hazırlanıyor (BM25 ve varsa embedding modeli)…")
-        papers, info = await kb.retrieve(question, llm)
-        meta.update(info)
-        prefix = SYSTEM + "\n\nBİLGİ TABANI (yalnız getirilen):\n" + "\n".join(kb._header()[:5])
-        tail = "GETİRİLEN YAYINLAR (RAG):\n" + _details(papers) + "\n\n"
-    meta["context_tokens"] = est_tokens(prefix + tail)
-    meta["retrieval_s"] = round(time.time() - started, 2)
+async def answer(kb: Knowledge, question: str, history: list[dict], llm, meta: dict, on_stage=None) -> AsyncIterator[str]:
+    """Bilgi tabanını önek olarak verip cevabı akıtır; `meta`ya ölçümleri yazar."""
+    prefix = SYSTEM + "\n\nBİLGİ TABANI:\n" + kb.full
+    meta.update({"context_tokens": est_tokens(prefix), "trimmed_abstracts": kb.trimmed})
 
     if llm.available:
         if on_stage:
@@ -268,7 +155,7 @@ async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: s
         for h in history[-6:]:
             if h.get("role") in ("user", "assistant") and h.get("content"):
                 messages.append({"role": h["role"], "content": str(h["content"])[:2000]})
-        messages.append({"role": "user", "content": tail + "SORU: " + question})
+        messages.append({"role": "user", "content": "SORU: " + question})
         stats: dict = {}
         try:
             async for piece in llm.stream_chat(messages, stats):
@@ -276,19 +163,18 @@ async def answer(kb: Knowledge, question: str, history: list[dict], llm, mode: s
             meta.update(stats)
             if stats.get("prompt_tokens"):
                 meta["context_tokens"] = stats["prompt_tokens"]  # tahmin yerine gerçek sayı
-            # KV önbelleği etkisi prompt işleme süresinde görülür (aynı önek → düşük prompt_eval_s)
             meta["model"] = stats.get("model") or llm.model
             return
         except Exception as exc:  # noqa: BLE001
             meta["model_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
             logger.exception("Model profil sohbetine cevap veremedi")
-            yield "\n\n_(Model yanıt vermedi; erişim tabanlı cevap:)_\n\n"
+            yield "\n\n_(Model yanıt vermedi; kural tabanlı cevap:)_\n\n"
     meta["model"] = "mock"
-    for piece in await _mock_answer(kb, question, llm):
+    for piece in _mock_answer(kb, question):
         yield piece
 
 
-async def _mock_answer(kb: Knowledge, question: str, llm) -> list[str]:
+def _mock_answer(kb: Knowledge, question: str) -> list[str]:
     prof, papers = kb.prof, kb.papers
     q = fold(question)
     if re.search(r"h ?ind(ex|eks)", q):
@@ -302,6 +188,8 @@ async def _mock_answer(kb: Knowledge, question: str, llm) -> list[str]:
         return ["En çok atıf alan yayınlar:\n" + "\n".join(f"- {p['title']} — {p['citations']} atıf [{p['id']}]" for p in top)]
     if re.search(r"son|guncel|latest|recent|yeni", q):
         return ["En güncel yayınlar:\n" + "\n".join(f"- ({p['year']}) {p['title']} [{p['id']}]" for p in papers[:5])]
-    hits, _ = await kb.retrieve(question, llm, k=5)
-    return ["Sorunla en ilgili yayınlar (mock mod — LLM kapalı):\n"
+    # Yapay zekâ kapalıyken soru anlaşılamaz: başlığında sorudaki kelimeler geçen yayınlar, yoksa en yeniler.
+    words = {w for w in q.split() if len(w) > 3}
+    hits = [p for p in papers if words & set(fold(p["title"]).split())][:5] or papers[:5]
+    return ["Yapay zekâ kapalı; soruyla ilgili olabilecek yayınlar:\n"
             + "\n".join(f"- ({p['year'] or '?'}) {p['title']} [{p['id']}]" for p in hits)]

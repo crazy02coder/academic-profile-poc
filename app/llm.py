@@ -1,13 +1,13 @@
-"""Yapay zekâ istemcisi (metin, JSON şeması, akış, embedding). Anahtar yoksa `available=False` → mock yollar.
+"""Yapay zekâ istemcisi (metin, JSON şeması, akış). Anahtar yoksa `available=False` → mock yollar.
 
 Sağlayıcı ayarlardan gelir (ai_settings): Gemini, ChatGPT, Claude ya da OpenAI uyumlu kendi sunucusu.
-Uygulamanın geri kalanı yalnızca bu sınıfı kullanır. Claude'un gömme modeli yoktur; sohbet o zaman kelime aramasıyla çalışır.
+Uygulamanın geri kalanı yalnızca bu sınıfı kullanır.
 
 Ücretsiz katman dalgalıdır: kota (429), yoğunluk (503) ve geçici 403/404 yanıtları
 olağan. Bu yüzden her çağrı bir model zinciri üzerinde kısa beklemelerle denenir;
 kotası dolan model bir süre zincirde atlanır.
 
-CAG için: Gemini aynı önekle başlayan istemlerde örtük önbellek kullanır; önek
+Sohbet için: Gemini aynı önekle başlayan istemlerde örtük önbellek kullanır; önek
 (sistem talimatı + bilgi tabanı) her soruda bayt bayt aynı tutulur.
 """
 from __future__ import annotations
@@ -20,14 +20,12 @@ from typing import AsyncIterator
 import httpx
 
 from . import ai_settings
-from .config import GEMINI_EMBED_MODEL, GEMINI_FALLBACKS, LLM_MODE
+from .config import GEMINI_FALLBACKS, LLM_MODE
 
 API = "https://generativelanguage.googleapis.com/v1beta"
-EMBED_DIM = 768
 RETRY_STATUS = {403, 404, 429, 500, 503}
 RETRY_OTHER = {408, 429, 500, 502, 503, 504, 529}
 ANTHROPIC_VERSION = "2023-06-01"
-OPENAI_EMBED_MODEL = "text-embedding-3-small"
 MAX_OUTPUT = 8192
 COOLDOWN_S = 60
 _SLOTS = asyncio.Semaphore(4)  # ücretsiz katmanın dakika sınırını zorlamamak için
@@ -88,8 +86,6 @@ class LLM:
         self.base_url: str = cfg["base_url"]
         self.model: str = cfg["model"]
         self.fast_model: str = cfg["fast_model"]  # link seçimi gibi kısa işler
-        self.embed_model: str = ""
-        self._embed_setting: str = cfg["embed_model"]
         self.available = False
         self.reason = ""
         self._cooldown: dict[str, float] = {}
@@ -120,8 +116,6 @@ class LLM:
             return self
         if not self.fast_model or (names is not None and self.fast_model not in names):
             self.fast_model = self.model
-        wanted = self._embed_setting or {"gemini": GEMINI_EMBED_MODEL, "openai": OPENAI_EMBED_MODEL}.get(self.provider, "")
-        self.embed_model = wanted if wanted and self.provider != "anthropic" and (names is None or wanted in names) else ""
         self.available, self.reason = True, ""
         return self
 
@@ -261,37 +255,6 @@ class LLM:
             data = await self._post(first, "/chat/completions", build(None, plain), timeout)
         return _loose_json(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
 
-    async def embed(self, texts: list[str], timeout: int = 120,
-                    task: str = "RETRIEVAL_DOCUMENT") -> list[list[float]] | None:
-        if not self.embed_model or not texts:
-            return None
-        out: list[list[float]] = []
-        if self.provider != "gemini":
-            try:
-                async with _SLOTS, httpx.AsyncClient(timeout=timeout) as client:
-                    for i in range(0, len(texts), 100):
-                        body = {"model": self.embed_model, "input": texts[i:i + 100]}
-                        if self.provider == "openai":
-                            body["dimensions"] = EMBED_DIM
-                        resp = await client.post(f"{self.base_url}/embeddings", headers=self._headers(), json=body)
-                        resp.raise_for_status()
-                        out.extend(e["embedding"] for e in sorted(resp.json()["data"], key=lambda e: e["index"]))
-            except Exception:  # noqa: BLE001
-                return None
-            return out
-        try:
-            async with _SLOTS, httpx.AsyncClient(timeout=timeout) as client:
-                for i in range(0, len(texts), 100):
-                    reqs = [{"model": f"models/{self.embed_model}", "content": {"parts": [{"text": t}]},
-                             "taskType": task, "outputDimensionality": EMBED_DIM} for t in texts[i:i + 100]]
-                    resp = await client.post(f"{self.base_url}/models/{self.embed_model}:batchEmbedContents",
-                                             headers=self._headers(), json={"requests": reqs})
-                    resp.raise_for_status()
-                    out.extend(e["values"] for e in resp.json()["embeddings"])
-        except Exception:  # noqa: BLE001
-            return None
-        return out
-
     async def stream_chat(self, messages: list[dict], stats: dict | None = None,
                           timeout: int = 240) -> AsyncIterator[str]:
         """Akışlı sohbet. `stats` sözlüğüne ilk token süresi ve token sayıları yazılır."""
@@ -405,4 +368,4 @@ class LLM:
     def label(self) -> str:
         if not self.available:
             return f"Yapay zekâ kapalı ({self.reason})"
-        return f"{self.provider_label} · {self.model}" + (f" · emb {self.embed_model}" if self.embed_model else "")
+        return f"{self.provider_label} · {self.model}"

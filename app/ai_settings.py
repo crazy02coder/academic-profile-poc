@@ -59,8 +59,7 @@ def resolved(provider: str | None = None) -> dict:
     return {"provider": provider, "label": base["label"],
             "key": saved.get("key") or "",
             "base_url": saved.get("base_url") or base["base_url"],
-            "model": saved.get("model") or base["model"], "fast_model": saved.get("fast_model") or base["fast_model"],
-            "embed_model": saved.get("embed_model") or ""}
+            "model": saved.get("model") or base["model"], "fast_model": saved.get("fast_model") or base["fast_model"]}
 
 
 def public() -> dict:
@@ -82,13 +81,14 @@ def key_for_test(provider: str, key: str, base_url: str) -> str:
 
 
 def save(provider: str, key: str = "", clear_key: bool = False, model: str = "", fast_model: str = "",
-         embed_model: str = "", base_url: str = "") -> None:
+         base_url: str = "") -> None:
     if provider not in PROVIDERS:
         raise ValueError("Bilinmeyen sağlayıcı.")
     data = _load()
     providers = data.setdefault("providers", {})
     entry = providers.setdefault(provider, {})
-    entry.update(model=model.strip(), fast_model=fast_model.strip(), embed_model=embed_model.strip())
+    entry.update(model=model.strip(), fast_model=fast_model.strip())
+    entry.pop("embed_model", None)  # eski sürümün gömme modeli ayarı
     default = PROVIDERS[provider]["base_url"]
     url = clean_url(base_url) if base_url.strip() or not default else default
     if url != (entry.get("base_url") or default):

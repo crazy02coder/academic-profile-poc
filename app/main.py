@@ -23,7 +23,7 @@ from .consensus import save_run, verify_papers, verify_profile
 from .net import fetch_static
 from .analysis import analyze
 from . import history as history_store
-from .chat import MODES, Knowledge, answer
+from .chat import Knowledge, answer
 from .paper import detail as paper_detail
 import os
 from urllib.parse import unquote, urlparse, urlsplit
@@ -98,7 +98,6 @@ class JobIn(BaseModel):
 class ChatIn(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
     chat_id: str = ""
-    mode: str = "auto"  # auto | rag | cag | hybrid
 
 
 class StudentMessageIn(BaseModel):
@@ -521,7 +520,6 @@ class AiSettingsIn(BaseModel):
     clear_key: bool = False
     model: str = ""
     fast_model: str = ""
-    embed_model: str = ""
     base_url: str = ""
 
 
@@ -580,10 +578,10 @@ async def ai_settings_get():
 @app.post("/api/settings/ai")
 async def ai_settings_save(body: AiSettingsIn):
     try:
-        ai_settings.save(body.provider, body.key, body.clear_key, body.model, body.fast_model, body.embed_model, body.base_url)
+        ai_settings.save(body.provider, body.key, body.clear_key, body.model, body.fast_model, body.base_url)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    # Yeni sağlayıcı hemen geçerli; gömme vektörleri modele özgü olduğundan sohbet bilgi tabanları da yeniden kurulur.
+    # Yeni sağlayıcı hemen geçerli.
     _LLM_CACHE.update(llm=None, at=0.0)
     KB_CACHE.clear()
     llm = await _llm()
@@ -1073,7 +1071,6 @@ async def chat(jid: str, body: ChatIn):
     kb = KB_CACHE.get(jid)
     if kb is None:
         kb = KB_CACHE[jid] = Knowledge(result)
-    mode = body.mode if body.mode in MODES else "auto"
 
     async def stream():
         yield f"data: {json.dumps({'chat_id': conv['id']})}\n\n"
@@ -1087,16 +1084,14 @@ async def chat(jid: str, body: ChatIn):
         async def produce():
             text = ""
             try:
-                # Embedding hazırlığı ve model üretimi aynı toplam bütçeyi paylaşır.
                 async with asyncio.timeout(120):
-                    async for piece in answer(kb, body.question, list(conv["messages"]), llm, mode, meta,
-                                              on_stage=stage):
+                    async for piece in answer(kb, body.question, list(conv["messages"]), llm, meta, on_stage=stage):
                         text += piece
                         await queue.put({"delta": piece})
                 if not text.strip():
                     raise RuntimeError("Model boş cevap döndürdü.")
             except TimeoutError:
-                meta["error"] = "Yanıt 120 saniye içinde tamamlanamadı. Model veya embedding hazırlığı zaman aşımına uğradı."
+                meta["error"] = "Yanıt 120 saniye içinde tamamlanamadı. Model zaman aşımına uğradı."
                 logger.warning("Profil sohbeti zaman aşımına uğradı: iş %s", jid)
                 await queue.put({"error": meta["error"]})
             except Exception as exc:  # noqa: BLE001

@@ -4714,14 +4714,12 @@ function techTrace(r) {
 }
 
 // ------------------------------------------------------------------- asistan
-const MODE_NAMES = { rag: "RAG", cag: "CAG", hybrid: "Hibrit" };
 function metaLine(m) {
-  if (!m || !m.mode) return "";
-  const parts = [`<b>${esc(MODE_NAMES[m.mode] || m.mode)}</b>${m.route ? ` · ${esc(m.route)}` : ""}`];
-  if (m.retrieved?.length) parts.push(m.retrieved.map((id) => `<span class="cite" data-pub="${esc(id)}">${esc(id)}</span>`).join(" "));
+  if (!m) return "";
+  const parts = [];
   if (m.ttft != null) parts.push(`ilk token ${m.ttft} sn`);
   if (m.total_s != null) parts.push(`toplam ${m.total_s} sn`);
-  return `<div class="meta">${parts.join(" · ")}</div>`;
+  return parts.length ? `<div class="meta">${parts.join(" · ")}</div>` : "";
 }
 function addMsg(role, html) {
   const thread = $("#thread"); if (!thread) return null;
@@ -4752,7 +4750,7 @@ async function ask(question) {
   const timer = setTimeout(() => controller.abort(), 150000);
   try {
     const res = await fetch(`/api/jobs/${S.result.job_id}/chat`, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, chat_id: S.chatId, mode: "auto" }), signal: controller.signal });
+      body: JSON.stringify({ question, chat_id: S.chatId }), signal: controller.signal });
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${res.status}`); }
     await readSse(res, (m) => {
       if (m.chat_id) S.chatId = m.chat_id;
@@ -5331,7 +5329,7 @@ async function aiSettingsCard() {
   const NOTES = {
     gemini: "Google AI Studio anahtarı.",
     openai: "platform.openai.com anahtarı. ChatGPT Plus üyeliği API anahtarı yerine geçmez.",
-    anthropic: "console.anthropic.com anahtarı. Claude'da gömme modeli olmadığı için sohbet yayınları kelime aramasıyla bulur.",
+    anthropic: "console.anthropic.com anahtarı.",
     custom: "OpenAI uyumlu her sunucu olur (Ollama, LM Studio, vLLM…). Anahtar gerekmiyorsa boş bırakın.",
   };
   card.innerHTML = `<div class="card-title">${icon("settings")}Yapay zekâ</div>
@@ -5341,7 +5339,6 @@ async function aiSettingsCard() {
       <div class="field" id="aiUrlField"><label for="aiUrl">API adresi</label><div class="input"><input id="aiUrl" placeholder="http://localhost:11434/v1"></div></div>
       <div class="field"><label for="aiKey">API anahtarı</label><div class="input"><input id="aiKey" type="password" autocomplete="new-password"></div></div>
       <div class="field"><label for="aiModel">Model</label><div class="input"><input id="aiModel" list="aiModels"></div><datalist id="aiModels"></datalist></div>
-      <div class="field" id="aiEmbedField"><label for="aiEmbed">Gömme modeli <small>isteğe bağlı</small></label><div class="input"><input id="aiEmbed" list="aiModels"></div></div>
     </form>
     <p class="muted ai-note" id="aiNote"></p>
     <div class="actions"><button class="btn primary sm" type="button" id="aiSave">Kaydet ve kullan</button>
@@ -5351,11 +5348,9 @@ async function aiSettingsCard() {
     <p class="faint ai-note">Anahtar yalnızca bu bilgisayarda saklanır. Taranan sayfa metinleri, yayın bilgileri ve sohbet soruları seçtiğiniz sağlayıcıya gönderilir.</p>`;
   const fill = () => {
     const name = $("#aiProvider").value, p = cfg.providers[name];
-    $("#aiEmbedField").hidden = name !== "custom";
     $("#aiUrl").value = p.base_url || "";
     $("#aiUrl").placeholder = name === "custom" ? "http://localhost:11434/v1" : "Sağlayıcının API adresi";
     $("#aiModel").value = p.model || "";
-    $("#aiEmbed").value = p.embed_model || "";
     $("#aiKey").value = "";
     $("#aiKey").placeholder = p.has_key ? "Kayıtlı; değiştirmek için yazın" : "Anahtarı yapıştırın";
     $("#aiClear").hidden = !p.has_key;
@@ -5364,7 +5359,7 @@ async function aiSettingsCard() {
     $("#aiStatus").textContent = "";
   };
   const values = (extra = {}) => ({ provider: $("#aiProvider").value, key: $("#aiKey").value, base_url: $("#aiUrl").value,
-    model: $("#aiModel").value, embed_model: $("#aiEmbed").value, ...extra });
+    model: $("#aiModel").value, ...extra });
   const status = (text) => { $("#aiStatus").textContent = text; };
   const save = async (extra) => {
     status("Kaydediliyor ve bağlanılıyor…");
