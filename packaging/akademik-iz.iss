@@ -23,7 +23,8 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist
 OutputBaseFilename=AkademikIz-Kurulum
-SetupIconFile=akademik-iz.ico
+; Kurulum dosyasının simgesi: logo açık bir kurulum kutusunun içinde (packaging/make_icon.py).
+SetupIconFile=akademik-iz-setup.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
 WizardStyle=modern
