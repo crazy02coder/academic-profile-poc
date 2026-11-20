@@ -52,6 +52,18 @@ def yok_logo(uid: str) -> str:
     return url if url.startswith("https://s3-ankara.yok.gov.tr/") else ""
 
 
+# Wikidata eşleştirmesinde firma adından sonra gelebilecek unvan kelimeleri (katlanmış yazım).
+_COMPANY_WORDS = {"holding", "grubu", "grup", "group", "a", "s", "as", "anonim", "sirketi", "sirket", "san", "sanayi",
+                  "tic", "ticaret", "ve", "ltd", "sti", "limited", "inc", "co", "corporation", "company", "elektronik",
+                  "teknoloji", "teknolojileri", "technology", "technologies", "savunma", "otomotiv", "enerji", "insaat",
+                  "kimya", "tekstil", "gida", "havacilik", "uzay", "yazilim", "bilisim", "turkiye", "turkey", "tr",
+                  "international", "global", "endustri", "endustrisi", "makina", "makine", "metal", "celik", "beyaz",
+                  "esya", "uretim", "pazarlama", "dis", "sistemleri", "systems", "muhendislik", "engineering"}
+# Şirket olmayan Wikidata türleri: spor kulübü/takımı/ligi, etkinlik, ödül, marka değil kişi vb.
+_NOT_COMPANY = {"Q623109", "Q12973014", "Q847017", "Q476028", "Q1478437", "Q15991290", "Q13406554", "Q1656682",
+                "Q618779", "Q5", "Q4167410", "Q27020041", "Q1371849"}
+
+
 async def _wikidata_logo(client, group: dict) -> list[str]:
     """Wikidata'da adı tutan Türkiye şirketinin logoları (P8972 küçük logo, P154 logo; Commons PNG önizlemesi)."""
     name = group.get("name") or ""
@@ -88,8 +100,14 @@ async def _wikidata_logo(client, group: dict) -> list[str]:
             continue
         names = [x.get("value", "") for x in (e.get("labels") or {}).values()]
         names += [a.get("value", "") for v in (e.get("aliases") or {}).values() for a in v]
-        # Ad birebir ya da "Ad Holding/Grubu/Alüminyum…" biçiminde başlamalı
-        if not any(fold(n) == base or fold(n).startswith(base + " ") for n in names):
+        # Ad birebir ya da "Ad Holding / Grubu / Elektronik…" biçiminde olmalı: addan sonra gelen kelimeler şirket
+        # unvanı kelimeleri ya da firmanın listedeki devam kelimeleri olmalı ("Vestel Venus Sultanlar Ligi" bir lig).
+        allowed = _COMPANY_WORDS | {w for n in group.get("nexts") or [] for w in fold(n).split()}
+        if not any(fold(n) == base or fold(n).startswith(base + " ") and set(fold(n)[len(base):].split()) <= allowed
+                   for n in names):
+            continue
+        kinds = {v.get("id") for v in value("P31") if isinstance(v, dict)}
+        if kinds & _NOT_COMPANY:
             continue
         for prop in ("P8972", "P154"):
             for logo in (v for v in value(prop) if isinstance(v, str)):
@@ -468,8 +486,15 @@ async def _company_search(group: dict) -> list[str]:
     # Merkezin şehri genel marka sitesini dışlayabiliyor; mevcut kısa marka/alias kullan.
     brand = min(firms._names(group), key=len)
     query = f'"{brand}" resmi web sitesi'
-    tasks = [asyncio.create_task(websearch._ddgs_worker(query, backend)) for backend in ("brave", "duckduckgo")]
     rows = []
+    # Anahtarlı arama servisi (Serper / Google Custom Search) varsa önce o: hızlı, engellenmez, sonuç Google'ınki.
+    keyed = [p for p in websearch.provider_order() if p in ("serper", "google_cse")]
+    for provider in keyed:
+        found = [row for row in await websearch._provider(provider, query) if _company_candidate(row.get("url", ""), group)]
+        if found:
+            rows = found
+            break
+    tasks = [] if rows else [asyncio.create_task(websearch._ddgs_worker(query, backend)) for backend in ("brave", "duckduckgo")]
     try:
         # Mevcut DDGS işçisi genel sorguyu destekler; site_search alan adı gerektirir.
         async with asyncio.timeout(7):
@@ -662,9 +687,42 @@ async def _collect(kind: str, oid: str, path, previous: dict | None = None) -> d
     return result
 
 
+_PUBLISHED_LOGOS: dict = {"index": None, "mtime": None}
+
+
+def _published_logo(oid: str) -> dict:
+    """Hazır veride yayımlanmış firma logosu (firm_logos/index.json; scripts/build_firm_logos.py ile toplanır)."""
+    from . import remote_data
+    index_path = remote_data.path("firm_logos/index.json")
+    if index_path is None:
+        return {}
+    mtime = index_path.stat().st_mtime
+    if _PUBLISHED_LOGOS["mtime"] != mtime:
+        try:
+            _PUBLISHED_LOGOS.update(index=json.loads(index_path.read_text(encoding="utf-8")).get("logos") or {}, mtime=mtime)
+        except (OSError, ValueError, AttributeError):
+            _PUBLISHED_LOGOS.update(index={}, mtime=mtime)
+    entry = (_PUBLISHED_LOGOS["index"] or {}).get(oid)
+    if entry and entry.get("skip"):
+        return {"skip": True}  # doğru logo bulunamadı: arayüz baş harfleri gösterir
+    if not entry or not re.fullmatch(r"[a-z0-9-]{1,180}\.(?:png|jpg|gif|webp|ico|svg)", entry.get("file") or ""):
+        return {}
+    image = remote_data.path(f"firm_logos/{entry['file']}")
+    if image is None:
+        return {}
+    return {"data": base64.b64encode(image.read_bytes()).decode("ascii"), "type": entry.get("type") or "image/png",
+            "source": "dataset", "home": entry.get("home") or ""}
+
+
 async def logo(kind: str, oid: str) -> dict:
     if kind not in {"universities", "firms"} or not re.fullmatch(r"[a-z0-9-]{1,180}", oid):
         return {}
+    if kind == "firms":
+        try:
+            if published := await asyncio.to_thread(_published_logo, oid):
+                return {} if published.get("skip") else published
+        except Exception:  # noqa: BLE001 — hazır logo yoksa sitesinden aranır
+            pass
     key = hashlib.sha256(f"{kind}:{oid}".encode()).hexdigest()
     path = CACHE / f"{key}.json"
     cached = None

@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-FILES = ("poc/universities.json", "arge_merkezleri.json", "yok_university_logos.json")
+FILES = ("poc/universities.json", "arge_merkezleri.json", "yok_university_logos.json", "firm_logos/index.json")
 PACKED = {"journal_quartiles.sqlite": "journal_quartiles.sqlite.gz"}  # kaynak → yayımlanan (sıkıştırılmış) ad
 
 
@@ -43,8 +43,10 @@ def main(source: Path, target: Path) -> int:
             # Satır sonları LF yazılır: Windows kopyasındaki CRLF yayımlanırsa özet, sunulan dosyayla tutmaz.
             (target / rel).write_bytes((source / rel).read_bytes().replace(b"\r\n", b"\n"))
             published.append(rel)
-    for path in sorted((source / "poc" / "student").glob("*.json.gz")):
-        rel = f"poc/student/{path.name}"
+    # Firma logoları (scripts/build_firm_logos.py) ve ders veri seti olduğu gibi kopyalanır.
+    images = [p for p in sorted((source / "firm_logos").glob("*")) if p.suffix in {".png", ".jpg", ".gif", ".webp", ".ico", ".svg"}]
+    for path in images + sorted((source / "poc" / "student").glob("*.json.gz")):
+        rel = path.relative_to(source).as_posix()
         (target / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target / rel)
         published.append(rel)
@@ -59,6 +61,8 @@ def main(source: Path, target: Path) -> int:
     manifest = {"name": "akademik-iz-data", "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"), "files": files}
     (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
     (target / ".nojekyll").write_text("", encoding="utf-8")  # Pages dosyaları olduğu gibi sunsun (Jekyll işlemesin)
+    # Ana adres boş kalmasın: veri dosyalarını listeleyen tanıtım sayfası (manifest.json'u okur).
+    shutil.copyfile(Path(__file__).with_name("publish_index.html"), target / "index.html")
     # Git dosyalara dokunmasın (satır sonu dönüştürmesi yok): yayımlanan bayt, manifest'teki özetle aynı kalır.
     (target / ".gitattributes").write_text("* -text\n", encoding="utf-8")
     total = sum(f["size"] for f in files.values())

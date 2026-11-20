@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Akademik İz · Veri</title>
+  <style>
+    :root { --bg: #f7f7f8; --card: #fff; --text: #0a0a0b; --muted: #6b6b73; --line: #e6e6ea; --blue: #1d4ed8; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0b0b0c; --card: #141416; --text: #f4f4f5; --muted: #9a9aa2; --line: #26262a; --blue: #8ab4ff; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 16px; }
+    h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: -.02em; }
+    p { color: var(--muted); margin: 0 0 24px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--line); font-size: 14px; }
+    th { color: var(--muted); font-weight: 600; }
+    td.n { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .meta { margin-top: 14px; font-size: 13px; color: var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Akademik İz · Veri</h1>
+  <p>Akademik İz uygulamasının hazır veri dosyaları. Bu adres statik bir JSON servisidir: uygulama dosyaları HTTPS ile
+    okur, <a href="manifest.json">manifest.json</a> içindeki SHA-256 özetleriyle doğrular ve bilgisayarda saklar.
+    Veriler kurumların ve kamu kaynaklarının herkese açık yayımladığı bilgilerden derlenmiştir.</p>
+  <div class="card"><table>
+    <thead><tr><th>Veri</th><th>Dosya</th><th style="text-align:right">Kayıt / boyut</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="3">Yükleniyor…</td></tr></tbody>
+  </table></div>
+  <div class="meta" id="meta"></div>
+</main>
+<script>
+  const groups = [
+    ["Ders veri seti (üniversite başına)", (f) => f.startsWith("poc/student/"), "poc/universities.json"],
+    ["Ar-Ge ve tasarım merkezleri", (f) => f === "arge_merkezleri.json", "arge_merkezleri.json"],
+    ["Üniversite logoları", (f) => f === "yok_university_logos.json", "yok_university_logos.json"],
+    ["Firma logoları", (f) => f.startsWith("firm_logos/"), "firm_logos/index.json"],
+    ["Dergi çeyrekleri (SJR)", (f) => f.startsWith("journal_quartiles"), "journal_quartiles.sqlite.gz"],
+  ];
+  const mb = (n) => (n / 1e6).toFixed(n < 1e6 ? 2 : 1) + " MB";
+  fetch("manifest.json").then((r) => r.json()).then((m) => {
+    const files = Object.entries(m.files || {});
+    document.getElementById("rows").innerHTML = groups.map(([label, test, link]) => {
+      const hit = files.filter(([f]) => test(f));
+      if (!hit.length) return "";
+      const size = hit.reduce((s, [, v]) => s + v.size, 0);
+      return `<tr><td>${label}</td><td><a href="${link}">${link}</a></td><td class="n">${hit.length > 1 ? hit.length + " dosya · " : ""}${mb(size)}</td></tr>`;
+    }).join("");
+    document.getElementById("meta").textContent = `${files.length} dosya · son yayın: ${m.generated_at || "-"}`;
+  }).catch(() => { document.getElementById("rows").innerHTML = '<tr><td colspan="3">manifest.json okunamadı.</td></tr>'; });
+</script>
+</body>
+</html>
