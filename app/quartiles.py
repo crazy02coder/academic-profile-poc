@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import sqlite3
 
+from . import remote_data
 from .config import ROOT
 from .text import fold
 
@@ -31,9 +32,11 @@ def parse_categories(text: str) -> list[dict]:
 
 
 def annotate(papers: list[dict]) -> list[dict]:
-    if not PATH.exists():
+    # Dergi çeyrekleri uzak veriden bir kez indirilir (~30 MB); inene kadar yayınlar çeyreksiz gösterilir.
+    path = remote_data.ready("journal_quartiles.sqlite")
+    if path is None:
         return papers
-    con = sqlite3.connect(f"file:{PATH}?mode=ro", uri=True)
+    con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
     try:
         latest = con.execute("SELECT MAX(year) FROM rankings").fetchone()[0]
         for p in papers:

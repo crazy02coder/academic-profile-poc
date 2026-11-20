@@ -44,8 +44,9 @@ def yok_logo(uid: str) -> str:
     global _YOK_LOGOS
     if _YOK_LOGOS is None:
         try:
-            _YOK_LOGOS = json.loads((ROOT / "data" / "yok_university_logos.json").read_text(encoding="utf-8"))["logos"]
-        except (OSError, ValueError, KeyError):
+            from . import remote_data
+            _YOK_LOGOS = json.loads(remote_data.path("yok_university_logos.json").read_text(encoding="utf-8"))["logos"]
+        except (OSError, ValueError, KeyError, AttributeError):
             _YOK_LOGOS = {}
     url = _YOK_LOGOS.get(uid, "")
     return url if url.startswith("https://s3-ankara.yok.gov.tr/") else ""
@@ -413,9 +414,10 @@ def _stored_company_websites(group: dict) -> list[str]:
     global _REGISTRY_WEBSITES
     urls = _metadata_urls(group)
     try:
-        mtime = industry.CENTERS_PATH.stat().st_mtime
+        centers = industry.centers_path()
+        mtime = centers.stat().st_mtime
         if _REGISTRY_WEBSITES[0] != mtime:
-            rows = json.loads(industry.CENTERS_PATH.read_text()).get("centers", [])
+            rows = json.loads(centers.read_text(encoding="utf-8")).get("centers", [])
             _REGISTRY_WEBSITES = (mtime, {r["name"]: _metadata_urls(r) for r in rows if isinstance(r, dict) and r.get("name")})
         for name in group["centers"]:
             urls.extend(_REGISTRY_WEBSITES[1].get(name, []))

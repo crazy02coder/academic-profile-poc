@@ -13,10 +13,16 @@ import json
 import re
 from functools import lru_cache
 
+from . import remote_data
 from .config import ROOT
 from .text import clean, fold
 
-CENTERS_PATH = ROOT / "data" / "arge_merkezleri.json"
+CENTERS_PATH = ROOT / "data" / "arge_merkezleri.json"  # yerel kopya (geliştirme ortamı); asıl kaynak uzak veri
+
+
+def centers_path():
+    """Ar-Ge merkezleri dosyasının diskteki yolu (gerekirse uzak veriden indirilir); yoksa None."""
+    return remote_data.path("arge_merkezleri.json")
 
 # Firma adının hukuki ekleri: eşleştirmede yok sayılır.
 LEGAL = set("""sanayi sanayii san ve tic ticaret anonim sirketi sirket as a s ltd sti limited ins insaat taahhut ithalat
@@ -57,12 +63,17 @@ def _words(text: str) -> list[str]:
     return re.sub(r"[^0-9a-z]+", " ", fold(text)).split()
 
 
-@lru_cache(maxsize=1)
 def _index() -> tuple[dict, dict]:
-    """(marka anahtarı → firma grubu, ilk kelime → marka anahtarları)."""
-    if not CENTERS_PATH.exists():
+    """(marka anahtarı → firma grubu, ilk kelime → marka anahtarları). Veri gelmediyse boş döner ve önbelleğe almaz."""
+    path = centers_path()
+    if path is None:
         return {}, {}
-    data = json.loads(CENTERS_PATH.read_text())
+    return _index_of(str(path), path.stat().st_mtime)
+
+
+@lru_cache(maxsize=1)
+def _index_of(path: str, mtime: float) -> tuple[dict, dict]:
+    data = json.loads(open(path, encoding="utf-8").read())
     cities = {fold(c["city"]) for c in data["centers"]}
     groups: dict[tuple, dict] = {}
     for c in data["centers"]:
@@ -138,9 +149,10 @@ def mentions(text: str) -> list[tuple[dict, str]]:
 
 
 def centers_info() -> dict:
-    if not CENTERS_PATH.exists():
+    path = centers_path()
+    if path is None:
         return {"available": False}
-    data = json.loads(CENTERS_PATH.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     return {"available": True, "count": len(data["centers"]), "imported": data.get("imported"), "source": data.get("source")}
 
 

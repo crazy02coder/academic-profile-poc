@@ -968,6 +968,13 @@ async def _close_browsers():
 
 
 @app.on_event("startup")
+async def _remote_data():
+    """Hazır veri (GitHub Pages) arka planda indirilir; arayüz istekleri beklemez."""
+    from . import remote_data
+    remote_data.prefetch()
+
+
+@app.on_event("startup")
 async def _watcher():
     minutes = float(os.getenv("WATCH_INTERVAL_MIN", "0"))
     if minutes <= 0:

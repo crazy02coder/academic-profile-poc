@@ -5,13 +5,12 @@ node_modules/
 runs/
 .cache/
 data/*
-!data/arge_merkezleri.json
-!data/journal_quartiles.sqlite
-!data/yok_university_logos.json
-!data/poc/
+# Hazır veri GitHub Pages'te (akademik-iz-data deposu); uygulama data/remote/ altına indirir.
 .ai-settings.json
 .ai-settings.tmp
 .app-settings.json
 .app-settings.tmp
 data/job-log/
 data/atlas/
+build/
+dist/

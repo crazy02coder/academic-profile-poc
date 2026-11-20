@@ -89,8 +89,9 @@ def domain_of(url_or_domain: str) -> str:
 
 
 def available() -> bool:
-    """Veri seti kurulu mu (klasör var mı); yoksa hiçbir arama yapılmaz."""
-    return DATA.is_dir()
+    """Veri seti erişilebilir mi (uzak yayında ya da diskte); değilse hiçbir arama yapılmaz."""
+    from . import remote_data
+    return bool(remote_data.listed("poc/student/"))
 
 
 def university(domain: str) -> dict | None:
@@ -102,7 +103,11 @@ def university(domain: str) -> dict | None:
 def _university(name: str) -> dict | None:
     if not re.fullmatch(r"[a-z0-9.-]{3,80}", name) or ".." in name:
         return None
-    for path, opener in ((DATA / f"{name}.json.gz", gzip.open), (DATA / f"{name}.json", open)):
+    from . import remote_data
+    packed = remote_data.path(f"poc/student/{name}.json.gz") if remote_data.has(f"poc/student/{name}.json.gz") else None
+    for path, opener in ((packed, gzip.open), (DATA / f"{name}.json", open)):
+        if path is None:
+            continue
         try:
             with opener(path, "rt", encoding="utf-8") as handle:
                 data = json.load(handle)
