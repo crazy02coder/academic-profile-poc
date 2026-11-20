@@ -97,8 +97,21 @@ def rea_command() -> list[str] | None:
     explicit = os.getenv("REA_BIN")
     if explicit and Path(explicit).exists():
         return [explicit]
+    script = ROOT / "node_modules" / "rea-agents" / "scripts" / "rea.mjs"
+    if os.name == "nt" and script.exists():
+        # Windows: .bin/rea bir kabuk betiğidir, doğrudan çalıştırılamaz; betik Node ile çağrılır. Node kurulu değilse
+        # (masaüstü paketi) Playwright'ın kendi Node'u kullanılır.
+        node = shutil.which("node")
+        if not node:
+            try:
+                from playwright._impl._driver import compute_driver_executable
+                node = compute_driver_executable()[0]
+            except Exception:  # noqa: BLE001
+                node = None
+        if node and Path(node).exists():
+            return [node, str(script)]
     local = ROOT / "node_modules" / ".bin" / "rea"
-    if local.exists():
+    if local.exists() and os.name != "nt":
         return [str(local)]
     found = shutil.which("rea")
     return [found] if found else None
@@ -112,6 +125,8 @@ def chromium_executable() -> str | None:
     base = os.getenv("PLAYWRIGHT_BROWSERS_PATH") or (
         str(Path.home() / "Library/Caches/ms-playwright")
         if platform.system() == "Darwin"
+        else str(Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "ms-playwright")
+        if platform.system() == "Windows"
         else str(Path.home() / ".cache/ms-playwright")
     )
     patterns = [
