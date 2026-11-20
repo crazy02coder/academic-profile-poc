@@ -54,16 +54,16 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def manifest() -> dict:
+def manifest(force: bool = False) -> dict:
     """{yol: {"size", "sha256"}}; uzak yayın yoksa son indirilen manifest, o da yoksa boş."""
     if not ENABLED:
         return {}
     with _LOCK:
         now = time.time()
-        if _STATE["manifest"] is not None and now - _STATE["at"] < MANIFEST_TTL:
+        if not force and _STATE["manifest"] is not None and now - _STATE["at"] < MANIFEST_TTL:
             return _STATE["manifest"]
         saved = CACHE / "manifest.json"
-        if _STATE["manifest"] is None:
+        if not force and _STATE["manifest"] is None:
             try:
                 _STATE["manifest"] = json.loads(saved.read_text(encoding="utf-8")).get("files") or {}
                 _STATE["at"] = saved.stat().st_mtime
@@ -127,10 +127,19 @@ def path(rel: str) -> Path | None:
                     return target
             except OSError:
                 pass
-            try:
-                return _download(published, rel, entry, target, stamp)
-            except (httpx.HTTPError, ValueError, OSError) as exc:
-                log.warning("Uzak veri indirilemedi: %s (%s)", published, type(exc).__name__)
+            for attempt in range(2):
+                try:
+                    return _download(published, rel, entry, target, stamp)
+                except ValueError:
+                    # Özet tutmadı: elimizdeki liste eski (veri yeniden yayımlanmış). Liste bir kez tazelenip yeniden denenir.
+                    fresh = manifest(force=True).get(published) if attempt == 0 else None
+                    if not fresh or fresh == entry:
+                        log.warning("Uzak veri doğrulanamadı: %s", published)
+                        break
+                    entry = fresh
+                except (httpx.HTTPError, OSError) as exc:
+                    log.warning("Uzak veri indirilemedi: %s (%s)", published, type(exc).__name__)
+                    break
         if target.is_file():
             return target  # eski ama elde olan kopya
         local = LOCAL / rel
