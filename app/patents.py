@@ -1,6 +1,6 @@
 """Patentler: EPO Open Patent Services (Espacenet verisi; EP, WO ve TR ulusal yayınları dahil).
 
-Ücretsiz anahtar gerekir (.env: EPO_KEY, EPO_SECRET; developers.epo.org → My Apps). Anahtar yoksa modül
+Ücretsiz anahtar gerekir (Ayarlar → Patentler; yedek .env: EPO_KEY, EPO_SECRET; developers.epo.org → My Apps). Anahtar yoksa modül
 kapalıdır (enabled() False) ve arayüzde patent sekmesi görünmez. EPO sınırı: ~10 arama/dk, haftada 4 GB.
 
 Akademisyen: buluş sahibi adıyla aranır. Patentlerde ORCID olmadığı için aynı adlı başka kişiler karışabilir;
@@ -19,7 +19,7 @@ import time
 import httpx
 
 from . import yokdir
-from .config import EPO_KEY, EPO_SECRET, ROOT
+from .config import ROOT
 from .text import fold, lower_tr, name_score, name_tokens, strip_titles
 
 OPS = "https://ops.epo.org/3.2"
@@ -36,8 +36,15 @@ class PatentError(Exception):
     pass
 
 
+def _keys() -> tuple[str, str]:
+    """(Consumer Key, Consumer Secret): Ayarlar sayfasında kaydedilen, yoksa ortam değişkeni."""
+    from . import ai_settings
+    keys = ai_settings.search()
+    return keys["epo_key"], keys["epo_secret"]
+
+
 def enabled() -> bool:
-    return bool(EPO_KEY and EPO_SECRET)
+    return all(_keys())
 
 
 def _client() -> httpx.AsyncClient:
@@ -47,10 +54,10 @@ def _client() -> httpx.AsyncClient:
 async def _token(client) -> str:
     if _TOKEN["value"] and time.time() < _TOKEN["exp"] - 60:
         return _TOKEN["value"]
-    r = await client.post(f"{OPS}/auth/accesstoken", auth=(EPO_KEY, EPO_SECRET),
+    r = await client.post(f"{OPS}/auth/accesstoken", auth=_keys(),
                           data={"grant_type": "client_credentials"})
     if r.status_code in (400, 401, 403):
-        raise PatentError("EPO anahtarı geçersiz (.env: EPO_KEY / EPO_SECRET)")
+        raise PatentError("EPO anahtarı geçersiz (Ayarlar → Patentler)")
     r.raise_for_status()
     d = r.json()
     _TOKEN.update(value=d["access_token"], exp=time.time() + int(d.get("expires_in") or 1200))

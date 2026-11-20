@@ -2287,7 +2287,7 @@ function openUniPeek(card, id, name, people) {
       if (!calmMotion()) host.animate([{ opacity: .3 }, { opacity: 1 }], { duration: 320, easing: "ease-out" });
       animateCounts($(".uf-stats", host)); animateCounts($(".uf-pane.on", host));
       const tabs = $$("[data-uf-tab]", host), panes = $$(".uf-pane", host), ink = $(".uf-ink", host);
-      const place = (b) => { ink.style.width = `${b.offsetWidth}px`; ink.style.transform = `translateX(${b.offsetLeft}px)`; };
+      const place = (b) => { if (!ink || !b) return; ink.style.width = `${b.offsetWidth}px`; ink.style.transform = `translateX(${b.offsetLeft}px)`; };
       requestAnimationFrame(() => place(tabs[0]));
       tabs.forEach((b) => b.onclick = () => {
         const i = +b.dataset.ufTab, prev = panes.findIndex((p) => p.classList.contains("on"));
@@ -5213,6 +5213,7 @@ async function viewSystem() {
       <div class="settings-label">Veri kaynakları</div>
       <div class="settings-two"><div class="card card-pad" id="speedCard">${skeleton(2)}</div>
         <div class="card card-pad ai-card" id="searchCard">${skeleton(2)}</div></div>
+      <div class="card card-pad ai-card" id="epoCard">${skeleton(2)}</div>
       <div class="settings-label">Puan hesaplama</div>
       <div class="card card-pad" id="scoreCard">${skeleton(3)}</div>
       <div class="settings-label">Sistem</div>
@@ -5225,6 +5226,7 @@ async function viewSystem() {
   aiSettingsCard();
   speedSettingsCard();
   searchSettingsCard();
+  epoSettingsCard();
   scoreSettingsCard();
   contractsCard();
 }
@@ -5316,6 +5318,39 @@ async function scoreSettingsCard() {
 }
 
 // Arama servisleri: Serper.dev ve Google Custom Search anahtarları. Anahtarlar sunucudan geri gelmez (yalnız kayıtlı mı).
+// Patentler: Avrupa Patent Ofisi (EPO) Open Patent Services anahtarı. Anahtar yoksa patent sekmeleri kapalı kalır.
+async function epoSettingsCard() {
+  const card = $("#epoCard");
+  let cfg = null;
+  try { cfg = await api("/api/settings/search"); } catch { if (card) card.innerHTML = `<p class="muted">Patent ayarları okunamadı.</p>`; return; }
+  if (!card?.isConnected) return;
+  const draw = (message = "") => {
+    card.innerHTML = `<div class="card-title">${icon("file")}Patentler (EPO)</div>
+      <p class="muted" style="margin:0 0 12px">Üniversite ve firma patentleri Avrupa Patent Ofisi'nden gelir. Ücretsiz anahtar: developers.epo.org → My Apps → uygulama ekle; oradaki <b>Consumer Key</b> ve <b>Consumer Secret</b> değerlerini girin.</p>
+      <form class="ai-form" autocomplete="off">
+        <div class="field"><label for="epoKey">Consumer Key</label><div class="input"><input id="epoKey" type="password" autocomplete="new-password" placeholder="${cfg.epo ? "Kayıtlı; değiştirmek için yazın" : "Consumer Key"}"></div></div>
+        <div class="field"><label for="epoSecret">Consumer Secret</label><div class="input"><input id="epoSecret" type="password" autocomplete="new-password" placeholder="${cfg.epo ? "Kayıtlı; değiştirmek için yazın" : "Consumer Secret"}"></div></div>
+      </form>
+      <div class="actions"><button class="btn primary sm" type="button" data-epo-save>Kaydet</button>
+        ${cfg.epo ? `<button class="btn sm" type="button" data-epo-clear>Anahtarı sil</button>` : ""}</div>
+      <p class="muted ai-note" data-epo-status role="status">${esc(message || (cfg.epo ? "Anahtar kayıtlı; patent sekmeleri açık." : "Anahtar yok; patent sekmeleri kapalı."))}</p>`;
+    hydrateIcons(card);
+    const status = (text) => { $("[data-epo-status]", card).textContent = text; };
+    const save = async (body) => {
+      status("Kaydediliyor…");
+      try { cfg = await post("/api/settings/search", body); draw(cfg.epo ? "Kaydedildi; patent sekmeleri açık." : "Kaydedildi."); loadEnv?.(); }
+      catch (e) { status(e.message || "Kaydedilemedi."); }
+    };
+    $("[data-epo-save]", card).addEventListener("click", () => {
+      const key = $("#epoKey").value.trim(), secret = $("#epoSecret").value.trim();
+      if (!cfg.epo && (!key || !secret)) { status("Consumer Key ve Consumer Secret ikisi de gerekli."); return; }
+      save({ epo_key: key, epo_secret: secret });
+    });
+    $("[data-epo-clear]", card)?.addEventListener("click", () => save({ clear: ["epo_key", "epo_secret"] }));
+  };
+  draw();
+}
+
 async function searchSettingsCard() {
   const card = $("#searchCard");
   let cfg = null;

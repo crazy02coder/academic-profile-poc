@@ -105,11 +105,13 @@ def save(provider: str, key: str = "", clear_key: bool = False, model: str = "",
 def secrets() -> list[str]:
     keys = search()
     return [p["key"] for p in (_load().get("providers") or {}).values() if p.get("key")] \
-        + [keys[name] for name in ("serper_key", "google_cse_key") if keys[name]]
+        + [keys[name] for name in ("serper_key", "google_cse_key", "epo_key", "epo_secret") if keys[name]]
 
 
 # ------------------------------------------------------------------ arama servisleri (Serper.dev, Google Custom Search)
-_SEARCH_ENV = {"serper_key": "SERPER_API_KEY", "google_cse_key": "GOOGLE_CSE_KEY", "google_cse_cx": "GOOGLE_CSE_CX"}
+# Ayarlar sayfasından girilen servis anahtarları → yedek ortam değişkeni (.env). EPO: patent servisi (Open Patent Services).
+_SEARCH_ENV = {"serper_key": "SERPER_API_KEY", "google_cse_key": "GOOGLE_CSE_KEY", "google_cse_cx": "GOOGLE_CSE_CX",
+               "epo_key": "EPO_KEY", "epo_secret": "EPO_SECRET"}
 
 
 def search() -> dict:
@@ -122,10 +124,12 @@ def search() -> dict:
 def search_public() -> dict:
     """Arayüze giden görünüm: anahtarların kendisi yok, yalnız kayıtlı olup olmadıkları. Arama motoru kimliği gizli değildir."""
     keys = search()
-    return {"serper": bool(keys["serper_key"]), "google_cse": bool(keys["google_cse_key"]), "google_cse_cx": keys["google_cse_cx"]}
+    return {"serper": bool(keys["serper_key"]), "google_cse": bool(keys["google_cse_key"]), "google_cse_cx": keys["google_cse_cx"],
+            "epo": bool(keys["epo_key"] and keys["epo_secret"])}
 
 
-def save_search(serper_key: str = "", google_cse_key: str = "", google_cse_cx: str | None = None, clear: tuple = ()) -> None:
+def save_search(serper_key: str = "", google_cse_key: str = "", google_cse_cx: str | None = None, clear: tuple = (),
+                epo_key: str = "", epo_secret: str = "") -> None:
     """Boş bırakılan anahtar değişmez; silmek için adı clear içinde verilir. Kimlik (cx) verildiği gibi yazılır."""
     data = _load()
     entry = data.get("search") if isinstance(data.get("search"), dict) else {}
@@ -134,6 +138,10 @@ def save_search(serper_key: str = "", google_cse_key: str = "", google_cse_cx: s
             entry.pop(name, None)
     if serper_key.strip():
         entry["serper_key"] = serper_key.strip()
+    if epo_key.strip():
+        entry["epo_key"] = epo_key.strip()
+    if epo_secret.strip():
+        entry["epo_secret"] = epo_secret.strip()
     if google_cse_key.strip():
         entry["google_cse_key"] = google_cse_key.strip()
     if google_cse_cx is not None:
