@@ -59,6 +59,7 @@ const ICONS = {
   leaf: '<path d="M11 20A7 7 0 0 1 4 13c0-6 6-10 16-10 0 10-4 16-10 16z"/><path d="M4 21c4-5 7-8 12-11"/>',
   scale: '<path d="M12 3v18"/><path d="M5 21h14"/><path d="M3 7h18"/><path d="M6 7l-3 7a3 3 0 0 0 6 0z"/><path d="M18 7l-3 7a3 3 0 0 0 6 0z"/>',
   flame: '<path d="M12 22c4 0 7-3 7-7 0-5-4-7-5-11-2 2-3 4-3 6-1-1-2-2-2-4-2 2-4 5-4 9 0 4 3 7 7 7z"/>',
+  play: '<polygon points="7 4 20 12 7 20"/>',
   sparkle: '<path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"/>',
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
   calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
@@ -5141,6 +5142,7 @@ async function viewSearch(q, requestedSources = "") {
       ${sourcePicker("topicSourcePicker", TOPIC_SOURCES, selected)}<button class="btn primary" type="submit">Ara</button></form>
     <div id="sResults" style="margin-top:18px"></div>
     ${q ? "" : `<div id="shelves"></div>`}`);
+  window.mountAssistant?.("topic", $("#view"));  // sesli araştırma asistanı (static/assistant.js)
   const search = () => {
     const value = $("#sInput").value.trim();
     if (value.length < 3) return;
@@ -5210,12 +5212,16 @@ async function viewSystem() {
     <div class="settings-stack">
       <div class="settings-label">Yapay zekâ</div>
       <div class="card card-pad ai-card" id="aiCard">${skeleton(3)}</div>
+      <div class="settings-label">Asistan</div>
+      <div class="card card-pad ai-card" id="assistantCard">${skeleton(3)}</div>
       <div class="settings-label">Veri kaynakları</div>
       <div class="settings-two"><div class="card card-pad" id="speedCard">${skeleton(2)}</div>
         <div class="card card-pad ai-card" id="searchCard">${skeleton(2)}</div></div>
       <div class="card card-pad ai-card" id="epoCard">${skeleton(2)}</div>
       <div class="settings-label">Puan hesaplama</div>
       <div class="card card-pad" id="scoreCard">${skeleton(3)}</div>
+      <div class="settings-label">Bildirimler</div>
+      <div class="card card-pad ai-card" id="notifyCard">${skeleton(2)}</div>
       <div class="settings-label">Sistem</div>
       <div class="card card-pad"><div class="card-title">${icon("settings")}Site ve veri tarifleri</div>
           <div class="recipe-block"><b>Site tarifleri (REA)</b><p class="muted">REA sitelerin arka plandaki isteklerini öğrenir; sayfa yapısı değişince yeniden öğrenir.</p>
@@ -5224,9 +5230,11 @@ async function viewSystem() {
             <div id="contractList" class="contract-grid">${skeleton(2)}</div></div></div>
     </div>`);
   aiSettingsCard();
+  assistantSettingsCard();
   speedSettingsCard();
   searchSettingsCard();
   epoSettingsCard();
+  notifySettingsCard();
   scoreSettingsCard();
   contractsCard();
 }
@@ -5318,6 +5326,192 @@ async function scoreSettingsCard() {
 }
 
 // Arama servisleri: Serper.dev ve Google Custom Search anahtarları. Anahtarlar sunucudan geri gelmez (yalnız kayıtlı mı).
+// Sesli araştırma asistanı (Konu bul / Danışman bul): adı, sesi, tonu, hitabı ve ek talimatı.
+async function assistantSettingsCard() {
+  const card = $("#assistantCard");
+  let cfg = null;
+  try { cfg = await api("/api/settings/assistant"); } catch { if (card) card.innerHTML = `<p class="muted">Asistan ayarları okunamadı.</p>`; return; }
+  if (!card?.isConnected) return;
+  const TONE = { samimi: "Samimi", resmi: "Resmî", "neşeli": "Neşeli", sakin: "Sakin" };
+  const group = (g, label) => `<optgroup label="${label}">${cfg.voices.filter((v) => v.gender === g).map((v) => `<option value="${esc(v.id)}" ${v.id === cfg.voice ? "selected" : ""}>${esc(v.label)} · ${esc(v.style)}</option>`).join("")}</optgroup>`;
+  card.innerHTML = `<div class="card-title">${icon("sparkle")}Sesli asistan</div>
+    <p class="muted" style="margin:0 0 12px">Konu bul ve Danışman bul sayfalarında seninle sesli ya da yazılı konuşan asistan. Sesli sohbet Gemini Live ile çalışır; ${cfg.ready ? "Gemini anahtarın kayıtlı." : "<b>Gemini anahtarı gerekir</b> (yukarıdaki Yapay zekâ bölümü)."}</p>
+    <form class="ai-form" autocomplete="off">
+      <div class="field"><label for="vaName">Adı</label><div class="input"><input id="vaName" maxlength="40" value="${esc(cfg.name)}"></div></div>
+      <div class="field"><label for="vaVoice">Sesi</label><select class="select" id="vaVoice">${group("kadın", "Kadın sesleri")}${group("erkek", "Erkek sesleri")}</select></div>
+      <div class="field"><label for="vaTone">Konuşma tonu</label><select class="select" id="vaTone">${cfg.tones.map((t) => `<option value="${esc(t)}" ${t === cfg.tone ? "selected" : ""}>${esc(TONE[t] || t)}</option>`).join("")}</select></div>
+      <div class="field"><label for="vaAddress">Hitap</label><select class="select" id="vaAddress"><option value="sen" ${cfg.address === "sen" ? "selected" : ""}>Sen</option><option value="siz" ${cfg.address === "siz" ? "selected" : ""}>Siz</option></select></div>
+      <div class="field" style="grid-column:1/-1"><label for="vaExtra">Ek talimat <small>isteğe bağlı</small></label><div class="input"><input id="vaExtra" maxlength="600" value="${esc(cfg.extra)}" placeholder="ör. Cevaplarında yöntemleri de kısaca açıkla."></div></div>
+    </form>
+    <div class="actions"><button class="btn primary sm" type="button" data-va-save>Kaydet</button>
+      <button class="btn sm va-preview" type="button" data-va-preview ${cfg.ready ? "" : "disabled"}>${icon("play")}Sesi dene</button></div>
+    <p class="muted ai-note" data-va-status role="status"></p>`;
+  hydrateIcons(card);
+  let player = null;
+  $("[data-va-preview]", card).onclick = async (e) => {
+    const btn = e.currentTarget, status = $("[data-va-status]", card);
+    if (player && !player.paused) { player.pause(); btn.classList.remove("playing"); return; }
+    btn.disabled = true; status.textContent = `${$("#vaVoice").selectedOptions[0]?.textContent.split(" · ")[0] || "Ses"} hazırlanıyor…`;
+    try {
+      const r = await fetch("/api/settings/assistant/preview", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: $("#vaName").value, voice: $("#vaVoice").value, tone: $("#vaTone").value }) });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `Ses örneği alınamadı (${r.status}).`);
+      if (player) URL.revokeObjectURL(player.src);
+      player = new Audio(URL.createObjectURL(await r.blob()));
+      player.onended = () => btn.classList.remove("playing");
+      btn.classList.add("playing"); status.textContent = "Çalıyor · kaydetmeden önce farklı ses ve tonları deneyebilirsin.";
+      await player.play();
+    } catch (err) { status.textContent = err.message || "Ses örneği alınamadı."; }
+    finally { btn.disabled = false; }
+  };
+  $("[data-va-save]", card).onclick = async () => {
+    const status = $("[data-va-status]", card);
+    status.textContent = "Kaydediliyor…";
+    try {
+      cfg = { ...cfg, ...await post("/api/settings/assistant", { name: $("#vaName").value, voice: $("#vaVoice").value, tone: $("#vaTone").value, address: $("#vaAddress").value, extra: $("#vaExtra").value }) };
+      status.textContent = "Kaydedildi; yeni görüşmelerde geçerli.";
+    } catch (e) { status.textContent = e.message || "Kaydedilemedi."; }
+  };
+}
+
+// WhatsApp bildirimi (QR ile bağlı cihaz): veri tarifi kontrolleri ve REA taramasının sonucu seçilen alıcılara gider.
+async function notifySettingsCard() {
+  const card = $("#notifyCard");
+  let cfg = null;
+  try { cfg = await api("/api/settings/notify"); } catch { if (card) card.innerHTML = `<p class="muted">Bildirim ayarları okunamadı.</p>`; return; }
+  if (!card?.isConnected) return;
+  let poll = null;
+  const stopPoll = () => { clearTimeout(poll); poll = null; };
+  const waBox = (wa) => {
+    if (!wa.available) return `<p class="muted">WhatsApp bileşeni (neonize) kurulu değil: <code>pip install neonize</code></p>`;
+    if (wa.state === "ready") return `<div class="nt-wa ok"><span class="nt-dot"></span><div><b>Bağlı</b><small>${esc(wa.phone || "")} · mesajlar "Kendine mesaj" sohbetine gelir</small></div>
+      <button class="btn sm" type="button" data-wa-logout>Bağlantıyı kes</button></div>`;
+    if (wa.state === "qr" && wa.qr) return `<div class="nt-qr"><img src="${wa.qr}" alt="WhatsApp QR kodu" width="220" height="220">
+      <ol><li>Telefonda WhatsApp'ı aç</li><li><b>Ayarlar → Bağlı cihazlar → Cihaz bağla</b></li><li>Bu kodu okut (kod birkaç saniyede bir yenilenir)</li></ol></div>`;
+    if (wa.state === "connecting" || wa.state === "qr") return `<div class="nt-wa"><span class="nt-dot busy"></span><div><b>Bağlanıyor…</b><small>${wa.paired ? "Kayıtlı oturum açılıyor" : "QR kodu hazırlanıyor"}</small></div></div>`;
+    return `<div class="nt-wa"><span class="nt-dot off"></span><div><b>Bağlı değil</b><small>${esc(wa.error || "QR okutarak bu bilgisayarı WhatsApp'ına bağlı cihaz olarak ekle.")}</small></div>
+      <button class="btn primary sm" type="button" data-wa-connect>WhatsApp'ı bağla</button></div>`;
+  };
+  const draw = (message = "") => {
+    const wa = cfg.whatsapp || {};
+    card.innerHTML = `<div class="card-title">${icon("message")}WhatsApp bildirimi</div>
+      <p class="muted" style="margin:0 0 12px">Veri tarifi kontrolleri ve site taramasının sonucu WhatsApp'tan seçtiğin alıcılara gelir. Bu bilgisayar WhatsApp'ına bağlı cihaz olarak eklenir (WhatsApp Web gibi).</p>
+      <div data-wa>${waBox(wa)}</div>
+      <div class="nt-opts">
+        <label class="check"><input type="checkbox" id="ntOnly" ${cfg.only_changes ? "checked" : ""}> Otomatik (günlük) kontrolde yalnız sorun olunca gönder <small class="faint">· butonla yapılan kontrol her zaman gönderilir</small></label>
+        <label class="check"><input type="checkbox" id="ntDaily" ${cfg.daily ? "checked" : ""}> Uygulama açıkken günde bir kez veri tariflerini kontrol et</label>
+      </div>
+      <div class="actions"><button class="btn sm" type="button" data-nt-test ${cfg.ready ? "" : "disabled"}>Deneme mesajı gönder</button>
+        <button class="btn sm" type="button" data-nt-run ${cfg.ready ? "" : "disabled"}>${icon("refresh")}Şimdi kontrol et ve gönder</button></div>
+      <div class="nt-rcpt"><b>Alıcılar</b>
+        <label class="check"><input type="checkbox" id="ntSelf" ${cfg.to_self ? "checked" : ""}> Kendime <small class="faint">("Kendine mesaj" sohbeti)</small></label>
+        ${cfg.numbers.map((x, n) => `<div class="nt-row">${icon("user")}<span>${esc([x.title, x.name].filter(Boolean).join(" ") || x.phone)}${x.name ? ` <small class="faint">${esc(x.phone)}</small>` : ""}</span><button class="btn sm ghost" type="button" data-nt-edit-number="${n}">Düzenle</button><button class="icon-btn" type="button" data-nt-del-number="${n}" title="Kaldır" aria-label="Kaldır">${icon("x")}</button></div>`).join("")}
+        ${cfg.groups.map((g, n) => `<div class="nt-row">${icon("users")}<span>${esc(g.name)} <small class="faint">grup</small></span><button class="icon-btn" type="button" data-nt-del-group="${n}" title="Kaldır" aria-label="Kaldır">${icon("x")}</button></div>`).join("")}
+        ${cfg.numbers.length < cfg.max_numbers ? `<form class="nt-add" data-nt-add autocomplete="off">
+          <div class="input"><input id="ntNum" inputmode="tel" placeholder="Numara · 0532 123 45 67"></div>
+          <select class="select" id="ntNumTitle" aria-label="Unvan"><option value="">Unvan yok</option>${cfg.titles.map((t) => `<option>${esc(t)}</option>`).join("")}</select>
+          <div class="input"><input id="ntNumName" maxlength="60" placeholder="Ad soyad (isteğe bağlı)"></div>
+          <button class="btn sm" type="submit">${icon("plus")}Kişi ekle</button></form>` : `<p class="faint nt-hint">En çok ${cfg.max_numbers} numara eklenebilir.</p>`}
+        ${wa.state === "ready" && cfg.groups.length < cfg.max_groups ? `<button class="btn sm" type="button" data-nt-groups>${icon("users")}Grup seç</button><div data-nt-grouplist></div>` : ""}
+        <p class="faint nt-hint">Mesaj kişiye unvanı ve adıyla hitap eder ("Merhaba Prof. Dr. Ayşe Yılmaz, ben Akademik İz asistanıyım.") ve "Akademik İz asistanı" imzasıyla biter; durumlar emojiyle işaretlenir (🟢 sorunsuz, 🟡 değişti, 🔴 bozuk, ⚠️ ulaşılamadı).</p>
+        <div class="field nt-url"><label for="ntUrl">Uygulama adresi <small>isteğe bağlı · mesajın sonuna "Kayıt ve karşılaştırma" bağlantısı eklenir</small></label>
+          <div class="input"><input id="ntUrl" inputmode="url" placeholder="https://akademik-iz.example.com" value="${esc(cfg.app_url || "")}"></div></div>
+        <p class="faint nt-hint">Mesajlar senin numarandan gider. Az sayıda, seni tanıyan kişi ya da grup seç; çok kişiye gönderim numaranın engellenmesine yol açabilir.</p>
+      </div>
+      <p class="muted ai-note" data-nt-status role="status">${esc(message)}</p>`;
+    hydrateIcons(card);
+    bind();
+    if (["connecting", "qr"].includes(wa.state)) watch();
+  };
+  const status = (text) => { $("[data-nt-status]", card).textContent = text; };
+  const refresh = async (message) => { try { cfg = await api("/api/settings/notify"); } catch { /* eski görünüm kalır */ } draw(message); };
+  const watch = () => {  // QR okutulana / bağlanana kadar durum izlenir
+    stopPoll();
+    poll = setTimeout(async () => {
+      if (!card.isConnected) return stopPoll();
+      let wa = null;
+      try { wa = await api("/api/whatsapp/status", { quiet: true }); } catch { return watch(); }
+      const prev = cfg.whatsapp || {};
+      cfg.whatsapp = wa;
+      if (wa.state !== prev.state) { if (wa.state === "ready") return refresh("WhatsApp bağlandı; deneme mesajı gönderebilirsin."); draw(); return; }
+      if (wa.qr !== prev.qr) $("[data-wa]", card).innerHTML = waBox(wa);
+      if (["connecting", "qr"].includes(wa.state)) watch();
+    }, 2000);
+  };
+  const save = async (body, done) => {
+    status("Kaydediliyor…");
+    try { cfg = await post("/api/settings/notify", body); draw(done || "Kaydedildi."); }
+    catch (e) { status(e.message || "Kaydedilemedi."); }
+  };
+  const bind = () => {
+    $("[data-wa-connect]", card)?.addEventListener("click", async (e) => {
+      e.currentTarget.disabled = true;
+      try { cfg.whatsapp = await post("/api/whatsapp/connect", {}); draw(); } catch (err) { status(err.message || "Bağlanılamadı."); }
+    });
+    $("[data-wa-logout]", card)?.addEventListener("click", async () => {
+      if (!confirm("WhatsApp bağlantısı kesilsin mi? Bu bilgisayar bağlı cihazlardan çıkarılır; tekrar bağlamak için QR gerekir.")) return;
+      try { await post("/api/whatsapp/logout", {}); refresh("Bağlantı kesildi."); } catch (err) { status(err.message || "Kesilemedi."); }
+    });
+    $("#ntOnly").onchange = (e) => save({ only_changes: e.target.checked });
+    $("#ntDaily").onchange = (e) => save({ daily: e.target.checked });
+    $("#ntUrl").onchange = (e) => save({ app_url: e.target.value.trim() }, e.target.value.trim() ? "Uygulama adresi kaydedildi." : "Uygulama adresi kaldırıldı.");
+    $("#ntSelf").onchange = (e) => save({ to_self: e.target.checked }, e.target.checked ? "Kendine gönderim açık." : "Kendine gönderim kapalı.");
+    $("[data-nt-add]", card)?.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const phone = $("#ntNum").value.trim(); if (!phone) return;
+      save({ numbers: [...cfg.numbers, { phone, title: $("#ntNumTitle").value, name: $("#ntNumName").value.trim() }] }, "Kişi eklendi.");
+    });
+    // Kayıtlı kişiyi yerinde düzenleme: unvan ve ad (numara aynı kalır)
+    $$("[data-nt-edit-number]", card).forEach((b) => { b.onclick = () => {
+      const n = Number(b.dataset.ntEditNumber), x = cfg.numbers[n], row = b.closest(".nt-row");
+      row.outerHTML = `<form class="nt-row nt-edit" data-nt-edit="${n}" autocomplete="off">${icon("user")}
+        <select class="select" aria-label="Unvan"><option value="">Unvan yok</option>${cfg.titles.map((t) => `<option ${t === x.title ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>
+        <div class="input"><input maxlength="60" value="${esc(x.name || "")}" placeholder="Ad soyad"></div>
+        <small class="faint">${esc(x.phone)}</small>
+        <button class="btn sm primary" type="submit">Kaydet</button><button class="btn sm" type="button" data-nt-cancel>Vazgeç</button></form>`;
+      const form = $(`[data-nt-edit="${n}"]`, card);
+      hydrateIcons(form);
+      $("input", form).focus();
+      $("[data-nt-cancel]", form).onclick = () => draw();
+      form.onsubmit = (e) => {
+        e.preventDefault();
+        const numbers = cfg.numbers.map((y, i) => (i === n ? { ...y, title: $("select", form).value, name: $("input", form).value.trim() } : y));
+        save({ numbers }, "Kişi güncellendi.");
+      };
+    }; });
+    $$("[data-nt-del-number]", card).forEach((b) => { b.onclick = () => save({ numbers: cfg.numbers.filter((_, n) => n !== Number(b.dataset.ntDelNumber)) }, "Kişi kaldırıldı."); });
+    $$("[data-nt-del-group]", card).forEach((b) => { b.onclick = () => save({ groups: cfg.groups.filter((_, n) => n !== Number(b.dataset.ntDelGroup)) }, "Grup kaldırıldı."); });
+    $("[data-nt-groups]", card)?.addEventListener("click", async (e) => {
+      const box = $("[data-nt-grouplist]", card); e.currentTarget.disabled = true; box.innerHTML = `<p class="faint nt-hint">Gruplar okunuyor…</p>`;
+      try {
+        const chosen = new Set(cfg.groups.map((g) => g.jid));
+        const list = (await api("/api/whatsapp/groups")).filter((g) => !chosen.has(g.jid));
+        box.innerHTML = list.length ? `<div class="nt-groups">${list.map((g) => `<button type="button" class="nt-group" data-jid="${esc(g.jid)}" data-name="${esc(g.name)}">${icon("users")}<span>${esc(g.name)}</span><small class="faint">${g.members} üye</small></button>`).join("")}</div>`
+          : `<p class="faint nt-hint">Üye olduğun başka grup yok.</p>`;
+        hydrateIcons(box);
+        $$(".nt-group", box).forEach((b) => { b.onclick = () => save({ groups: [...cfg.groups, { jid: b.dataset.jid, name: b.dataset.name }] }, "Grup eklendi."); });
+      } catch (err) { box.innerHTML = `<p class="nt-hint">${esc(err.message || "Gruplar okunamadı.")}</p>`; }
+    });
+    $("[data-nt-test]", card).onclick = async (e) => {
+      const btn = e.currentTarget; btn.disabled = true; status("Gönderiliyor…");
+      try { const r = await post("/api/settings/notify/test", {}); status(`Gönderildi: ${r.sent.join(", ")}.${r.failed.length ? ` Gönderilemedi: ${r.failed.join("; ")}` : ""}`); }
+      catch (err) { status(err.message || "Gönderilemedi."); }
+      finally { btn.disabled = false; }
+    };
+    $("[data-nt-run]", card).onclick = async (e) => {
+      const btn = e.currentTarget; btn.disabled = true; status("Veri tarifleri kontrol ediliyor…");
+      try {
+        const r = await post("/api/contracts/check-all", {});
+        const bad = r.results.filter((x) => x.error || x.status === "changed" || x.status === "broken").length;
+        status(`${r.results.length} tarif kontrol edildi, ${bad ? `${bad} tanesinde sorun var` : "hepsi sorunsuz"}. ${r.sent ? "WhatsApp'a gönderildi." : "WhatsApp'a gönderilemedi (bağlantı ya da alıcı yok)."}`);
+        contractsCard();
+      } catch (err) { status(err.message || "Kontrol başarısız."); }
+      finally { btn.disabled = false; }
+    };
+  };
+  draw();
+}
+
 // Patentler: Avrupa Patent Ofisi (EPO) Open Patent Services anahtarı. Anahtar yoksa patent sekmeleri kapalı kalır.
 async function epoSettingsCard() {
   const card = $("#epoCard");

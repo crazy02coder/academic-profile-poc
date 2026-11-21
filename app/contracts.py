@@ -149,7 +149,7 @@ def summary() -> list[dict]:
         out.append({"id": cid, "label": spec["label"], "source": spec["source"], "status": saved.get("status") or "unknown",
                     "checked_at": saved.get("checked_at") or 0, "empty": saved.get("empty") or [], "removed": saved.get("removed") or [],
                     "added": saved.get("added") or [], "map": saved.get("map") or {}, "learned_at": saved.get("learned_at") or 0,
-                    "learnable": bool(spec.get("learnable")),
+                    "learnable": bool(spec.get("learnable")), "similarity": saved.get("similarity"),
                     "outputs": spec["outputs"]})
     return out
 
@@ -173,12 +173,14 @@ async def check(cid: str) -> dict:
     removed = [f for f in known if f not in fields] if known else []
     added = [f for f in fields if f not in known] if known else []
     status = "broken" if empty else "changed" if (removed or added) else "ok"
-    saved.update(status=status, empty=empty, removed=removed, added=added, checked_at=time.time())
+    union = set(known) | set(fields)
+    similarity = round(len(set(known) & set(fields)) / len(union), 3) if known and union else 1.0
+    saved.update(status=status, empty=empty, removed=removed, added=added, checked_at=time.time(), similarity=similarity)
     if not known and not empty:
         saved["fields"] = fields  # ilk kontrol: çalışan biçim "bilinen biçim" olarak kaydedilir
     _save(cid, saved)
     return {"id": cid, "label": spec["label"], "status": status, "empty": empty, "removed": removed, "added": added,
-            "blank": blank, "checked_at": saved["checked_at"], "outputs": spec["outputs"], "learnable": bool(spec.get("learnable")),
+            "blank": blank, "checked_at": saved["checked_at"], "similarity": similarity, "fields": len(fields), "outputs": spec["outputs"], "learnable": bool(spec.get("learnable")),
             "parsed": {key: (parsed.get(key) if isinstance(parsed.get(key), str) else str(parsed.get(key) or ""))[:80] for key in spec["outputs"]}}
 
 

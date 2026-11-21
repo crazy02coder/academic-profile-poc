@@ -109,6 +109,16 @@ _NOT_PROFILE = re.compile(r"/(?:19|20)\d{2}/\d{1,2}(?:/|$)|/(?:haber|haberler|du
                           r"etkinlikler|events?|blog|basin|press)(?:/|-|$)", re.I)
 
 
+def _homepage(url: str) -> bool:
+    """Adres bir sitenin yalnız ana sayfası mı ("https://www.kurum.edu.tr", ".../", ".../tr", ".../en/index.html")."""
+    from urllib.parse import urlsplit
+    if not url or not url.startswith(("https://", "http://")):
+        return False
+    parts = urlsplit(url)
+    path = parts.path.strip("/").lower()
+    return not parts.query and bool(re.fullmatch(r"(?:(?:tr|en)/?)?(?:(?:index|default|anasayfa|home)(?:\.\w{2,5})?)?", path))
+
+
 def _profile_like(url: str) -> bool:
     return bool(url) and not _NOT_PROFILE.search(url)
 
@@ -175,13 +185,27 @@ async def _page_info(url: str, name: str) -> dict:
 
 async def _site_card(p: Profile) -> dict | None:
     """Kişinin, bölümünün (yoksa fakültesinin) kurum sayfasındaki kadro kartı: {"url", "photo", "title", "unit_url",
-    "faculty", "department"}. Fakülte ve bölüm YÖK kadro yolundan alınır; YÖK'e istek atılmaz."""
+    "faculty", "department"}. Fakülte ve bölüm YÖK kadro yolundan alınır. Kayıtlı yolda fakülte yoksa (kayıt YÖK'ün
+    Kasım 2026'daki yanıt değişikliğinden önce ya da bölümsüz açılmış) YÖK'te ad aramasıyla bir kez bulunur."""
     from . import directory, main, yokdir
     from .text import name_tokens
     path = [x for x in (p.yok or {}).get("path") or [] if x]
     institution = p.get("institution", "") or (path[0] if path else "")
     faculty = path[1] if len(path) > 1 else ""
     department = path[2] if len(path) > 2 else p.get("department", "")
+    if fold(department) == fold(institution):
+        department = ""  # bölüm alanına kurum adı yazılmış eski kayıt
+    if institution and not faculty and p.name:
+        want_name = tuple(sorted(name_tokens(p.name)))
+        try:
+            rows = await asyncio.wait_for(yokdir.search_people(p.name, limit=20), 25)
+        except Exception:  # noqa: BLE001 — YÖK yanıt vermezse kadro listesi araması yapılamaz
+            rows = []
+        same = [r for r in rows if tuple(sorted(name_tokens(r.get("name") or ""))) == want_name
+                and yokdir.uni_id(r.get("university") or "") == yokdir.uni_id(institution) and r.get("faculty")]
+        if same:
+            faculty = same[0]["faculty"]
+            department = department or same[0].get("department") or ""
     if not institution or not faculty:
         return None
     uid = yokdir.uni_id(institution)
@@ -226,6 +250,10 @@ async def collect(old: dict, sections: set[str], sources: set[str], llm, log) ->
     # Kurum sayfası ayrı bir seçimdir; diğer bölümlerde site keşfi yapılmaz.
     if "institution" in sections:
         url = p.source_url or (old.get("input") or {}).get("url") or p.listing_url
+        if _homepage(url):
+            # Kayıtlı adres yalnız üniversitenin ana sayfası (profil adla + kurum sitesiyle açılmış, kişinin sayfası hiç
+            # bulunmamış): ana sayfadan baştan site taraması yerine kişi, bölümünün kadro listesinde aranır (aşağıda).
+            url = ""
         if url and url.startswith(("https://", "http://")) and "akademik.yok.gov.tr" not in url:
             try:
                 fresh, report = await asyncio.wait_for(locate(url, p.name, log, llm), 90)

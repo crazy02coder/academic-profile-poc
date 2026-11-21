@@ -9,4 +9,5 @@ rapidfuzz>=3.9,<4
 ddgs>=9.0
 pillow>=10  # patent belgelerinin taranmış (TIFF) sayfalarını PNG'ye çevirir
 pypdf>=5  # üniversitelerin program ve ücret belgelerindeki metni okur
-
+google-genai>=1.30  # sesli araştırma asistanı (Gemini Live)
+neonize>=0.12  # WhatsApp bildirimi: QR ile bağlı cihaz, kendi numaraya mesaj

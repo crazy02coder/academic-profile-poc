@@ -148,3 +148,27 @@ def save_search(serper_key: str = "", google_cse_key: str = "", google_cse_cx: s
         entry["google_cse_cx"] = google_cse_cx.strip()
     data["search"] = entry
     _write(data)
+
+
+# ------------------------------------------------------------------ sesli asistan (Konu bul / Danışman bul)
+_ASSISTANT_DEFAULT = {"name": "Ada", "voice": "Kore", "tone": "samimi", "address": "sen", "extra": "", "live_model": "",
+                      "color": "mavi"}
+
+
+def assistant() -> dict:
+    """Asistanın adı, sesi (Gemini Live hazır sesi), konuşma tonu, hitabı ve ek talimatı."""
+    saved = _load().get("assistant")
+    saved = saved if isinstance(saved, dict) else {}
+    return {k: (str(saved.get(k)).strip() if saved.get(k) not in (None, "") else v) for k, v in _ASSISTANT_DEFAULT.items()}
+
+
+def save_assistant(values: dict) -> dict:
+    data = _load()
+    entry = assistant()
+    for key in ("name", "voice", "tone", "address", "extra", "live_model", "color"):
+        if key in values and values[key] is not None:
+            entry[key] = str(values[key]).strip()[:600 if key == "extra" else 60]
+    entry["name"] = entry["name"] or _ASSISTANT_DEFAULT["name"]
+    data["assistant"] = entry
+    _write(data)
+    return entry

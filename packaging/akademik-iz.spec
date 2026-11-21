@@ -23,7 +23,8 @@ hiddenimports = collect_submodules("app") + collect_submodules("uvicorn")
 
 # Veri dosyaları, sürücüler ya da dinamik içe aktarmalar taşıyan paketler bütünüyle alınır.
 for package in ("scrapling", "curl_cffi", "playwright", "patchright", "langdetect", "browserforge",
-                "apify_fingerprint_datapoints", "ddgs", "primp", "certifi", "tld", "rapidfuzz", "websockets", "pypdf"):
+                "apify_fingerprint_datapoints", "ddgs", "primp", "certifi", "tld", "rapidfuzz", "websockets", "pypdf",
+                "google.genai", "neonize", "segno"):
     try:
         d, b, h = collect_all(package)
     except Exception:  # paket kurulu değilse atlanır

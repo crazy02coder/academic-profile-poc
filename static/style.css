@@ -758,11 +758,49 @@ details.tech summary { cursor: pointer; color: var(--faint); font-size: 12.5px; 
 
 /* Ayarlar: yapay zekâ sağlayıcısı */
 .ai-card { margin-bottom: 16px; }
-.ai-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.ai-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); gap: 14px; }
+.ai-form .field { min-width: 0; }
 .ai-form .select { width: 100%; height: 48px; }
 .ai-card [hidden] { display: none; }
 .ai-note { margin: 12px 0; font-size: 13px; }
 .ai-note:empty { display: none; }
+.ai-form + .actions, .ai-form ~ .actions { margin-top: 16px; }  /* düğmeler alanlara yapışmasın */
+.ai-card .actions { gap: 8px; flex-wrap: wrap; }
+.va-preview svg { width: 15px; height: 15px; margin-right: 6px; vertical-align: -2px; }
+.va-preview.playing { border-color: var(--blue); color: var(--blue); }
+
+/* Açılır menüler: tüm sayfada aynı görünüm (yuvarlak köşe, özel ok, odak halkası). Destekleyen tarayıcılarda
+   (Chrome/Edge 135+) açılan liste de temaya uygun çizilir; desteklemeyenlerde yerel liste görünür. */
+select.select {
+  appearance: none; -webkit-appearance: none; cursor: pointer; color: var(--text); font: inherit; font-size: 13px;
+  padding-right: 34px; background-color: var(--surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2385858e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 11px center; background-size: 16px;
+  transition: border-color .15s, box-shadow .15s;
+}
+select.select:hover { border-color: var(--muted); }
+select.select:focus-visible { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
+.ai-form select.select { border-radius: 12px; padding-left: 14px; font-size: 14px; }
+/* Seçili metin tek satırda kalır, sığmazsa "…" ile kısalır; açılan listede tam metin görünür. */
+select.select { min-width: 0; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+select.select option, select.select optgroup { background: var(--surface); color: var(--text); }
+@supports (appearance: base-select) {
+  select.select, select.select::picker(select) { appearance: base-select; }
+  select.select { display: inline-flex; align-items: center; background-image: none; }
+  select.select::picker-icon { content: ""; width: 16px; height: 16px; margin-left: auto; transition: transform .2s;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2385858e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") center / 16px no-repeat; }
+  select.select:open::picker-icon { transform: rotate(180deg); }
+  select.select::picker(select) { border: 1px solid var(--line); border-radius: 12px; padding: 6px; margin-top: 6px;
+    background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg); max-height: min(320px, 60vh);
+    /* açılan liste ekrandan taşmaz: en az kutu kadar geniş, en çok ekran kadar; aşağıda yer yoksa yukarı açılır */
+    width: max-content; min-width: anchor-size(width); max-width: calc(100vw - 24px); position-try-fallbacks: flip-block, flip-inline; }
+  select.select::picker(select) option { white-space: normal; }
+  select.select option { padding: 8px 10px; border-radius: 8px; font-size: 13.5px; }
+  select.select option:hover, select.select option:focus-visible { background: var(--surface-3); outline: none; }
+  select.select option:checked { background: var(--blue-soft); color: var(--blue); font-weight: 600; }
+  select.select option::checkmark { display: none; }
+  select.select optgroup { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 8px 10px 4px; }
+}
 
 /* WoS/JCR ve SJR, yayın yanında ayrı kaynak etiketleri olarak gösterilir. */
 .q-badge.jcr { border-color: var(--text); color: var(--text); text-decoration: none; }
@@ -3012,3 +3050,45 @@ details.student-accordion > summary svg:last-child { transition: transform .25s 
 .think-dots i { width: 8px; height: 8px; border-radius: 50%; background: linear-gradient(135deg, var(--blue), #a855f7); animation: thinkBounce 1s ease-in-out infinite; }
 .think-dots i:nth-child(2) { animation-delay: .14s; } .think-dots i:nth-child(3) { animation-delay: .28s; }
 @keyframes thinkBounce { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-7px); opacity: 1; } }
+
+/* Ayarlar → WhatsApp bildirimi */
+.nt-opts { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; font-size: 13.5px; }
+.nt-opts .check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.nt-opts input { width: 16px; height: 16px; accent-color: var(--primary); }
+.nt-wa { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; }
+.nt-wa > div { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.nt-wa small { color: var(--muted); font-size: 12.5px; }
+.nt-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ok); flex: none; box-shadow: 0 0 0 4px var(--ok-soft); }
+.nt-dot.off { background: var(--faint); box-shadow: none; }
+.nt-dot.busy { background: var(--blue); animation: nt-pulse 1.2s ease-in-out infinite; }
+@keyframes nt-pulse { 50% { opacity: .35; } }
+.nt-qr { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; padding: 12px; border: 1px solid var(--line); border-radius: 12px; }
+.nt-qr img { background: #fff; border-radius: 10px; padding: 6px; }
+.nt-qr ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
+.nt-rcpt { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 13.5px; }
+.nt-rcpt .check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.nt-rcpt input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--primary); }
+.nt-row { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 10px; border: 1px solid var(--line); border-radius: 10px; }
+.nt-row > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nt-row svg { width: 15px; height: 15px; color: var(--muted); flex: none; }
+.nt-row .icon-btn { width: 28px; height: 28px; }
+.nt-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.nt-add > .input { flex: 1 1 200px; min-width: 0; }
+.nt-add > .select { flex: 0 1 180px; }
+.nt-add > .btn { flex: none; }
+.nt-rcpt > [data-nt-groups] { align-self: flex-start; }
+.nt-edit { flex-wrap: wrap; }
+.nt-edit .select { height: 32px; width: auto; flex: 0 1 170px; }
+.nt-edit .input { flex: 1 1 180px; min-width: 0; }
+.nt-edit .input input { height: 32px; }
+.nt-row .btn.ghost { border-color: transparent; background: none; color: var(--muted); }
+.nt-row .btn.ghost:hover { color: var(--text); }
+.nt-add .select { height: 36px; width: 100%; }
+.nt-url { margin-top: 4px; }
+.nt-add .input input { height: 36px; }
+.nt-hint { margin: 0; font-size: 12px; }
+.nt-groups { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
+.nt-group { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); cursor: pointer; text-align: left; font: inherit; }
+.nt-group:hover { border-color: var(--blue); }
+.nt-group span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nt-group svg { width: 15px; height: 15px; color: var(--muted); }

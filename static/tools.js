@@ -82,6 +82,7 @@ async function viewAdvisor(params) {
         <button class="btn primary" type="submit">${icon("search")}Danışman ara</button></div>
       ${mode === "2209" ? `<p class="faint t-hint">2209-A'da danışman, öğrencinin kendi üniversitesinden bir öğretim üyesi ya da doktoralı öğretim elemanı olur; güncel çağrı metnini kontrol et.</p>` : ""}</form>
     <div id="aResults"></div>`);
+  window.mountAssistant?.("advisor", $("#view"));  // sesli araştırma asistanı (static/assistant.js)
   const go = (m = mode) => {
     const text = $("#aQ").value.trim(), u = $("#aUni").value;
     try { if ($("#aOwn").checked && u) localStorage.setItem("own-uni", u); } catch { /* tercih */ }

@@ -265,11 +265,14 @@
 
   const tools = () => [
     { pre: go("#/ara"), sel: ".section-head", must: true, side: "bottom", title: "Konu bul", text: "Bir kişiyi değil bir <b>konuyu</b> aramak için kullanılır." },
+    { sel: ".va", side: "bottom", wait: 5000, title: "Sesli araştırma asistanı", text: "Burada bir yapay zekâ asistanıyla konuşarak yayın ararsın. <b>Asistanla konuş</b>'a basınca seni karşılar; konunu sesli anlatabilir, yazabilir ya da 📎 düğmesiyle bir belge (PDF, Word) verebilirsin. Bulduğu yayınlar sağda kartlar olarak listelenir; güncel bilgi için web'de de arar." },
+    { sel: ".va-stage", side: "right", title: "Asistanın yüzü", text: "Küre asistanın durumunu gösterir: boştayken yavaşça nefes alır, seni dinlerken sesine, konuşurken kendi sesine göre büyür, araştırırken etrafında halkalar döner. Adını, sesini ve tonunu Ayarlar'dan değiştirebilirsin." },
     { sel: "#searchForm", side: "bottom", title: "Konu yazın", text: "Örneğin \"derin öğrenme\" ya da \"batarya yönetim sistemi\" yazıp arayın." },
     { sel: "#topicSources", side: "bottom", title: "Kaynak seçimi", text: "Aramanın hangi yayın kaynaklarında yapılacağını seçersiniz." },
     { sel: "#sResults, #shelves", side: "top", title: "Sonuçlar", text: "O konuda yazılmış yayınlar ve o alanda en çok yayını olan akademisyenler burada listelenir." },
 
-    { pre: go("#/danisman"), sel: "#aForm", must: true, side: "bottom", title: "Danışman bul", text: "Tez ya da proje konunuza uygun danışman adayları bulmak için kullanılır." },
+    { pre: go("#/danisman"), sel: ".va", must: true, wait: 5000, side: "bottom", title: "Danışman bul asistanı", text: "Tez ya da TÜBİTAK 2209-A projen için danışmanı asistanla konuşarak bulabilirsin: konunu ve üniversiteni söyle, uygun akademisyenleri nedenleriyle anlatsın ve kartlar olarak listelesin." },
+    { sel: "#aForm", side: "bottom", title: "Danışman bul (klasik)", text: "Asistan yerine formu kullanmak istersen: konunu yaz, üniversiteni seç ve ara." },
     { sel: "#aQ", side: "bottom", title: "Konunuz", text: "Çalışmak istediğiniz konuyu birkaç kelimeyle yazın." },
     { sel: "#aUni", side: "bottom", title: "Üniversite", text: "Aramayı tek bir üniversiteyle sınırlamak isterseniz buradan seçersiniz; boş bırakırsanız hepsinde aranır." },
     { sel: "#aResults", side: "top", title: "Önerilen akademisyenler", text: "Konunuzda yayını olan akademisyenler, ilgili yayınlarıyla birlikte sıralanır." },
@@ -287,6 +290,7 @@
     { sel: "#aiSave", side: "top", title: "Kaydet ve kullan", text: "Ayarı kaydeder ve bağlantıyı hemen dener. Başarılıysa altında \"Kullanımda\" yazar." },
     { sel: "#aiList", side: "top", title: "Bağlantıyı dene", text: "Kaydetmeden önce anahtarın çalışıp çalışmadığını kontrol eder." },
     { sel: "#speedCard", side: "top", wait: 7000, title: "YÖK hızı", text: "YÖK'ün sitesine ne kadar sık istek gönderileceği. <b>2</b> güvenli ayardır. Yükseltirseniz tarama hızlanır ama YÖK'ün sizi geçici olarak engelleme riski artar; engel yerseniz kademeyi düşürün." },
+    { sel: "#assistantCard", side: "bottom", wait: 7000, title: "Sesli asistan", text: "Konu bul ve Danışman bul'daki asistanın adı, sesi (kadın ya da erkek, farklı karakterler), konuşma tonu (samimi, resmî, neşeli, sakin) ve hitabı (sen / siz) buradan ayarlanır." },
     { sel: "#searchCard", side: "top", wait: 7000, title: "Arama servisleri", text: "Serper.dev ya da Google Custom Search anahtarı girerseniz, veri setinde olmayan üniversitelerin ders planı çok daha hızlı bulunur. Anahtarı girip <b>Dene</b> düğmesiyle çalıştığını kontrol edebilirsiniz." },
     { sel: "#scoreCard", side: "top", title: "Puan ayarları", text: "Doçentlik ve teşvik puanı hesabında kullanılan ölçütler." },
     { sel: "#sysState", side: "top", wait: 7000, title: "Durum", text: "Uygulamanın parçalarının hazır olup olmadığı: yapay zekâ, tarayıcı, REA ve patent servisi. Kırmızı görünen satır o parçanın kurulu olmadığını söyler." },

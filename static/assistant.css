@@ -1,0 +1,78 @@
+/* Sesli araştırma asistanı (static/assistant.js). Renkler uygulamanın tema değişkenlerinden gelir. */
+.va { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 18px; padding: 18px; margin: 0 0 22px;
+  overflow: hidden; position: relative; }
+.va::before { content: ""; position: absolute; inset: -40% -10% auto auto; width: 60%; height: 120%; pointer-events: none;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--va-a, var(--blue)) 12%, transparent), transparent); }
+.va-main { display: flex; flex-direction: column; min-height: 420px; position: relative; }
+.va-stage { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; padding: 6px 0 4px; }
+.va-orb { width: 210px; height: 210px; display: block; transition: transform .5s var(--ease); }
+.va.va-live .va-orb { width: 170px; height: 170px; }
+.va-id { display: flex; flex-direction: column; gap: 2px; animation: va-rise .6s var(--ease) both .15s; }
+.va-name { font-size: 20px; font-weight: 700; letter-spacing: -.01em; }
+.va-status { color: var(--muted); font-size: 14px; min-height: 20px; }
+.va[data-state="listening"] .va-status { color: var(--accent); }
+.va[data-state="speaking"] .va-status { color: var(--blue); }
+.va-start { margin-top: 10px; gap: 8px; animation: va-rise .6s var(--ease) both .3s; }
+.va-start svg { width: 18px; height: 18px; }
+.va-note { margin: 4px 0 0; font-size: 12px; }
+
+.va-chat { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 10px 2px; max-height: 300px;
+  scroll-behavior: smooth; }
+.va-chat:empty { display: none; }
+.va-msg { max-width: 86%; padding: 9px 13px; border-radius: 16px; font-size: 14px; line-height: 1.5; animation: va-pop .3s var(--ease) both; }
+.va-msg.bot { align-self: flex-start; background: var(--surface-3); border-bottom-left-radius: 5px; }
+.va-msg.user { align-self: flex-end; background: var(--primary); color: var(--on-primary); border-bottom-right-radius: 5px; }
+.va-msg.partial { opacity: .7; }
+.va-msg.old { opacity: .78; }
+.va-new { align-self: center; margin-top: 8px; font-size: 12px; color: var(--muted); background: none; border: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.va-new:hover { color: var(--text); }
+.va-msg.note { align-self: center; max-width: 100%; background: none; color: var(--muted); font-size: 12px; padding: 2px 8px; }
+.va-msg.note.err { color: var(--err); }
+
+.va-bar { display: flex; align-items: center; gap: 6px; margin-top: auto; padding: 6px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--surface); }
+.va-bar .va-text { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-size: 14px; padding: 6px 4px; }
+.va-bar .icon-btn { width: 36px; height: 36px; border-radius: 50%; flex: none; }
+.va-bar .icon-btn svg { width: 18px; height: 18px; }
+.va-send { background: var(--primary); color: var(--on-primary); }
+.va-mic.off { color: var(--err); }
+.va-end { color: var(--err); }
+
+/* Sonuç sütunu sol sütunun boyuna uzar (kendi içeriği satırı büyütmez, taşan kısım kaydırılır). */
+.va-results { border-left: 1px solid var(--line); padding-left: 18px; overflow-y: auto; display: flex;
+  flex-direction: column; gap: 14px; contain: size; min-height: 100%; }
+.va-empty { margin: auto; text-align: center; font-size: 13px; padding: 30px 10px; }
+.va-group { display: flex; flex-direction: column; gap: 8px; animation: va-rise .45s var(--ease) both; }
+.va-res-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.va-res-head b { color: var(--text); font-size: 14px; }
+.va-more { margin-left: auto; font-size: 12px; }
+.va-card { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: var(--surface);
+  animation: va-rise .4s var(--ease) both; animation-delay: calc(var(--i, 0) * 45ms); }
+.va-card h4 { margin: 0; font-size: 14px; line-height: 1.35; display: flex; gap: 8px; align-items: baseline; }
+.va-card h4 a { color: var(--text); }
+.va-card h4 a:hover { color: var(--link); }
+.va-card h4 svg { width: 13px; height: 13px; vertical-align: -1px; }
+.va-meta { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.va-sub { margin: 3px 0 0; font-size: 12px; color: var(--faint); }
+.va-abs { margin: 6px 0 0; font-size: 12.5px; color: var(--text-2); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical; overflow: hidden; }
+.va-web { -webkit-line-clamp: 12; }
+.va-person { display: flex; gap: 10px; align-items: flex-start; }
+.va-av { flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700;
+  background: var(--blue-soft); color: var(--blue); }
+.va-match { margin-left: auto; font-size: 11px; font-weight: 700; color: var(--ok); background: var(--ok-soft); padding: 2px 7px; border-radius: 999px; }
+.va-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.va-chips span { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--surface-3); color: var(--text-2); }
+
+.va-classic { margin-top: 6px; }
+.va-classic > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+
+@keyframes va-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes va-pop { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: none; } }
+@media (max-width: 900px) {
+  .va { grid-template-columns: 1fr; }
+  .va-results { border-left: 0; border-top: 1px solid var(--line); padding: 14px 0 0; contain: none; min-height: 0; max-height: 70vh; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .va-id, .va-start, .va-msg, .va-group, .va-card { animation: none; }
+}

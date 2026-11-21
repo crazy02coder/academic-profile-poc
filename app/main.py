@@ -566,6 +566,67 @@ async def search_settings_test():
     return {**ai_settings.search_public(), "results": {k: redact(v) for k, v in (await search_check()).items()}}
 
 
+class AssistantSettingsIn(BaseModel):
+    name: str | None = None
+    voice: str | None = None
+    tone: str | None = None
+    address: str | None = None
+    extra: str | None = None
+    color: str | None = None
+
+
+@app.get("/api/settings/assistant")
+async def assistant_settings_get():
+    from . import voice_assistant
+    return {**ai_settings.assistant(), "voices": [{"id": k, "label": v[0], "gender": v[1], "style": v[2]}
+                                                  for k, v in voice_assistant.VOICES.items()],
+            "tones": list(voice_assistant.TONES), "colors": list(voice_assistant.COLORS),
+            "ready": bool(ai_settings.resolved("gemini").get("key"))}
+
+
+@app.post("/api/settings/assistant")
+async def assistant_settings_save(body: AssistantSettingsIn):
+    from . import voice_assistant
+    if body.voice is not None and body.voice not in voice_assistant.VOICES:
+        raise HTTPException(422, "Bilinmeyen ses.")
+    if body.tone is not None and body.tone not in voice_assistant.TONES:
+        raise HTTPException(422, "Bilinmeyen ton.")
+    if body.color is not None and body.color not in voice_assistant.COLORS:
+        raise HTTPException(422, "Bilinmeyen renk.")
+    if body.address is not None and body.address not in ("sen", "siz"):
+        raise HTTPException(422, "Hitap 'sen' ya da 'siz' olmalı.")
+    ai_settings.save_assistant(body.model_dump())
+    return await assistant_settings_get()
+
+
+class AssistantPreviewIn(BaseModel):
+    name: str = ""
+    voice: str = "Kore"
+    tone: str = "samimi"
+
+
+@app.post("/api/settings/assistant/preview")
+async def assistant_settings_preview(body: AssistantPreviewIn):
+    """Ayarlar'daki "Sesi dene": seçilen ses ve tonla kısa tanıtım (WAV)."""
+    from . import voice_assistant
+    try:
+        audio = await voice_assistant.preview(body.name[:40], body.voice, body.tone)
+    except PermissionError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Ses örneği alınamadı ({type(exc).__name__}: {str(exc)[:120]}).") from None
+    if len(audio) < 2000:
+        raise HTTPException(502, "Ses örneği boş döndü.")
+    return Response(audio, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
+
+@app.websocket("/ws/assistant")
+async def assistant_ws(websocket: WebSocket, mode: str = "topic"):
+    """Sesli araştırma asistanı (Konu bul / Danışman bul): tarayıcı ↔ Gemini Live köprüsü."""
+    from . import voice_assistant
+    await voice_assistant.serve(websocket, mode, await _llm())
+
+
 @app.get("/api/settings/ai")
 async def ai_settings_get():
     return ai_settings.public()
@@ -872,8 +933,62 @@ async def list_recipes():
     return out
 
 
+def _known_names(st: dict, url: str, limit: int = 12) -> list[str]:
+    """Tarifi doğrulamak için bu sayfada (yoksa bu sitede) daha önce bulunmuş akademisyenlerin adları."""
+    key = recipes.page_key(url)
+    people = list(st["people"].values())
+    here = [p["name"] for p in people if p.get("listing_url") and recipes.page_key(p["listing_url"]) == key]
+    names = here or [p["name"] for p in people]
+    return [x for x in dict.fromkeys(names) if x][:limit]
+
+
+async def _recipe_hits(recipe: dict, names: list[str]) -> int:
+    """Tarifi Scrapling ile tarayıcısız oynatıp kayıtlı adlardan kaçının yanıtta doğru kayıtla geldiğini sayar."""
+    from .discover import _json_hits
+
+    def found(data, name) -> bool:
+        return data is not None and next(_json_hits(data, name), None) is not None
+
+    if not names:
+        return 0
+    if "{name}" in json.dumps(recipe, ensure_ascii=False):  # kişi başına istek (person_lookup)
+        hits = 0
+        for name in names:
+            try:
+                resp = await recipes.replay_static(recipe, name)
+                hits += found(resp.json() if recipe.get("returns") == "json" else None, name)
+            except Exception:  # noqa: BLE001
+                pass
+        return hits
+    try:  # tüm listeyi dönen istek (listing_api): tek istekte hepsi aranır
+        resp = await recipes.replay_static(recipe, names[0])
+        data = resp.json() if recipe.get("returns") == "json" else None
+    except Exception:  # noqa: BLE001
+        return 0
+    return sum(found(data, name) for name in names)
+
+
+def _listing_recipe(cap, names: list[str]) -> dict | None:
+    """REA kaydındaki JSON yanıtlarından kayıtlı adları en çok içereni liste tarifi olarak çıkarır."""
+    from .discover import _json_hits
+
+    best, score = None, 0
+    for tx in cap.api_calls:
+        data = tx.json()
+        if data is None:
+            continue
+        hits = sum(next(_json_hits(data, name), None) is not None for name in names)
+        if hits > score:
+            best, score = tx, hits
+    if best is None:
+        return None
+    return {"purpose": "listing_api", "method": best.method, "url": best.url, "query": [], "form": [], "json": None,
+            "returns": "json", "learned_at": recipes._now(), "evidence_id": cap.evidence_id, "hits": 0, "failures": 0}
+
+
 async def check_changes() -> list[dict]:
-    """Bilinen tüm sayfaları Scrapling ile ucuzca yoklar; yapı değiştiyse REA ile yeniden öğrenir."""
+    """Bilinen tüm sayfaları Scrapling ile ucuzca yoklar; yapı değiştiyse REA ile yeniden öğrenir ve yeni tarifi
+    kayıtlı akademisyenlerle doğrular (bildirim mesajı bu ölçümleri anlatır)."""
     report = []
     for st in recipes.all_stores():
         for key, pg in list(st["pages"].items())[:15]:
@@ -885,12 +1000,25 @@ async def check_changes() -> list[dict]:
                 item.update(chk)
                 if chk.get("drift"):
                     recipes.event(st, "drift", f"{pg['url']}: benzerlik %{chk['similarity']*100:.0f} (periyodik tarama)")
+                    names = _known_names(st, pg["url"])
+                    old = st["replay"].get("person_lookup") or st["replay"].get("listing_api")
+                    if old and names:  # eski tarif hâlâ veri getiriyor mu?
+                        item["old_empty"] = await _recipe_hits(old, names[:3]) == 0
                     if rea.available():
+                        started = time.monotonic()
                         cap = await rea.recon(pg["url"])
                         if cap.ok:
-                            recipes.remember_page(st, pg["url"], skeleton, recipes.api_shape(cap), "", cap.evidence_id)
+                            shape = recipes.api_shape(cap)
+                            recipes.remember_page(st, pg["url"], skeleton, shape, "", cap.evidence_id)
                             recipes.event(st, "relearned", f"{pg['url']} REA ile yeniden haritalandı")
-                            item["relearned"] = True
+                            item.update(relearned=True, via_api=bool(shape), relearn_seconds=round(time.monotonic() - started, 1))
+                            new = _listing_recipe(cap, names) if names else None
+                            if new and (not old or item.get("old_empty")):
+                                st["replay"]["listing_api"] = new
+                                recipes.event(st, "learned", f"{new['method']} {new['url']}", evidence_id=cap.evidence_id)
+                            check = new or old
+                            if check and names:  # yeni tarif kayıtlı akademisyenlerle doğrulanır
+                                item.update(verified=await _recipe_hits(check, names), verified_of=len(names))
                 else:
                     recipes.remember_page(st, pg["url"], skeleton, None)
             except Exception as exc:  # noqa: BLE001
@@ -910,10 +1038,21 @@ async def contracts_list():
 @app.post("/api/contracts/{cid}/check")
 async def contracts_check(cid: str):
     """Kaynaktan tek örnek kayıt alıp yanıt biçimini ve ayrıştırıcının çıktısını denetler."""
-    from . import contracts
+    from . import contracts, notify
     if cid not in contracts.CONTRACTS:
         raise HTTPException(404, "Tarif bulunamadı.")
-    return await contracts.check(cid)
+    result = await contracts.check(cid)
+    asyncio.create_task(notify.contracts_report([result], "elle yapılan", force=True))
+    return result
+
+
+@app.post("/api/contracts/check-all")
+async def contracts_check_all():
+    """Tüm veri tariflerini kontrol eder ve sonucu (ayara göre) WhatsApp'a tek mesajla gönderir."""
+    from . import notify
+    results = await notify.check_all_contracts()
+    sent = await notify.contracts_report(results, "elle yapılan", force=True)
+    return {"results": results, "sent": sent}
 
 
 @app.post("/api/contracts/{cid}/relearn")
@@ -930,7 +1069,86 @@ async def contracts_relearn(cid: str):
 
 @app.post("/api/recipes/check")
 async def recipes_check():
-    return await check_changes()
+    from . import notify
+    report = await check_changes()
+    asyncio.create_task(notify.scan_report(report, force=True))
+    return report
+
+
+class NotifyNumberIn(BaseModel):
+    phone: str
+    name: str = ""
+    title: str = ""
+
+
+class NotifyGroupIn(BaseModel):
+    jid: str
+    name: str = ""
+
+
+class NotifySettingsIn(BaseModel):
+    only_changes: bool | None = None
+    daily: bool | None = None
+    to_self: bool | None = None
+    numbers: list[NotifyNumberIn] | None = None
+    app_url: str | None = None
+    groups: list[NotifyGroupIn] | None = None
+
+
+@app.get("/api/settings/notify")
+async def notify_settings_get():
+    from . import notify
+    return notify.public()
+
+
+@app.post("/api/settings/notify")
+async def notify_settings_save(body: NotifySettingsIn):
+    from . import notify
+    for item in body.numbers or []:
+        if len(notify.normalize_phone(item.phone)) < 11:
+            raise HTTPException(422, f"Numara geçersiz: {item.phone} (ör. 0532 123 45 67).")
+    try:
+        return notify.save(body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+@app.get("/api/whatsapp/groups")
+async def whatsapp_groups():
+    from . import whatsapp
+    try:
+        return await whatsapp.groups()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(409, str(exc) if isinstance(exc, RuntimeError) else f"Gruplar okunamadı ({type(exc).__name__}).") from None
+
+
+@app.get("/api/whatsapp/status")
+async def whatsapp_status():
+    from . import whatsapp
+    return whatsapp.status()
+
+
+@app.post("/api/whatsapp/connect")
+async def whatsapp_connect():
+    """WhatsApp'a bağlı cihaz olarak bağlanır; oturum yoksa QR üretir (durum /api/whatsapp/status ile izlenir)."""
+    from . import whatsapp
+    return await whatsapp.connect()
+
+
+@app.post("/api/whatsapp/logout")
+async def whatsapp_logout():
+    from . import whatsapp
+    return await whatsapp.logout()
+
+
+@app.post("/api/settings/notify/test")
+async def notify_settings_test():
+    from . import notify
+    try:
+        result = await notify.send(notify.latest_status())
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, str(exc) if isinstance(exc, RuntimeError) else f"Mesaj gönderilemedi ({type(exc).__name__}).") from None
+    return {"ok": True, **result}
 
 
 @app.get("/api/wos/verification")
@@ -952,6 +1170,8 @@ async def _close_browsers():
 
     await wos_verification.close()
     await unit_publications.close()
+    from . import whatsapp
+    await whatsapp.shutdown()
     tasks = list(_UNIT_PERSON_TASKS.values())
     for task in tasks:
         task.cancel()
@@ -975,6 +1195,15 @@ async def _remote_data():
 
 
 @app.on_event("startup")
+async def _daily_notify():
+    """Günlük veri tarifi kontrolü (Ayarlar → Bildirimler → Günde bir kez kontrol et)."""
+    from . import notify, whatsapp
+    asyncio.create_task(notify.daily_loop())
+    if whatsapp.paired() and whatsapp.available():
+        asyncio.create_task(whatsapp.connect())  # daha önce QR okutulduysa kendiliğinden bağlan
+
+
+@app.on_event("startup")
 async def _watcher():
     minutes = float(os.getenv("WATCH_INTERVAL_MIN", "0"))
     if minutes <= 0:
@@ -984,7 +1213,8 @@ async def _watcher():
         while True:
             await asyncio.sleep(minutes * 60)
             try:
-                await check_changes()
+                from . import notify
+                await notify.scan_report(await check_changes(), source="otomatik")
             except Exception:  # noqa: BLE001
                 pass
 
