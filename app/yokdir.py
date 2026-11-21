@@ -178,6 +178,25 @@ def match_university(unis: list[dict], names: list[str]) -> dict | None:
     return best if score >= 0.75 else None
 
 
+def place(row: dict) -> tuple[str, str]:
+    """(fakülte, bölüm). YÖK eskiden bunları fakulteAd / bolumAd alanlarında veriyordu; Kasım 2026'dan beri liste
+    satırlarında yalnız kadroYeri var: "ÜNİVERSİTE/FAKÜLTE/BÖLÜM/ANABİLİM DALI/". Eski alanlar varsa onlar kullanılır."""
+    faculty, department = clean(row.get("fakulteAd") or ""), clean(row.get("bolumAd") or "")
+    if faculty and department:
+        return faculty, department
+    # Ayarlar → Veri tarifleri'nde öğrenilmiş eşleme varsa (yanıt biçimi yine değiştiyse) o kullanılır.
+    from . import contracts
+    faculty = faculty or contracts.mapped("yok.staff", "faculty", row)
+    department = department or contracts.mapped("yok.staff", "department", row)
+    if faculty and department:
+        return faculty, department
+    parts = [clean(x) for x in str(row.get("kadroYeri") or "").split("/") if clean(x)]
+    # İlk parça üniversitedir; rektörlüğe bağlı birimlerde fakülte parçası olmayabilir.
+    if parts and "ÜNİVERSİTE" in parts[0].upper().replace("I", "İ") or parts and fold(parts[0]) == fold(row.get("universiteAd") or ""):
+        parts = parts[1:]
+    return faculty or (parts[0] if parts else ""), department or (parts[1] if len(parts) > 1 else "")
+
+
 def _person(row: dict) -> dict:
     guid = row.get("authorGuidId") or ""
     title_raw = clean(row.get("kadroUnvanAdi") or "")
@@ -185,7 +204,7 @@ def _person(row: dict) -> dict:
     return {
         "name": tr_title(clean(row.get("personelAdiSoyadi") or "")),
         "title": YOK_TITLES.get(title_raw, tr_title(title_raw)), "university": clean(row.get("universiteAd") or ""),
-        "faculty": clean(row.get("fakulteAd") or ""), "department": clean(row.get("bolumAd") or ""),
+        "faculty": place(row)[0], "department": place(row)[1],
         "orcid": row.get("orcid") or "", "email": "", "url": f"{BASE}/academician-details?authorGuidId={guid}" if guid else "",
         "yok_id": guid, "photo": "", "source": "yok", "field": clean(row.get("bilimAlanAd") or ""),
         "area": clean(row.get("temelAlanAd") or ""), "keywords": [k for k in keywords if k],
@@ -242,7 +261,7 @@ async def faculty_rows(client, uni: dict, faculty_name: str) -> list[dict] | Non
     async with _BULK:
         first = await api(client, "/akademisyen/list", page=1, length=PAGE, **scope, **ACTIVE)
         batch = (first or {}).get("data") or []
-        faculties = {clean(r.get("fakulteAd") or "") for r in batch} - {""}
+        faculties = {place(r)[0] for r in batch} - {""}
         if batch and any(_jaccard(want, _unit_tokens(f)) < 0.6 for f in faculties):
             _save("_faculty_filter", False)  # süzgeç yok sayılıyor: tüm üniversite geliyor
             return None
@@ -272,6 +291,8 @@ async def faculty_staff(uni_names: list[str], faculty_name: str) -> dict | None:
                 return None
             pkey = people_key(uni["name"], faculty_name)
             people = _load(pkey, STAFF_TTL)
+            if people and not any(p.get("faculty") or p.get("department") for p in people):
+                people = None  # YÖK alan adlarını değiştirdiği dönemde bölümsüz kaydedilmiş kadro: yeniden alınır
             if people is None:
                 stale = False
                 try:
@@ -562,7 +583,7 @@ async def department_staff(uid: str, faculty_raw: str, department: str, urgent: 
                 d = await api(client, "/akademisyen/list", page=page, length=PAGE, **scope, **ACTIVE)
                 batch = (d or {}).get("data") or []
                 if page == 1 and batch:
-                    deps = {clean(r.get("bolumAd") or "") for r in batch} - {""}
+                    deps = {place(r)[1] for r in batch} - {""}
                     if any(_jaccard(want, _unit_tokens(x)) < 0.6 for x in deps):
                         _save("_department_filter", False)  # süzgeç yok sayılıyor: başka bölümler de geliyor
                         return None

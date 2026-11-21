@@ -3278,9 +3278,9 @@ async def _with_web(uid: str, section: str, faculty: str, department: str, out: 
         if out["web"]:
             changed["web"] = out["web"]
     # Harita yoksa ya da eski biçimdeyse (toplu taşıma hatları eklenmeden kaydedilmiş) yeniden alınır.
-    if section == "campus" and ("map" not in out or (out["map"] and out["map"].get("v") != 5)):
+    from . import campus_map
+    if section == "campus" and ("map" not in out or (out["map"] and out["map"].get("v") != campus_map.VERSION)):
         try:
-            from . import campus_map
             out["map"] = await asyncio.wait_for(campus_map.around(uid), 75)
         except Exception:  # noqa: BLE001 — harita yardımcıdır
             out["map"] = None

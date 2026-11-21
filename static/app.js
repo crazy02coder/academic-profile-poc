@@ -90,7 +90,11 @@ function reg(paper, source) { const id = `r${++regSeq}`; S.registry.set(id, { pa
 
 const view = () => $("#view");
 function setView(html, cls = "") {
-  S.registry.clear();
+  // Yeni sayfanın kartları, bu fonksiyon çağrılmadan önce (şablon kurulurken) kayda alınır: kayıt körlemesine
+  // silinirse o kartlara tıklamak işe yaramaz (Kütüphanem'deki makaleler açılmıyordu). Yalnız yeni sayfada geçmeyen
+  // eski kayıtlar atılır.
+  const used = new Set([...String(html).matchAll(/="(r\d+)"/g)].map((m) => m[1]));
+  for (const key of [...S.registry.keys()]) if (!used.has(key)) S.registry.delete(key);
   S.staffRegistry.clear();
   const v = view();
   v.innerHTML = `<div class="enter ${cls}">${html}</div>`;
@@ -2654,22 +2658,47 @@ function drawStudentChat(d) {
       const source = sources.find((item) => item.id === id);
       return source ? `<a href="${esc(safeUrl(source.url))}" target="_blank" rel="noopener" title="${esc(source.title)}">${label}</a>` : label;
     });
-    return `<article class="student-chat-message ${message.role === "user" ? "user" : "assistant"}"><div class="student-chat-bubble"><p>${content}</p>${sources.length ? `<div class="student-chat-sources">${sources.map((source) => `<a href="${esc(safeUrl(source.url))}" target="_blank" rel="noopener">${icon("external")}<span>[${source.id}] ${esc(source.title || "Resmî kaynak")}</span></a>`).join("")}</div>` : ""}</div></article>`;
+    return `<article class="student-chat-message ${message.role === "user" ? "user" : "assistant"} pop"><div class="student-chat-bubble"><p>${content}</p>${sources.length ? `<div class="student-chat-sources">${sources.map((source) => `<a href="${esc(safeUrl(source.url))}" target="_blank" rel="noopener">${icon("external")}<span>[${source.id}] ${esc(source.title || "Resmî kaynak")}</span></a>`).join("")}</div>` : ""}</div></article>`;
   }).join(""));
   thread._messages = chat.messages.slice();
-  thread.hidden = !chat.messages.length;
+  // Model yanıtlarken: sohbetin sonunda "düşünüyor" balonu (zıplayan noktalar + sırayla değişen durum yazısı).
+  $(".student-chat-thinking", thread)?.remove();
+  clearInterval(thread._thinkTimer);
+  if (pending) {
+    const steps = ["Düşünüyor", "Verilere bakıyor", "Yanıtı yazıyor"];
+    thread.insertAdjacentHTML("beforeend", `<article class="student-chat-message assistant student-chat-thinking pop"><div class="student-chat-bubble"><span class="think-dots"><i></i><i></i><i></i></span><em>${steps[0]}…</em></div></article>`);
+    let k = 0;
+    thread._thinkTimer = setInterval(() => { const el = $(".student-chat-thinking em", thread); if (!el) { clearInterval(thread._thinkTimer); return; } k = Math.min(k + 1, steps.length - 1); el.textContent = `${steps[k]}…`; }, 1400);
+  } else if (firstNew < chat.messages.length && chat.messages.at(-1)?.role === "assistant" && !calmMotion()) {
+    // Yeni yanıt: metin daktilo gibi yazılır (kaynak bağlantıları yazım bitince görünür).
+    const para = $(".student-chat-message.assistant:last-child .student-chat-bubble p", thread);
+    if (para) {
+      const full = para.innerHTML, words = full.split(/(\s+)/);
+      const srcBox = para.parentElement.querySelector(".student-chat-sources"); if (srcBox) srcBox.style.opacity = "0";
+      let n = 0; para.innerHTML = "";
+      const step = Math.max(1, Math.ceil(words.length / 90));
+      const tick = () => {
+        if (!para.isConnected) return;
+        n = Math.min(words.length, n + step); para.innerHTML = words.slice(0, n).join("");
+        thread.scrollTop = thread.scrollHeight;
+        if (n < words.length) setTimeout(tick, 16); else { para.innerHTML = full; if (srcBox) { srcBox.style.transition = "opacity .3s"; srcBox.style.opacity = "1"; } }
+      };
+      tick();
+    }
+  }
+  thread.hidden = !chat.messages.length && !pending;
   host.setAttribute("aria-busy", String(pending));
   thread.setAttribute("aria-busy", String(pending));
   $(".student-chat-suggestions", host).hidden = chat.messages.length > 0;
   $$("[data-student-question]", host).forEach((button) => { button.disabled = pending; });
   $("[data-student-chat-submit]", host).disabled = pending;
   $(".student-chat-form", host).setAttribute("aria-busy", String(pending));
-  $(".student-assistant-status", host).innerHTML = pending ? '<span class="spinner" aria-hidden="true"></span>Kaynaklar inceleniyor, yanıt hazırlanıyor…' : chat.error ? `<span class="student-chat-notice">${esc(chat.error)}</span>` : "";
+  $(".student-assistant-status", host).innerHTML = pending ? "" : chat.error ? `<span class="student-chat-notice">${esc(chat.error)}</span>` : "";
   const scope = $("[data-student-chat-scope]", host), department = d.studentChatScope?.department;
   scope.hidden = !department;
   scope.innerHTML = department ? `<span>${esc(department)}</span><button class="icon-btn" type="button" data-student-chat-general aria-label="Üniversite geneline dön" title="Üniversite geneline dön">${icon("x")}</button>` : "";
   if (department) $("[data-student-chat-general]", scope).onclick = () => { d.studentChatScope = null; drawStudentChat(d); };
-  if (changed && (nearEnd || chat.messages.at(-1)?.role === "user")) thread.scrollTop = thread.scrollHeight;
+  if (pending || (changed && (nearEnd || chat.messages.at(-1)?.role === "user"))) thread.scrollTop = thread.scrollHeight;
 }
 function bindStudentChat(d) {
   const host = $("[data-student-chat]"), form = $(".student-chat-form", host), input = $("textarea", form);
@@ -2947,7 +2976,7 @@ function studentSectionResult(data, section) {
     ${studentUnitHtml(data.unit)}
     ${data.program_note ? `<div class="notice"><div>${esc(data.program_note)}</div></div>` : ""}
     ${data.errors?.length && !data.partial ? `<div class="notice warn"><div>${data.errors.map(esc).join(" ")}</div></div>` : ""}
-    ${section === "campus" ? campusMapHtml(data.map) : ""}${briefHtml}${webHtml}
+    ${section === "campus" ? campusMapHtml(data.map?.groups?.length ? data.map : (S.uni?.campusMap || data.map)) : ""}${briefHtml}${webHtml}
     ${hasItems ? (web.length ? `<details class="student-links sv-more sv-extracted"><summary>Sayfalardan çıkarılan ayrıntılar (${fmtNum(group.items.length)})</summary>${studentItems(group, section)}</details>` : studentItems(group, section)) : ""}${empty}
     ${links.length && group.format !== "course_catalog" ? `<div class="sv-group"><div class="sv-group-head"><b>${hasItems ? "İlgili resmî sayfalar" : "Resmî sayfalarda bulunanlar"}</b><span>${links.length} sayfa</span></div>
       <div class="sv-previews">${links.slice(0, hasItems ? 4 : 8).map(linkPreviewCard).join("")}</div>
@@ -3283,6 +3312,12 @@ async function loadStudentSection(details, d, refresh = false) {
   }
   if (d.studentResults.has(key)) draw(d.studentResults.get(key));
   else box.innerHTML = studentSkeleton(section);  // sonucun iskeleti hemen; veri geldikçe dolar
+  if (section === "campus") {
+    // Harita, sayfa taramasını beklemeden hemen gelir (ayrı ve hızlı istek); tarama bitince sonuçlar altına eklenir.
+    const early = (m) => { if (!m || S.uni !== d || !box.isConnected || $(".campus-view", box)) return; box.insertAdjacentHTML("beforeend", `<div data-campus-early>${campusMapHtml(m)}</div>`); $(".sk-cards", box)?.remove(); hydrateIcons(box); };
+    if (d.campusMap) early(d.campusMap);
+    else api(`/api/universities/${encodeURIComponent(d.id)}/campus-map`, { quiet: true }).then((m) => { d.campusMap = m; early(m); }).catch(() => {});
+  }
   $("[data-student-refresh]", box)?.setAttribute("disabled", "");
   if (!$(".student-loading", box)) box.insertAdjacentHTML("afterbegin", `<div class="loading-line student-loading" role="status"><span class="spinner"></span>${esc(department || STUDENT_SECTIONS.find(([id]) => id === section)?.[1] || "Seçilen bilgiler")} alınıyor…</div>`);
   d.studentClicks = (d.studentClicks || 0) + 1;  // arka plan hazırlığı bu sürerken bekler
@@ -3724,6 +3759,20 @@ async function renderCandidateView() {
 
 // Ekstra bilgi: YÖK'teki temel alan / bilim alanı / anahtar kelimeler, dizin kimlikleri (Scopus, ResearcherID, ORCID),
 // BM Sürdürülebilir Kalkınma Amaçları (OpenAlex yayın sınıflaması) ve ödüller (YÖK).
+// Kurum sayfası: kişinin üniversite sitesindeki sayfası, oradaki unvanı ve fotoğrafın kaynağı. Bilgi "Yenile → Kurum
+// sayfası" ile gelir (kişi, bölümünün kadro listesinde ad eşleşmesiyle bulunur).
+function siteInfoHtml(p) {
+  const site = p.site || {}, url = safeUrl(site.url || p.source_url || p.links?.institution);
+  const row = (label, value) => value ? `<div class="pm-row"><small>${label}</small><span>${value}</span></div>` : "";
+  const link = (u, text) => safeUrl(u) ? `<a href="${esc(safeUrl(u))}" target="_blank" rel="noopener">${esc(text)} ${icon("external")}</a>` : "";
+  const body = url || site.unit_url ? `<div class="site-info">
+      <div class="pm-table">${row("Profil sayfası", link(url, hostPath(url || "")))}${row("Sayfadaki unvan", esc(site.title || ""))}${row("Birim", esc([tTitle(site.faculty || ""), tTitle(site.department || "")].filter(Boolean).join(" · ")))}
+        ${row("Araştırma alanları", (site.interests || []).length ? `<span class="chips">${site.interests.map((x) => `<span class="chip">${esc(x)}</span>`).join("")}</span>` : "")}${row("Ofis", esc(site.office || ""))}
+        ${row("Birim sayfası", link(site.unit_url, hostPath(safeUrl(site.unit_url) || "")))}
+        ${row("Son kontrol", site.checked_at ? new Date(site.checked_at * 1000).toLocaleDateString("tr-TR") : "")}</div></div>`
+    : `<p class="faint">Bu profil için kurum sayfası bilgisi henüz alınmadı. <b>Yenile</b> penceresinde <b>Kurum sayfası</b>'nı seçince kişi bölümünün kadro listesinde aranır; profil sayfası ve fotoğrafı buraya gelir.</p>`;
+  return `<section class="card card-pad" style="margin-top:18px"><h3>Kurum sayfası</h3>${body}<p class="faint">Kaynak: üniversitenin kendi sitesi</p></section>`;
+}
 function extraYokHtml(y, sec, pubs) {
   const awards = sec.awards || [];
   return `<div class="extra-info-grid" style="margin-top:18px">
@@ -4300,7 +4349,9 @@ function renderProfile(r, chat) {
     <div class="panel active" data-panel="pubs">
       <div class="publication-actions"><div class="pub-scan-state" id="profileWosState" role="status"></div>${sourcePicker("profileSourcesPicker", PROFILE_SOURCES, r.refresh_preferences?.sources, true)}</div><div id="profilePublications"></div></div>
 
-    <div class="panel" data-panel="interests"><div class="extra-info-grid"><section class="card card-pad"><h3>Dergi çeyreği</h3><p class="extra-info-value" id="profileQuartiles">${quartileDistribution(r, qCounts)}</p><p class="faint">SJR sınıflaması, yayın yılına göre derginin en iyi alanı.</p></section><section class="card card-pad"><h3>Kaynak dağılımı</h3><p class="extra-info-value" id="profileSources">${esc(sourceDistribution(r))}</p></section></div><div class="extra-info-grid" id="yokStatsBox" style="margin-top:18px"></div>${extraYokHtml(y, sec, r.publications || [])}</div>
+    <div class="panel" data-panel="interests">${(p.site?.bio || p.bio) ? `<div class="card card-pad" style="margin-bottom:18px"><div class="card-title">${icon("user")}Özgeçmiş<span class="spacer"></span>${safeUrl(p.site?.url) ? `<a class="source-link" href="${esc(safeUrl(p.site.url))}" target="_blank" rel="noopener">${icon("external")}Kurum sayfası</a>` : ""}</div>
+        ${String(p.site?.bio || p.bio).split(/(?<=[.!?])\s+(?=Araştırma alanları|Research interests)/i).map((part) => `<p class="bio-text">${esc(part)}</p>`).join("")}
+        ${(p.site?.interests || []).length ? `<div class="chips" style="margin-top:10px">${p.site.interests.map((x) => `<span class="chip">${esc(x)}</span>`).join("")}</div>` : ""}${p.site?.office ? `<p class="faint" style="margin:10px 0 0">Ofis: ${esc(p.site.office)}</p>` : ""}</div>` : ""}<div class="extra-info-grid"><section class="card card-pad"><h3>Dergi çeyreği</h3><p class="extra-info-value" id="profileQuartiles">${quartileDistribution(r, qCounts)}</p><p class="faint">SJR sınıflaması, yayın yılına göre derginin en iyi alanı.</p></section><section class="card card-pad"><h3>Kaynak dağılımı</h3><p class="extra-info-value" id="profileSources">${esc(sourceDistribution(r))}</p></section></div><div class="extra-info-grid" id="yokStatsBox" style="margin-top:18px"></div>${extraYokHtml(y, sec, r.publications || [])}${siteInfoHtml(p)}</div>
     <div class="panel" data-panel="career"><div class="grid-2">
       <div class="card card-pad"><div class="card-title">${icon("briefcase")}Akademik görevler</div>${timeline(y.career)}</div>
       <div class="card card-pad"><div class="card-title">${icon("cap")}Öğrenim</div>${timeline(y.education, "teal")}</div>
@@ -5147,7 +5198,7 @@ async function viewLibrary(tab = "papers") {
   setView(`<div class="section-head"><div><span class="eyebrow">KİŞİSEL ARAŞTIRMA ALANIN</span><h1>Kütüphanem</h1><p>Yayınların, akademisyenlerin, üniversitelerin ve firmaların bir arada.</p></div><div class="actions">${papers.length ? exportButtons("fav") : ""}</div></div>
     <div class="tabs library-tabs" role="tablist">${tabs.map(([id, label, ic]) => `<button class="tab ${tab === id ? "active" : ""}" data-tab="${id}" type="button">${icon(ic)}${label}<span class="n">${(S.fav[id] || []).length}</span></button>`).join("")}</div>
     <div class="panel ${tab === "papers" ? "active" : ""}" data-panel="papers"><div class="card">${papers.length ? `<div class="stagger">${papers.map((p, i) => paperCard(p, p.job_id && p.pid ? { jid: p.job_id, pid: p.pid, person: p.person } : {}, i)).join("")}</div>` : emptyState("bookmark", "İlk yayınını kaydet", "Yayınların yanındaki yıldızla araştırma kütüphaneni oluştur.", '<a class="btn sm" href="#/ara">Yayın keşfet →</a>')}</div></div>
-    <div class="panel ${tab === "people" ? "active" : ""}" data-panel="people">${people.length ? `<div class="collabs stagger">${people.map((p, i) => `<div class="collab" style="--i:${i}">${avatar(p.name, p.photo)}<div class="c-main"><div class="c-title">${esc(p.title || "")}</div><b><a href="#/profil/${esc(p.chat_id || "")}">${esc(p.name)}</a></b><span>${esc(p.institution || "")}</span><span class="faint">${esc(p.department || "")}</span><div class="chips" style="margin-top:8px"><span class="chip">${fmtNum(p.papers)} yayın</span><button class="chip" data-unfav="${esc(p.key)}" type="button">${icon("x")}Çıkar</button></div></div></div>`).join("")}</div>` : `<div class="card">${emptyState("users", "Takip ettiğin akademisyenler", "Profil sayfasındaki “Favorilere ekle” düğmesiyle buraya kaydet.")}</div>`}</div>
+    <div class="panel ${tab === "people" ? "active" : ""}" data-panel="people">${people.length ? `<div class="collabs stagger">${people.map((p, i) => `<div class="collab" style="--i:${i}">${avatar(p.name, p.photo || (() => { const c = (p.chat_id && S.chats.find((x) => x.id === p.chat_id)) || chatByName(p.name); return c ? profilePhoto(c) : ""; })())}<div class="c-main"><div class="c-title">${esc(p.title || "")}</div><b><a href="#/profil/${esc(p.chat_id || "")}">${esc(p.name)}</a></b><span>${esc(p.institution || "")}</span><span class="faint">${esc(p.department || "")}</span><div class="chips" style="margin-top:8px"><span class="chip">${fmtNum(p.papers)} yayın</span><button class="chip" data-unfav="${esc(p.key)}" type="button">${icon("x")}Çıkar</button></div></div></div>`).join("")}</div>` : `<div class="card">${emptyState("users", "Takip ettiğin akademisyenler", "Profil sayfasındaki “Favorilere ekle” düğmesiyle buraya kaydet.")}</div>`}</div>
     <div class="panel ${tab === "universities" ? "active" : ""}" data-panel="universities">${institutions("universities")}</div>
     <div class="panel ${tab === "firms" ? "active" : ""}" data-panel="firms">${institutions("firms")}</div>`);
 }
@@ -5165,24 +5216,58 @@ async function viewSystem() {
       <div class="settings-label">Puan hesaplama</div>
       <div class="card card-pad" id="scoreCard">${skeleton(3)}</div>
       <div class="settings-label">Sistem</div>
-      <div class="settings-two"><div class="card card-pad"><div class="card-title">${icon("info")}Durum</div><div id="sysState">${skeleton(3)}</div></div>
-        <div class="card card-pad"><div class="card-title">${icon("settings")}Site tarifleri</div>
-          <p class="muted" style="margin:0 0 14px">REA sitelerin arka plandaki isteklerini öğrenir; site değişince yeniden öğrenir.</p>
-          <div class="actions"><button class="btn sm" type="button" data-recipes>Öğrenilen tarifler</button><button class="btn sm" type="button" data-scan>Değişiklikleri tara</button></div></div></div>
+      <div class="card card-pad"><div class="card-title">${icon("settings")}Site ve veri tarifleri</div>
+          <div class="recipe-block"><b>Site tarifleri (REA)</b><p class="muted">REA sitelerin arka plandaki isteklerini öğrenir; sayfa yapısı değişince yeniden öğrenir.</p>
+            <div class="actions"><button class="btn sm" type="button" data-recipes>Öğrenilen tarifler</button><button class="btn sm" type="button" data-scan>Değişiklikleri tara</button></div></div>
+          <div class="recipe-block"><b>Veri tarifleri</b><p class="muted">Doğrudan okunan kaynaklar: YÖK Akademik, YÖK Atlas ve YÖK İstatistik. "Kontrol et" kaynaktan örnek kayıt alır; yanıtın biçimi değiştiyse burada görünür.</p>
+            <div id="contractList" class="contract-grid">${skeleton(2)}</div></div></div>
     </div>`);
   aiSettingsCard();
   speedSettingsCard();
   searchSettingsCard();
   scoreSettingsCard();
-  let h = null;
-  try { h = await api("/api/health"); } catch { /* aşağıda gösterilir */ }
-  const box = $("#sysState");
-  if (!box) return;
-  const row = (name, ok, text) => `<div class="sys-row"><span class="dot ${ok ? "ok" : "warn"}"></span><b>${esc(name)}</b><span class="muted">${esc(text)}</span></div>`;
-  box.innerHTML = h ? [row("Yapay zekâ", h.llm_ready, h.llm), row("REA", h.rea, h.rea ? "Hazır" : "Kurulu değil"), row("Tarayıcı", h.chromium, h.chromium ? "Hazır" : "Kurulu değil"),
-    row("Patentler (EPO)", h.patents, h.patents ? "Anahtar tanımlı" : "Anahtar yok; patent sekmeleri kapalı")].join("") : `<p class="muted">Sunucuya ulaşılamadı.</p>`;
+  contractsCard();
 }
 
+// Veri tarifleri: doğrudan API ile okunan kaynakların yanıt biçimi denetimi. "Kontrol et" kaynaktan tek örnek kayıt alır;
+// "Tarifi güncelle" boş kalan alanlar için yeni eşlemeyi öğrenir.
+async function contractsCard() {
+  const host = $("#contractList"); if (!host) return;
+  let rows = [];
+  try { rows = await api("/api/contracts", { quiet: true }); } catch { host.innerHTML = `<p class="faint">Veri tarifleri okunamadı.</p>`; return; }
+  const STATUS = { ok: ["ok", "Çalışıyor"], changed: ["warn", "Alanlar değişti, veri okunuyor"], broken: ["bad", "Bozuk: bazı alanlar boş geliyor"], unknown: ["idle", "Henüz kontrol edilmedi"] };
+  const when = (t) => t ? new Date(t * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+  const rowHtml = (r, extra = "") => {
+    const [cls, text] = STATUS[r.status] || STATUS.unknown, names = r.outputs || {};
+    const detail = [r.error && `<span class="ct-bad">${esc(r.error)}</span>`,
+      r.empty?.length && `<span class="ct-bad">Boş gelen: ${esc(r.empty.map((k) => names[k] || k).join(", "))}</span>`,
+      r.status === "broken" && !r.learnable && `Bu kaynakta eşleme kendiliğinden öğrenilemiyor; ayrıştırıcının güncellenmesi gerekir.`,
+      r.blank?.length && `Bu örnekte boş (kişiye göre boş olabilir, sorun değil): ${esc(r.blank.map((k) => names[k] || k).join(", "))}`,
+      r.removed?.length && `Kalkan alanlar: <code>${esc(r.removed.slice(0, 8).join(", "))}</code>`,
+      r.added?.length && `Yeni alanlar: <code>${esc(r.added.slice(0, 8).join(", "))}</code>`,
+      r.learned?.length && `<span class="ct-ok">Öğrenilen: ${esc(r.learned.map((k) => names[k] || k).join(", "))}</span>`,
+      Object.keys(r.map || {}).length && `Kayıtlı eşleme: ${Object.entries(r.map).map(([k, m]) => `${esc(names[k] || k)} ← <code>${esc(m.field)}${m.split ? ` (${esc(m.split)} ile ${m.index + 1}. parça)` : ""}</code>`).join(" · ")}`,
+      r.parsed && `Örnek: ${Object.entries(r.parsed).filter(([, v]) => v).slice(0, 5).map(([k, v]) => `${esc(names[k] || k)}: <b>${esc(v)}</b>`).join(" · ")}`].filter(Boolean);
+    return `<div class="contract-row" data-contract="${esc(r.id)}"><span class="ct-dot ${cls}"></span><div class="ct-main"><b>${esc(r.label)}</b><small>${esc(text)}${r.checked_at ? ` · son kontrol ${esc(when(r.checked_at))}` : ""}</small>
+        ${detail.length ? `<div class="ct-detail">${detail.map((d) => `<div>${d}</div>`).join("")}</div>` : ""}${extra}</div>
+      <div class="ct-actions"><button class="btn sm" type="button" data-ct-check>${icon("refresh")}Kontrol et</button>${(r.status === "broken" || r.status === "changed") && r.learnable ? `<button class="btn sm primary" type="button" data-ct-relearn>${icon("sparkle")}Tarifi güncelle</button>` : ""}</div></div>`;
+  };
+  const draw = () => { host.innerHTML = rows.map((r) => rowHtml(r)).join("") || `<p class="faint">Tanımlı veri tarifi yok.</p>`; hydrateIcons(host); bind(); };
+  const run = async (id, action) => {
+    const el = $(`[data-contract="${id}"]`, host), i = rows.findIndex((r) => r.id === id);
+    $$("button", el).forEach((b) => { b.disabled = true; });
+    $(".ct-main small", el).textContent = action === "check" ? "Kaynaktan örnek kayıt alınıyor…" : "Yeni eşleme öğreniliyor…";
+    try { rows[i] = { ...rows[i], learned: [], error: "", ...(await post(`/api/contracts/${encodeURIComponent(id)}/${action}`, {})) }; }
+    catch (e) { rows[i] = { ...rows[i], error: e.message || "İstek başarısız" }; }
+    draw();
+  };
+  const bind = () => $$("[data-contract]", host).forEach((el) => {
+    $("[data-ct-check]", el).onclick = () => run(el.dataset.contract, "check");
+    if (el.dataset.contract === "yok.istatistik") $("[data-ct-check]", el).title = "Rapor penceresini açıp ilk sayfayı okur (yaklaşık 6 istek, 8-10 sn)";
+    const re = $("[data-ct-relearn]", el); if (re) re.onclick = () => run(el.dataset.contract, "relearn");
+  });
+  draw();
+}
 // Doçentlik ve akademik teşvik puan tablosu (app/criteria/akademik_puan.json): yalnız sayılar düzenlenir.
 const SCORE_KEYS = { toplam_asgari: "Toplam asgari puan", doktora_sonrasi_asgari: "Doktora sonrası asgari", asgari: "Asgari", tavan: "Tavan", atif_basina: "Atıf başına puan",
   ders_basina: "Ders başına puan", doktora: "Doktora tezi", yuksek_lisans: "Yüksek lisans tezi", q1: "Q1", q2: "Q2", q3: "Q3", q4: "Q4", sci_noq: "SCI · çeyrek bilinmiyor", sci: "SCI/SSCI/AHCI",
@@ -5242,9 +5327,9 @@ async function searchSettingsCard() {
       <form class="ai-form" id="searchForm" autocomplete="off">
         <div class="field"><label for="serperKey">Serper.dev anahtarı</label><div class="input"><input id="serperKey" type="password" autocomplete="new-password" placeholder="${cfg.serper ? "Kayıtlı; değiştirmek için yazın" : "Anahtarı yapıştırın"}"></div></div>
       </form>
-      <div class="actions"><button class="btn primary sm" type="button" data-search-save>Kaydet</button>
-        <button class="btn sm" type="button" data-search-test>Dene</button>
-        ${cfg.serper ? `<button class="btn sm" type="button" data-search-clear>Anahtarı sil</button>` : ""}</div>
+      <div class="actions key-actions"><button class="btn primary sm" type="button" data-search-save>Kaydet</button>
+        <button class="btn sm" type="button" data-search-test>${icon("search")}Bağlantıyı dene</button>
+        ${cfg.serper ? `<span class="spacer"></span><button class="btn sm danger" type="button" data-search-clear>${icon("trash")}Anahtarı sil</button>` : ""}</div>
       <p class="muted ai-note" data-search-status role="status">${esc(message)}</p>
       <p class="faint ai-note">Anahtarlar yalnızca bu bilgisayarda saklanır. Arama sorguları (kurum alan adı ve bölüm adı) seçilen servise gönderilir.</p>`;
     hydrateIcons(card);
@@ -6032,22 +6117,18 @@ function renderAiView() {
   const host = $("#aiView"), d = S.uni;
   if (!host || !d || host.dataset.ready) return;
   host.dataset.ready = "1";
-  const topics = [["cap", "Programlar ve dersler", ["Hangi lisans programları var?", "Bilgisayar Mühendisliği'nde ilk yıl hangi dersler var?", "Yüksek lisans programları neler?"]],
-    ["bookmark", "Ücret ve burslar", ["Ücret ve burs bilgileri neler?", "Başarı bursu koşulları neler?"]],
-    ["globe", "Değişim programları", ["Erasmus hakkında bilgi verir misin?", "Hangi ülkelerle anlaşma var?"]],
-    ["building", "Kampüs ve yaşam", ["Kampüse nasıl ulaşılır?", "Yurt imkânları neler?"]]];
-  host.innerHTML = `<div class="ai-view"><aside class="ai-side"><div class="ai-view-intro"><span class="ai-orb">${icon("sparkle")}</span><div><h2>${esc(d.data.name)} hakkında sor</h2><p>Yanıtlar üniversitenin resmî sayfalarından ve toplanan verilerden, kaynaklarıyla gelir.</p></div></div>
-      <div class="ai-topics">${topics.map(([ic, title, qs]) => `<section class="ai-topic"><h4>${icon(ic)}${esc(title)}</h4>${qs.map((q) => `<button type="button" data-ai-ask="${esc(q)}">${esc(q)}${icon("chevron")}</button>`).join("")}</section>`).join("")}</div></aside>
-    <div class="ai-main">${studentAssistantHtml(d)}</div></div>`;
+  host.innerHTML = `<div class="ai-view wide">${studentAssistantHtml(d)}</div>`;
+  // Öneriler: sohbet boşken ortada, konusuna göre ikonlu kartlar; karta basınca soru gönderilir.
+  const ideas = [["cap", "Programlar", "Hangi lisans programları var?"], ["layers", "Dersler", "Bilgisayar Mühendisliği'nde ilk yıl hangi dersler var?"],
+    ["award", "Puanlar", "En yüksek puanla öğrenci alan bölümler hangileri?"], ["bookmark", "Ücret ve burs", "Ücret ve burs bilgileri neler?"],
+    ["globe", "Erasmus", "Erasmus için hangi ülkelerle anlaşma var?"], ["building", "Kampüs", "Kampüse toplu taşımayla nasıl ulaşılır?"],
+    ["users", "Kadro", "Kaç akademisyen var, unvan dağılımı nasıl?"], ["sparkle", "Genel", "Bu üniversiteyi öne çıkaran özellikler neler?"]];
+  const box = $(".student-chat-suggestions", host);
+  box.classList.add("ai-ideas");
+  box.innerHTML = `<p class="ai-ideas-title">${esc(d.data.name)} hakkında ne öğrenmek istersin?</p><div class="ai-idea-grid">${ideas.map(([ic, tag, q], k) => `<button type="button" class="ai-idea" data-student-question="${esc(q)}" style="--i:${k}"><span>${icon(ic)}</span><small>${esc(tag)}</small><b>${esc(q)}</b></button>`).join("")}</div>`;
   hydrateIcons(host);
   bindStudentChat(d);
   drawStudentChat(d);
-  // Soldaki hazır sorular: soruyu kutuya yazar ve gönderir.
-  $$("[data-ai-ask]", host).forEach((b) => b.onclick = () => {
-    const input = $("#studentQuestion", host), form = $(".student-chat-form", host);
-    if (!input || !form) return;
-    input.value = b.dataset.aiAsk; form.requestSubmit();
-  });
 }
 async function openFirmPerson(person, chat) {
   let papers = person.papers || [];

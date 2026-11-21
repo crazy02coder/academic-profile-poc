@@ -487,9 +487,23 @@ async def index():
     return FileResponse(ROOT / "static" / "index.html")
 
 
+def _wos_activity() -> dict:
+    """Süren Web of Science işleri (yerel görev kayıtlarından; tarama başlatmaz, WoS'u açmaz). Kütüphane ayrı projeye
+    taşınırken bu yardımcı da silinmişti ama iki uç hâlâ kullanıyordu (durum sayfası 500 veriyordu)."""
+    library_tasks = getattr(globals().get("library"), "_TOPIC_TASKS", {}) or {}
+    active_jobs = sum(not task.done() for tasks in (wos.TASKS, library_tasks) for task in tasks.values())
+    pending_jobs = sum(1 for job in JOBS.values()
+                       if job.get("expects_wos") and not job["done"] and not job["task"].done())
+    pending_jobs += sum(not task.done() for task in unit_publications.TASKS.values())
+    return {"active_jobs": active_jobs, "pending_jobs": pending_jobs}
+
+
 @app.get("/api/health")
 async def health():
-    llm = await LLM().probe()
+    try:
+        llm = await asyncio.wait_for(LLM().probe(), 12)
+    except Exception:  # noqa: BLE001 — model sağlayıcısına ulaşılamasa da durum sayfası açılır
+        llm = LLM()
     return {"rea": rea.available(), "chromium": bool(chromium_executable()), "llm": llm.label(),
             "llm_ready": llm.available, "steps": STEPS, "patents": patents.enabled(),
             "wos_activity": {**_wos_activity(),
@@ -884,6 +898,34 @@ async def check_changes() -> list[dict]:
             report.append(item)
         recipes.save(st)
     return report
+
+
+@app.get("/api/contracts")
+async def contracts_list():
+    """Veri tarifleri: doğrudan API ile okunan kaynakların (YÖK Akademik…) son denetim durumu."""
+    from . import contracts
+    return contracts.summary()
+
+
+@app.post("/api/contracts/{cid}/check")
+async def contracts_check(cid: str):
+    """Kaynaktan tek örnek kayıt alıp yanıt biçimini ve ayrıştırıcının çıktısını denetler."""
+    from . import contracts
+    if cid not in contracts.CONTRACTS:
+        raise HTTPException(404, "Tarif bulunamadı.")
+    return await contracts.check(cid)
+
+
+@app.post("/api/contracts/{cid}/relearn")
+async def contracts_relearn(cid: str):
+    """Boş kalan çıktılar için eşlemeyi yeniden öğrenir (model önerir, örnek kayıtta doğrulanır)."""
+    from . import contracts
+    if cid not in contracts.CONTRACTS:
+        raise HTTPException(404, "Tarif bulunamadı.")
+    try:
+        return await contracts.relearn(cid, await _llm())
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Tarif güncellenemedi ({type(exc).__name__}).") from None
 
 
 @app.post("/api/recipes/check")
@@ -1892,6 +1934,18 @@ async def campus_line(relation_id: int):
     d = await campus_map.line_detail(relation_id)
     if d is None:
         raise HTTPException(404, "Hat bilgisi şu an alınamadı.")
+    return d
+
+
+@app.get("/api/universities/{uid}/campus-map")
+async def campus_map_now(uid: str):
+    """Kampüs haritası ve çevresi, sayfa taramasını beklemeden (Kampüs başlığı açılır açılmaz istenir)."""
+    from . import campus_map
+    if not re.fullmatch(r"[a-z0-9-]{1,120}", uid):
+        raise HTTPException(422, "Geçersiz istek.")
+    d = await campus_map.around(uid)
+    if d is None:
+        raise HTTPException(404, "Kampüs konumu bulunamadı.")
     return d
 
 

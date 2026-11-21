@@ -98,10 +98,126 @@ def merge_publications(result: dict, incoming: list[dict]):
     publication_status.annotate(papers)
 
 
+_NOT_PORTRAIT = re.compile(r"logo|icon|ikon|banner|slider|sprite|favicon|bayrak|flag|footer|header|social|whatsapp|"
+                           r"facebook|twitter|instagram|linkedin|youtube|qr|placeholder|default|loading|\.svg(?:\?|$)", re.I)
+_PORTRAIT_HINT = re.compile(r"personel|akademik|academic|staff|profil|profile|foto|photo|portre|avatar|uploads?|kadro|team|people", re.I)
+
+
+# Kişinin profil sayfası olamayacak adresler: tarihli yazılar ve haber/duyuru/etkinlik sayfaları. Kadro listesinde ad
+# bazen kişiyle ilgili bir habere bağlanır ("… yüksek lisansını tamamladı"); o sayfa özgeçmiş ya da portre kaynağı değildir.
+_NOT_PROFILE = re.compile(r"/(?:19|20)\d{2}/\d{1,2}(?:/|$)|/(?:haber|haberler|duyuru|duyurular|news|announcements?|etkinlik|"
+                          r"etkinlikler|events?|blog|basin|press)(?:/|-|$)", re.I)
+
+
+def _profile_like(url: str) -> bool:
+    return bool(url) and not _NOT_PROFILE.search(url)
+
+
+async def _page_info(url: str, name: str) -> dict:
+    """Kişinin kurum sayfasından: portre ("photo"), araştırma alanları ("interests"), ofis ("office") ve özgeçmiş
+    metni ("bio"). E-posta ve telefon alınmaz.
+
+    Portre: alt/başlık metninde ya da dosya adında kişinin adı geçen görsel; yoksa yolu personel/profil/foto… içeren
+    ilk görsel; o da yoksa sayfanın paylaşım görseli. Dosya adı URL kodlamalı ve harfleri ayrık yazılmış olabilir
+    ("Serpil%20O%CC%88zer.jpg"): karşılaştırmadan önce çözülür ve birleştirilir. Logo, ikon, bayrak ve afişler elenir."""
+    import unicodedata
+    from urllib.parse import unquote, urljoin
+    from scrapling import Selector
+    from .net import fetch_smart
+    from .text import clean, name_tokens
+    out = {"photo": "", "interests": [], "office": "", "bio": ""}
+    try:
+        page = await asyncio.wait_for(fetch_smart(url, allow_stealth=False), 20)
+    except Exception:  # noqa: BLE001
+        return out
+    if page.status >= 400 or not page.html:
+        return out
+    sel = Selector(page.html)
+    base = page.url or url
+    tokens = [t for t in name_tokens(name) if len(t) > 2]
+
+    def about(text: str) -> bool:
+        key = fold(unicodedata.normalize("NFC", unquote(text or "")))
+        return bool(tokens) and all(t in key for t in tokens[-2:])  # ad ve soyad birlikte geçmeli
+    main = sel.css("main, #wrap, article, #content, .content")
+    scope = main[0] if main else sel
+    named, hinted = "", ""
+    for img in scope.css("img"):
+        src = img.attrib.get("data-src") or img.attrib.get("data-lazy-src") or img.attrib.get("src") or ""
+        if not src or src.startswith("data:") or _NOT_PORTRAIT.search(unquote(src)):
+            continue
+        full = urljoin(base, src)
+        if about(f"{img.attrib.get('alt', '')} {img.attrib.get('title', '')}") or about(src):
+            named = full
+            break
+        if not hinted and _PORTRAIT_HINT.search(src):
+            hinted = full
+    # Yalnız kişinin adını taşıyan görsel kabul edilir. Yolundan tahmin edilen görsel ve sayfanın paylaşım görseli
+    # çoğu sitede bölüm logosu ya da ilgisiz bir afiş çıkardığı için kullanılmaz.
+    out["photo"] = named
+    # Metin: ana içerik; etiketli alanlar (araştırma alanları, ofis) ve kalan özgeçmiş paragrafı.
+    text = clean(scope.get_all_text(separator=" ", ignore_tags=("script", "style", "nav", "header", "footer")))
+    label = r"(?:E-?\s?posta|E-?mail|Tel(?:efon)?|Telefon|Phone|Ofis|Office|Oda|Araştırma Alanları|Research (?:Areas|Interests)|İlgi Alanları)"
+    found = re.search(r"(?:Araştırma Alanları|İlgi Alanları|Research (?:Areas|Interests))\s*:?\s*(.{3,400}?)(?=\s" + label + r"\s*:|$)", text, re.I)
+    if found:
+        out["interests"] = [clean(x) for x in re.split(r"[,;•·|]", found[1]) if 2 < len(clean(x)) < 80][:12]
+    office = re.search(r"(?:Ofis|Office|Oda)\s*:\s*(.{3,90}?)(?=\s(?:19|20)\d{2}\s|\s" + label + r"\s*:|$)", text, re.I)
+    if office:
+        out["office"] = clean(office[1])[:90]
+    # Özgeçmiş: etiketli satırlar ve ad çıkarıldıktan sonra kalan en uzun cümle bloğu.
+    rest = re.sub(label + r"\s*:\s*.{0,160}?(?=\s" + label + r"\s*:|\s(?:19|20)\d{2}\s|$)", " ", text, flags=re.I)
+    start = re.search(r"\b(?:19|20)\d{2}\s+yılında\b|\b(?:received|graduated|born|completed)\b|\b(?:lisans|doktora|mezun)\b", rest, re.I)
+    bio = clean(rest[start.start():] if start else "")
+    if len(bio) >= 80:
+        out["bio"] = bio[:1800]
+    return out
+
+
+async def _site_card(p: Profile) -> dict | None:
+    """Kişinin, bölümünün (yoksa fakültesinin) kurum sayfasındaki kadro kartı: {"url", "photo", "title", "unit_url",
+    "faculty", "department"}. Fakülte ve bölüm YÖK kadro yolundan alınır; YÖK'e istek atılmaz."""
+    from . import directory, main, yokdir
+    from .text import name_tokens
+    path = [x for x in (p.yok or {}).get("path") or [] if x]
+    institution = p.get("institution", "") or (path[0] if path else "")
+    faculty = path[1] if len(path) > 1 else ""
+    department = path[2] if len(path) > 2 else p.get("department", "")
+    if not institution or not faculty:
+        return None
+    uid = yokdir.uni_id(institution)
+    try:
+        deps = await main.university_site_departments(uid, faculty)
+    except Exception:  # noqa: BLE001 — fakülte sitede bulunamadı
+        return None
+    dep = max(deps.get("departments") or [], key=lambda x: main._unit_score(department, x["name"]), default=None) if department else None
+    urls = []
+    if dep and dep.get("url") and main._unit_score(department, dep["name"]) >= 0.6:
+        urls.append(dep["url"])
+    if deps.get("faculty_url"):
+        urls.append(deps["faculty_url"])
+    want = tuple(sorted(name_tokens(p.name)))
+    for unit_url in dict.fromkeys(urls):
+        try:
+            people = await asyncio.wait_for(directory.site_people(unit_url), 40)
+        except Exception:  # noqa: BLE001
+            continue
+        for row in people:
+            if want and tuple(sorted(name_tokens(row.get("name") or ""))) == want:
+                page_url = row.get("url") or ""
+                if not _profile_like(page_url):
+                    page_url = ""  # kart bir habere bağlanıyor: profil sayfası sayılmaz
+                info = await _page_info(page_url, p.name) if page_url else {}
+                return {"url": page_url, "photo": row.get("photo") or info.get("photo") or "", "title": row.get("title") or "",
+                        "unit_url": unit_url, "faculty": faculty, "department": department,
+                        "interests": info.get("interests") or [], "office": info.get("office") or "", "bio": info.get("bio") or ""}
+    return None
+
+
 async def collect(old: dict, sections: set[str], sources: set[str], llm, log) -> dict:
     result = copy.deepcopy(old)
     p = restore_profile(old["profile"])
     warnings, records, source_meta = [], [], {}
+    site_card = None
 
     async def warn(message):
         warnings.append(message)
@@ -127,7 +243,61 @@ async def collect(old: dict, sections: set[str], sources: set[str], llm, log) ->
             except Exception as exc:
                 await warn(f"Kurum sayfası yenilenemedi ({type(exc).__name__}); kayıtlı bilgiler korundu.")
         else:
-            await warn("Bu profilde kurum sayfası bağlantısı bulunmuyor.")
+            # Kayıtlı kurum sayfası yok (isimle / YÖK'ten açılmış profil): kişi, bölümünün sayfasındaki kadro
+            # kartlarından ad eşleşmesiyle bulunur; fotoğrafı ve profil sayfası oradan alınır.
+            await log("institution", "running", "Kişi, bölümünün kurum sayfasındaki kadro listesinde aranıyor…")
+            try:
+                site_card = await asyncio.wait_for(_site_card(p), 75)
+            except Exception as exc:  # noqa: BLE001
+                site_card = None
+                await warn(f"Kurum sayfası okunamadı ({type(exc).__name__}).")
+            if site_card:
+                # Sayfadaki özgeçmiş, profilde özgeçmiş yoksa oraya da yazılır (YÖK alanlarının üzerine yazılmaz).
+                if site_card.get("bio") and "bio" not in p.facts:
+                    p.set("bio", site_card["bio"], "institution", site_card.get("url") or "")
+                if site_card.get("url"):
+                    p.source_url = site_card["url"]
+                    p.links["institution"] = site_card["url"]
+                    try:
+                        fresh, report = await asyncio.wait_for(locate(site_card["url"], p.name, log, llm), 75)
+                        if fresh.found:
+                            for key, fact in fresh.facts.items():
+                                if fact.value and key not in p.facts:
+                                    p.facts[key] = fact  # YÖK'ten gelen alanların üzerine yazılmaz; eksikler tamamlanır
+                            p.observations.extend(fresh.observations)
+                            result.setdefault("recon", {})["institution_refresh"] = report
+                    except Exception:  # noqa: BLE001 — kart bilgisi yine kaydedilir
+                        pass
+                await log("institution", "done", "Kurum sayfasında bulundu" + (" · fotoğraf alındı" if site_card.get("photo") else ""))
+            else:
+                await warn("Kişi, bölümünün kurum sayfasındaki kadro listesinde bulunamadı.")
+
+    if "institution" in sections and p.source_url and not _profile_like(p.source_url):
+        # Önceki yenilemede profil sayfası diye bir haber yazısı kaydedilmiş: adres, o sayfadan alınan fotoğraf ve
+        # özgeçmiş geri alınır.
+        wrong = (old.get("profile") or {}).get("site") or {}
+        if wrong.get("bio") and p.get("bio", "") == wrong["bio"]:
+            p.facts.pop("bio", None)
+        clear_photo = wrong.get("photo") or ""
+        p.source_url = ""
+        p.links.pop("institution", None)
+        site_card = {**{k: v for k, v in (site_card or {}).items() if k in ("title", "unit_url", "faculty", "department")},
+                     "url": "", "photo": "", "bio": "", "interests": [], "office": "", "_clear_photo": clear_photo}
+    if "institution" in sections and p.source_url and "akademik.yok.gov.tr" not in p.source_url:
+        # Sayfa adresi biliniyor (bu yenilemede bulundu ya da önceden kayıtlı): fotoğraf, araştırma alanları, ofis ve
+        # özgeçmiş sayfanın kendisinden okunur; önceki kurum sayfası kaydının üzerine eksikler tamamlanır.
+        try:
+            info = await asyncio.wait_for(_page_info(p.source_url, p.name), 30)
+        except Exception:  # noqa: BLE001
+            info = {}
+        base = {**((old.get("profile") or {}).get("site") or {}), **(site_card or {})}
+        base["url"] = base.get("url") or p.source_url
+        for key, value in info.items():
+            if value:
+                base[key] = value  # sayfanın kendisi en güncel kaynaktır: eski (yanlış seçilmiş) fotoğrafın üzerine yazar
+        site_card = base
+        if site_card.get("bio") and not p.get("bio", ""):
+            p.set("bio", site_card["bio"], "institution", site_card["url"], override=True)
 
     yok_sections = sections - {"institution", "publications"}
     needs_yok = bool(yok_sections) and bool(yok_sections - {"patents"}) or ("publications" in sections and "yok" in sources)
@@ -207,6 +377,17 @@ async def collect(old: dict, sections: set[str], sources: set[str], llm, log) ->
     fresh = p.to_dict()
     if {"profile", "institution"} & sections:
         result["profile"] = {**old["profile"], **fresh}
+        if site_card:
+            # Kurum sayfası bilgisi: profil sayfası, karttaki unvan ve fotoğraf. Fotoğraf adres olarak saklanır;
+            # YÖK fotoğrafı yoksa /api/jobs/{id}/photo bunu sunar.
+            stale_photo = site_card.pop("_clear_photo", "")
+            result["profile"]["site"] = {**site_card, "checked_at": time.time()}
+            if stale_photo and result["profile"].get("photo") == stale_photo:
+                result["profile"]["photo"] = None  # haber sayfasından alınmış logo/afiş: profil fotoğrafı olmaktan çıkar
+            if not site_card.get("bio") and result["profile"].get("bio") and not fresh.get("bio"):
+                result["profile"]["bio"] = ""
+            if site_card.get("photo") and not str(result["profile"].get("photo") or "").startswith("data:"):
+                result["profile"]["photo"] = site_card["photo"]
         # Eski doğrulama etiketini değişen bir alana taşımayız.
         verification = result["profile"].setdefault("verification", {})
         for field in ("title", "department", "institution", "interests"):

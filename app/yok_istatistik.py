@@ -61,8 +61,23 @@ def _name_key(name: str) -> str:
     return " ".join(fold(re.sub(r"\([^)]*\)", " ", clean(name))).split())
 
 
+async def sample() -> dict:
+    """Veri tarifi denetimi için: raporun yalnız ilk sayfası (yaklaşık 6 küçük istek). {"year", "row": ilk satırın hücreleri}."""
+    year, rows = await _read(first_page_only=True)
+    if not rows:
+        raise ValueError("YÖK İstatistik tablosu boş geldi")
+    return {"year": year, "row": rows[0], "rows": len(rows)}
+
+
 async def _collect() -> dict:
     """Raporun tamamı: {"year", "universities": {ad anahtarı: {"name", "type", "city", düzeyler…}}}."""
+    year_text, rows = await _read()
+    year = (None, year_text)
+    return _aggregate(year, rows)
+
+
+async def _read(first_page_only: bool = False) -> tuple[str, list[list[str]]]:
+    """Siteyi açıp raporu okur: (öğretim yılı, satırlar)."""
     async with httpx.AsyncClient(timeout=60, headers=UA, follow_redirects=True) as client:
         home = (await client.get(BASE + "/")).text
         desktop = re.search(r"dt:'([^']+)'", home)
@@ -100,9 +115,13 @@ async def _collect() -> dict:
         report = await send(button("btnRaporuGetir", window))
         paging = re.search(r"\['zul\.mesh\.Paging','([^']+)',\{[^}]*pageCount:(\d+)", report)
         rows = _rows(report)
-        if paging:
+        if paging and not first_page_only:
             for page in range(1, min(int(paging[2]), 80)):
                 rows += _rows(await send(paging[1], "onPaging", {"": page}))
+    return (year[1] if year else ""), rows
+
+
+def _aggregate(year, rows: list[list[str]]) -> dict:
     universities: dict[str, dict] = {}
     for cells in rows:
         if len(cells) < 19:

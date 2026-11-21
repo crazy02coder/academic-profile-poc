@@ -348,6 +348,10 @@ async def detail(paper: dict, llm, cache: dict, profile: dict | None = None) -> 
     if is_yok:
         meta.update(final_url=profile_url, source_label="YÖK profiline git")
 
+    if saved_abstract:
+        # Özet kayıtta var: yayıncı sayfası beklenmeden hemen gösterilir (yayıncı yanıt vermese de pencere dolu açılır).
+        yield {"meta": meta}
+
     queue: asyncio.Queue = asyncio.Queue()
     emit = queue.put_nowait
     results: dict = {}
@@ -382,10 +386,18 @@ async def detail(paper: dict, llm, cache: dict, profile: dict | None = None) -> 
         tasks.append(asyncio.create_task(run("Crossref", _crossref_abstract(doi))))
     pending = set(tasks)
     getter = None
+    # Bekleme üst sınırı: özet zaten varsa ek kaynaklar (yayıncı künyesi, TL;DR) en çok 3 sn beklenir; yoksa 45 sn.
+    # Süre dolunca yanıt vermeyen kaynak bırakılır ve eldeki bilgiyle devam edilir.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + (3 if saved_abstract else 45)
     try:
         while pending:
+            left = deadline - loop.time()
+            if left <= 0:
+                yield {"stage": "Bazı kaynaklar zamanında yanıt vermedi; eldeki bilgiyle devam ediliyor."}
+                break
             getter = asyncio.create_task(queue.get())
-            done, _ = await asyncio.wait(pending | {getter}, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(pending | {getter}, return_when=asyncio.FIRST_COMPLETED, timeout=left)
             if getter in done:
                 yield getter.result()
             else:
@@ -443,7 +455,7 @@ async def detail(paper: dict, llm, cache: dict, profile: dict | None = None) -> 
         return
     complete = True
     if llm.available:
-        yield {"stage": f"{llm.model} Türkçe özet yazıyor…"}
+        yield {"stage": f"{llm.fast_model or llm.model} Türkçe özet yazıyor…"}
         messages = [
             {"role": "system", "content": "Akademik bir yayını Türkçe özetleyen asistansın. Yalnızca verilen bilgilere "
                                           "dayan; uydurma. Özet varsa üç kısa madde yaz: **Amaç**, **Yöntem**, "
@@ -454,7 +466,7 @@ async def detail(paper: dict, llm, cache: dict, profile: dict | None = None) -> 
                                         f"TL;DR: {meta['tldr'] or '-'}\nÖZET: {basis[:3500] or '(yok)'}"},
         ]
         try:
-            async for piece in llm.stream_chat(messages):
+            async for piece in llm.stream_chat(messages, fast=True):  # hızlı model: ilk kelime ~1 sn
                 summary += piece
                 yield {"delta": piece}
         except Exception:  # noqa: BLE001

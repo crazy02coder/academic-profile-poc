@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 
 import httpx
@@ -19,7 +20,8 @@ from .text import clean, fold
 DIR = ROOT / "data" / "campus"
 TTL = 90 * 24 * 3600
 RADIUS = 1200  # metre
-VERSION = 5  # kayıt biçimi (… 4: merkez OpenStreetMap kaydından; 5: eczane, kafe, AVM ayrı gruplar, konumlu tam liste)
+VERSION = 6  # kayıt biçimi (6: yerleşke merkezi yalnız adı birebir tutan harita kaydından)
+_V5 = 5  # kayıt biçimi (… 4: merkez OpenStreetMap kaydından; 5: eczane, kafe, AVM ayrı gruplar, konumlu tam liste)
 LINE_RADIUS = 700  # hatlar için: kampüse bu kadar yakından geçen güzergâhlar
 MODES = {"subway": "Metro", "light_rail": "Hafif raylı", "tram": "Tramvay", "train": "Tren", "monorail": "Monoray", "funicular": "Füniküler",
          "ferry": "Vapur", "trolleybus": "Troleybüs", "bus": "Otobüs", "share_taxi": "Dolmuş / minibüs"}
@@ -72,13 +74,19 @@ async def _center(uid: str) -> tuple[float, float, str] | None:
             rows = r.json() if r.status_code == 200 else []
         except (httpx.HTTPError, ValueError):
             rows = []
-    words = {w for w in fold((uni or {}).get("name") or "").split() if len(w) > 2 and w != "universitesi"}
+    # Ad birebir tutmalı: "Ankara Üniversitesi" aranırken "Ankara Yıldırım Beyazıt Üniversitesi" kabul edilmez. Yalnız
+    # yerleşke belirten ekler ("… Merkez Kampüsü", "… Rektörlüğü") yok sayılır.
+    extra = {"universitesi", "university", "kampusu", "kampus", "yerleskesi", "yerleske", "merkez", "ana", "rektorlugu", "rektorluk", "campus"}
+
+    def tokens(text: str) -> set[str]:
+        return {w for w in re.split(r"[^a-z0-9]+", fold(text)) if len(w) > 1} - extra
+    words = tokens((uni or {}).get("name") or "")
 
     def campus(row: dict) -> bool:
         kind = (row.get("category"), row.get("type"))
-        named = words and words <= set(fold(row.get("name") or row.get("display_name") or "").replace(",", " ").split())
-        return bool(named) and (kind[0] == "amenity" and kind[1] in {"university", "college", "school"} or kind == ("building", "university")
-                                or kind == ("office", "educational_institution"))
+        named = bool(words) and tokens(row.get("name") or "") == words
+        return named and (kind[0] == "amenity" and kind[1] in {"university", "college", "school"} or kind == ("building", "university")
+                          or kind == ("office", "educational_institution"))
     hit = next((row for row in rows if isinstance(row, dict) and campus(row)), None)
     if hit:
         return float(hit["lat"]), float(hit["lon"]), "OpenStreetMap"

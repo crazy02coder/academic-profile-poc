@@ -256,7 +256,7 @@ class LLM:
         return _loose_json(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
 
     async def stream_chat(self, messages: list[dict], stats: dict | None = None,
-                          timeout: int = 240) -> AsyncIterator[str]:
+                          timeout: int = 240, fast: bool = False) -> AsyncIterator[str]:
         """Akışlı sohbet. `stats` sözlüğüne ilk token süresi ve token sayıları yazılır."""
         if self.provider != "gemini":
             async for piece in self._stream_other(messages, stats, timeout):
@@ -265,7 +265,7 @@ class LLM:
         system, turns = _contents(messages)
         started = time.time()
         last = ""
-        queue = self._chain(self.model)
+        queue = self._chain(self.fast_model if fast else self.model)  # fast: sohbet asistanları (ilk yanıt ~1 sn)
         async with httpx.AsyncClient(timeout=timeout) as client:
             while queue:
                 model = queue.pop(0)

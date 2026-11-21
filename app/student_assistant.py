@@ -68,13 +68,13 @@ _GENERAL_SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}
 
 
 async def _general_reply(uid: str, university: dict, client, question: str, messages: list[dict], snapshots: list[dict],
-                         section: str | None) -> dict | None:
+                         section: str | None, evidence: list[dict] | None = None, sources: dict | None = None) -> dict | None:
     """Taranmış sayfalarda birebir kanıt yok (genel soru, yorum, sohbet): künye/sayılar, Atlas özeti ve arama
     sonuçlarıyla desteklenen serbest yanıt. Sayısal/güncel bilgi yalnız veriden; genel bilgi olduğu belirtilir."""
     from . import atlas, uni_facts
     facts: dict = {}
     try:
-        got = await asyncio.wait_for(uni_facts.facts(uid), 12)
+        got = await asyncio.wait_for(uni_facts.facts(uid), 4)
         if isinstance(got, dict):
             facts = {k: got.get(k) for k in ("identity", "scale", "units", "academics") if got.get(k)}
             research = got.get("research") or {}
@@ -98,13 +98,25 @@ async def _general_reply(uid: str, university: dict, client, question: str, mess
         for item in (saved.get("web") or [])[:8]:
             if isinstance(item, dict) and item.get("source_url") and len(web) < 10:
                 web.append({"n": len(web) + 1, "title": item.get("title", ""), "text": item.get("detail", ""), "url": item["source_url"]})
+    # Daha önce toplanmış resmî sayfa alıntıları (varsa) da numaralı kaynak olarak eklenir.
+    for item in (evidence or [])[:16]:
+        src = (sources or {}).get(item.get("source_id")) or {}
+        if src.get("url") and len(web) < 24:
+            web.append({"n": len(web) + 1, "title": src.get("title", ""), "text": clean(item.get("quote") or "")[:700], "url": src["url"]})
     prompt = json.dumps({"university": university["name"], "question": question, "conversation": messages[-6:], "facts": facts,
                          "web": [{k: v for k, v in row.items() if k != "url"} for row in web]}, ensure_ascii=False)
-    result = await client.json(prompt, _GENERAL_SCHEMA, system=_GENERAL_SYSTEM, timeout=30)
+    # Hızlı model: ana model şemalı yanıtta 10-30 sn sürebiliyor, hızlı model yaklaşık 1 sn.
+    result = await client.json(prompt, _GENERAL_SCHEMA, system=_GENERAL_SYSTEM, timeout=25, fast=True)
+    if not isinstance(result, dict):
+        result = await client.json(prompt, _GENERAL_SCHEMA, system=_GENERAL_SYSTEM, timeout=40)
     text = clean(str((result or {}).get("answer") or "")) if isinstance(result, dict) else ""
     if not text:
         return None
-    used = [row for row in web if row["n"] in set(x for x in (result.get("used") or []) if isinstance(x, int))]
+    used, seen_urls = [], set()
+    for row in web:
+        if row["n"] in set(x for x in (result.get("used") or []) if isinstance(x, int)) and row["url"] not in seen_urls:
+            seen_urls.add(row["url"])
+            used.append(row)
     return {"answer": text, "status": "answered", "general": True,
             "sources": [{"id": f"W{row['n']}", "title": row["title"], "url": row["url"]} for row in used[:5]]}
 
@@ -365,63 +377,27 @@ def _grounded_reply(result: dict, evidence: list[dict], sources: dict[str, dict]
 
 async def answer(uid: str, university: dict, llm, *, question: str, messages: list[dict],
                  section: str | None = None, faculty: str = "", department: str = "") -> dict:
+    """Soru doğrudan modele gider. Tarama ya da arama başlatılmaz, beklenmez: yanıt eldeki veriyle (daha önce toplanmış
+    resmî sayfa alıntıları, künye ve sayılar, YÖK Atlas programları, kayıtlı arama sonuçları) ve modelin genel
+    bilgisiyle tek çağrıda üretilir. Sayısal/güncel bilgi yalnız veride varsa verilir (bkz. _GENERAL_SYSTEM)."""
     section = section or _route(question, messages)
     faculty, department = clean(faculty), clean(department)
-    state = {"client": None, "resolved": False, "unavailable": False}
-
-    async def model():
-        if not state["resolved"]:
-            state["resolved"] = True
-            try:
-                async with asyncio.timeout(12):
-                    async with _MODEL_LIMIT:
-                        client = await llm() if callable(llm) else llm
-                if client and client.available:
-                    state["client"] = _BoundedModel(client, state)
-                else:
-                    state["unavailable"] = True
-            except Exception:
-                state["unavailable"] = True
-        return state["client"]
-
     try:
-        async with asyncio.timeout(_TOTAL_TIMEOUT):
-            snapshots = _snapshots(uid, faculty, department)
-            # Faculty selection concerns programmes/courses and fees. Campus and
-            # international-office pages are university-wide, with explicit scope.
-            scoped = section in {"courses", "graduate", "fees"}
-            scan_faculty, scan_department = (faculty, department) if scoped else ("", "")
-            if section and not student_view._load(uid, section, scan_faculty, scan_department):
-                scope = _collection_scope(uid, university, scan_faculty, scan_department)
-                if scope is not None:
-                    saved = await student_view.get(uid, model, section=section,
-                        faculty=scope[0], department=scope[1])
-                    snapshots.append(saved)
-            evidence, sources = _evidence(uid, university, snapshots, question, section)
-            if not evidence or section and not any(item["section"] == section for item in evidence):
-                # Birebir kanıt yok (genel soru, yorum, sohbet): künye, Atlas ve arama sonuçlarıyla serbest yanıt.
-                client = await model()
-                if not client:
-                    return unavailable()
-                general = await _general_reply(uid, university, client, question, messages, snapshots, section)
-                return general or (unavailable() if state["unavailable"] else _missing(section))
-            client = await model()
-            if not client:
-                return unavailable()
-            prompt = json.dumps({"university": {"id": uid, "name": university["name"]},
-                "selection": {"section": section, "faculty": faculty, "department": department},
-                "conversation_context_not_evidence": messages, "question": question,
-                "evidence": evidence}, ensure_ascii=False)
-            result = await client.json(prompt, _SCHEMA, system=_SYSTEM, timeout=30)
-            if not isinstance(result, dict):
-                return unavailable()
-            reply = _grounded_reply(result, evidence, sources, section)
-            if reply.get("status") == "needs_information" and not reply.get("sources"):
-                # Kaynaklardan doğrulanmış tek cümle çıkmadı: boş "bilgi yok" yerine genel yanıt.
-                general = await _general_reply(uid, university, client, question, messages, snapshots, section)
-                return general or reply
-            return reply
-    except TimeoutError:
-        return unavailable("Öğrenci asistanının süre sınırına ulaşıldı. Kaydedilmiş kaynaklar korunuyor; biraz sonra yeniden deneyebilirsiniz.")
-    except Exception:
+        client = await asyncio.wait_for(llm(), 10) if callable(llm) else llm
+    except Exception:  # noqa: BLE001
+        client = None
+    if not client or not getattr(client, "available", False):
+        return unavailable()
+    try:
+        snapshots = _snapshots(uid, faculty, department)
+        evidence, sources = _evidence(uid, university, snapshots, question, section)
+    except Exception:  # noqa: BLE001 — kayıtlı veri okunamadı: yalnız künye ve genel bilgiyle yanıt
+        snapshots, evidence, sources = [], [], {}
+    try:
+        reply = await asyncio.wait_for(_general_reply(uid, university, client, question, messages, snapshots, section,
+                                                      evidence, sources), 75)
+    except (TimeoutError, asyncio.TimeoutError):
+        return unavailable("Model yanıtı zamanında dönmedi. Soruyu yeniden gönderebilirsin.")
+    except Exception:  # noqa: BLE001
         return unavailable("Öğrenci asistanı şu anda yanıt hazırlayamıyor. Lütfen biraz sonra tekrar deneyin.")
+    return reply or unavailable("Model boş yanıt döndürdü. Soruyu yeniden gönderebilirsin.")

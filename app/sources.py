@@ -545,6 +545,9 @@ def _generic_row(r: dict) -> dict:
 
 
 def _yok_profile_of(d: dict) -> dict:
+    from .yokdir import place
+    faculty, department = place(d)  # eski alanlar yoksa kadroYeri'nden (YÖK yanıtı Kasım 2026'da değişti)
+    d = {**d, "fakulteAd": d.get("fakulteAd") or faculty, "bolumAd": d.get("bolumAd") or department}
     path = [p for p in (d.get("universiteAd"), d.get("fakulteAd"), d.get("bolumAd")) if p]
     return {"title_raw": clean(d.get("kadroUnvanAdi") or ""), "name": clean(d.get("personelAdiSoyadi") or ""),
             "path": path, "institution": path[0] if path else "", "department": d.get("bolumAd") or (path[-1] if path else ""),
@@ -729,7 +732,7 @@ async def yok_profile_api(name: str, institution: str, link: str, emit, sections
     if "collaborators" in data:
         extra["collaborators"] = [{"yok_id": c.get("authorGuidId") or "", "name": _cap(c.get("personelAdiSoyadi")),
                                    "title": YOK_TITLES.get(c.get("kadroUnvanAdi") or "", tr_title(c.get("kadroUnvanAdi") or "")),
-                                   "institution": tr_title(c.get("universiteAd") or ""), "unit": tr_title(_units(c.get("fakulteAd"), c.get("bolumAd"))),
+                                   "institution": tr_title(c.get("universiteAd") or ""), "unit": tr_title(_units(*__import__("app.yokdir", fromlist=["place"]).place(c))),
                                    "photo": c.get("authorImage") if str(c.get("authorImage") or "").startswith("data:image") else "",
                                    "url": YOK_PROFILE + (c.get("authorGuidId") or "")} for c in data["collaborators"]][:60]
     counts = ", ".join(f"{k} {len(v)}" for k, v in sec.items())

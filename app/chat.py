@@ -158,7 +158,7 @@ async def answer(kb: Knowledge, question: str, history: list[dict], llm, meta: d
         messages.append({"role": "user", "content": "SORU: " + question})
         stats: dict = {}
         try:
-            async for piece in llm.stream_chat(messages, stats):
+            async for piece in llm.stream_chat(messages, stats, fast=True):
                 yield piece
             meta.update(stats)
             if stats.get("prompt_tokens"):

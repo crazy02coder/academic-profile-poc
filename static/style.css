@@ -2951,3 +2951,64 @@ details.student-accordion > summary svg:last-child { transition: transform .25s 
 .place-main small { font-size: 12px; opacity: .65; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .place-row em { font-style: normal; font-weight: 700; flex: none; color: var(--c); }
 .place-row > svg { width: 14px; height: 14px; opacity: .4; flex: none; }
+
+/* Profil: kurum sayfası bilgi alanı */
+.site-info { display: flex; gap: 18px; align-items: flex-start; }
+.site-info-photo { width: 112px; height: 136px; object-fit: cover; border-radius: 14px; border: 1px solid var(--line); flex: none; }
+.site-info .pm-table { flex: 1; min-width: 0; }
+.site-info .pm-row span { min-width: 0; overflow-wrap: anywhere; }
+.site-bio { margin-top: 14px; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--line); background: color-mix(in srgb, var(--blue) 3%, var(--surface)); }
+.site-bio h4 { margin: 0 0 6px; font-size: 13px; } .site-bio h4 small { font-weight: 400; opacity: .6; }
+.site-bio p { margin: 0; line-height: 1.6; font-size: 14px; }
+.bio-text { margin: 0 0 10px; line-height: 1.65; font-size: 14.5px; } .bio-text:last-of-type { margin-bottom: 0; }
+
+/* Ayarlar: site ve veri tarifleri */
+.recipe-block { padding: 12px 0; border-top: 1px solid var(--line); }
+.recipe-block:first-of-type { border-top: 0; padding-top: 0; }
+.recipe-block > b { font-size: 14px; } .recipe-block > p { margin: 4px 0 10px; font-size: 13px; }
+.contract-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 8px; }
+.ct-dot { flex: none; width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; background: #98a2b3; }
+.ct-dot.ok { background: #12b76a; box-shadow: 0 0 0 4px rgba(18,183,106,.15); } .ct-dot.warn { background: #f79009; box-shadow: 0 0 0 4px rgba(247,144,9,.15); }
+.ct-dot.bad { background: #f04438; box-shadow: 0 0 0 4px rgba(240,68,56,.15); }
+.ct-main { flex: 1; min-width: 0; display: grid; gap: 2px; } .ct-main small { opacity: .7; font-size: 12.5px; }
+.ct-detail { margin-top: 6px; display: grid; gap: 3px; font-size: 12.5px; overflow-wrap: anywhere; }
+.ct-detail code { font-size: 12px; padding: 1px 5px; border-radius: 5px; background: color-mix(in srgb, var(--blue) 8%, transparent); }
+.ct-bad { color: #d92d20; font-weight: 600; } .ct-ok { color: #067647; font-weight: 600; }
+.ct-actions { display: flex; flex-direction: column; gap: 6px; flex: none; }
+
+/* Ayarlar: tarif satırları ızgara, anahtar düğmeleri */
+.contract-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 10px; }
+.contract-grid .contract-row { margin-bottom: 0; }
+.ct-actions .btn { justify-content: center; white-space: nowrap; }
+.key-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.key-actions .spacer { flex: 1; }
+.btn.danger { color: #d92d20; border-color: color-mix(in srgb, #d92d20 35%, var(--line)); }
+.btn.danger:hover { background: rgba(217,45,32,.07); }
+
+/* ===== AI bakışı (tam genişlik) ve asistan canlandırmaları ===== */
+.ai-view.wide { display: block; min-height: 0; }
+.ai-view.wide .student-assistant { min-height: calc(100dvh - 250px); padding: 26px 28px; }
+.ai-view .student-chat-suggestions.ai-ideas { display: grid; gap: 18px; place-content: center; flex: 1; padding: 24px 0; }
+.ai-view .student-chat-suggestions.ai-ideas[hidden] { display: none; }
+.ai-ideas-title { margin: 0; text-align: center; font-size: 22px; font-weight: 700; }
+.ai-idea-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 230px)); gap: 12px; justify-content: center; }
+@media (max-width: 1100px) { .ai-idea-grid { grid-template-columns: repeat(2, minmax(0, 260px)); } }
+.ai-idea { display: grid; gap: 6px; align-content: start; text-align: left; padding: 14px 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: inherit; font: inherit; cursor: pointer;
+  transition: transform .2s cubic-bezier(.22,.9,.24,1), box-shadow .2s, border-color .2s; animation: chatPop .5s cubic-bezier(.34,1.56,.64,1) both; animation-delay: calc(var(--i) * 45ms); }
+.ai-idea:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--blue) 50%, var(--line)); box-shadow: 0 14px 28px -18px var(--blue); }
+.ai-idea span { width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; color: #fff; background: linear-gradient(135deg, var(--blue), #a855f7); }
+.ai-idea span svg { width: 17px; height: 17px; }
+.ai-idea small { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; opacity: .6; }
+.ai-idea b { font-size: 14px; font-weight: 600; line-height: 1.35; }
+.ai-idea:disabled { opacity: .5; pointer-events: none; }
+/* Mesajlar zıplayarak gelir */
+.student-chat-message.pop { animation: chatPop .48s cubic-bezier(.34,1.56,.64,1) both; transform-origin: 12% 100%; }
+.student-chat-message.user.pop { transform-origin: 88% 100%; }
+@keyframes chatPop { 0% { opacity: 0; transform: translateY(16px) scale(.86); } 60% { opacity: 1; transform: translateY(-3px) scale(1.02); } 100% { transform: none; } }
+/* "Düşünüyor" balonu */
+.student-chat-thinking .student-chat-bubble { display: inline-flex; align-items: center; gap: 12px; }
+.student-chat-thinking em { font-style: normal; font-size: 13.5px; opacity: .7; }
+.think-dots { display: inline-flex; gap: 5px; }
+.think-dots i { width: 8px; height: 8px; border-radius: 50%; background: linear-gradient(135deg, var(--blue), #a855f7); animation: thinkBounce 1s ease-in-out infinite; }
+.think-dots i:nth-child(2) { animation-delay: .14s; } .think-dots i:nth-child(3) { animation-delay: .28s; }
+@keyframes thinkBounce { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-7px); opacity: 1; } }

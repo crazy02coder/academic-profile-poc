@@ -153,7 +153,13 @@ _SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}}, "requ
 
 
 async def answer(fid: str, llm, question: str, messages: list[dict]) -> dict:
-    f = await facts(fid)
+    # Soru hemen modele gider: künye (Vikipedi/Wikidata) kayıtlı değilse çekilmesi en çok 4 sn beklenir; gelmezse
+    # resmî listedeki bilgiyle devam edilir.
+    try:
+        f = await asyncio.wait_for(facts(fid), 4)
+    except Exception:  # noqa: BLE001
+        local = _local(fid)
+        f = {"local": local, "identity": {}} if local else None
     if not f:
         return {"answer": "Firma resmî listede bulunamadı.", "ok": False}
     cached = firms._cached(fid) or {}
@@ -178,7 +184,11 @@ async def answer(fid: str, llm, question: str, messages: list[dict]) -> dict:
         client = await llm() if callable(llm) else llm
         if not client or not client.available:
             return {"answer": "Yapay zekâ bağlantısı şu anda kullanılamıyor.", "ok": False}
-        result = await asyncio.wait_for(client.json(json.dumps(data, ensure_ascii=False), _SCHEMA, system=_SYSTEM, timeout=30), 40)
+        payload = json.dumps(data, ensure_ascii=False)
+        # Hızlı modelle (yaklaşık 1 sn); boş dönerse ana modelle bir kez daha.
+        result = await asyncio.wait_for(client.json(payload, _SCHEMA, system=_SYSTEM, timeout=25, fast=True), 30)
+        if not isinstance(result, dict):
+            result = await asyncio.wait_for(client.json(payload, _SCHEMA, system=_SYSTEM, timeout=40), 45)
         raw = result.get("answer", "") if isinstance(result, dict) else ""
         text = "\n".join(clean(line) for line in str(raw).replace("**", "").splitlines() if clean(line))
         return {"answer": text or "Yanıt oluşturulamadı.", "ok": bool(text)}
