@@ -1,0 +1,674 @@
+{
+ "university": {
+  "birimId": "9001",
+  "birimAdi": "HOGWARTS ÜNİVERSİTESİ",
+  "birimAdiEn": "HOGWARTS UNIVERSITY",
+  "ilAdi": "LONDRA",
+  "tur": "VAKIF",
+  "yil": 1990,
+  "adSoyad": "",
+  "authorGuidId": ""
+ },
+ "home": "https://akademik-iz-poc-test.onrender.com/hogwarts",
+ "faculties": [
+  {
+   "label": "MÜHENDİSLİK FAKÜLTESİ",
+   "value": "hogwarts-fak"
+  }
+ ],
+ "departments": [
+  {
+   "label": "YAZILIM MÜHENDİSLİĞİ BÖLÜMÜ",
+   "value": "hogwarts-bol"
+  }
+ ],
+ "list_row": {
+  "arastirmaciId": 900001,
+  "authorGuidId": "0B4AD1A25A1A0001",
+  "cinsiyet": "E",
+  "durum": "AKTİF",
+  "silinen": 0,
+  "kadroUnvanAdi": "ARAŞTIRMA GÖREVLİSİ",
+  "kadroUnvanAdiEn": "RESEARCH ASSISTANT",
+  "kadroUnvanId": 5,
+  "personelAdiSoyadi": "BAHADIR ARSLAN",
+  "univId": "hogwarts-uni",
+  "universiteAd": "HOGWARTS ÜNİVERSİTESİ",
+  "fakulteId": "hogwarts-fak",
+  "bolumId": "hogwarts-bol",
+  "kadroYeri": "HOGWARTS ÜNİVERSİTESİ/MÜHENDİSLİK FAKÜLTESİ/YAZILIM MÜHENDİSLİĞİ BÖLÜMÜ/YAZILIM MÜHENDİSLİĞİ ANABİLİM DALI/",
+  "kadroYeriIng": "HOGWARTS UNIVERSITY/FACULTY OF ENGINEERING/DEPARTMENT OF SOFTWARE ENGINEERING/SOFTWARE ENGINEERING/"
+ },
+ "/akademisyen/detay": {
+  "arastirmaciId": 900001,
+  "authorGuidId": "0B4AD1A25A1A0001",
+  "cinsiyet": "E",
+  "durum": "AKTİF",
+  "silinen": 0,
+  "kadroUnvanAdi": "ARAŞTIRMA GÖREVLİSİ",
+  "kadroUnvanAdiEn": "RESEARCH ASSISTANT",
+  "kadroUnvanId": 5,
+  "personelAdiSoyadi": "BAHADIR ARSLAN",
+  "univId": "hogwarts-uni",
+  "universiteAd": "HOGWARTS ÜNİVERSİTESİ",
+  "fakulteId": "hogwarts-fak",
+  "bolumId": "hogwarts-bol",
+  "kadroYeri": "HOGWARTS ÜNİVERSİTESİ/MÜHENDİSLİK FAKÜLTESİ/YAZILIM MÜHENDİSLİĞİ BÖLÜMÜ/YAZILIM MÜHENDİSLİĞİ ANABİLİM DALI/",
+  "kadroYeriIng": "HOGWARTS UNIVERSITY/FACULTY OF ENGINEERING/DEPARTMENT OF SOFTWARE ENGINEERING/SOFTWARE ENGINEERING/",
+  "temelAlanAd": "MÜHENDİSLİK TEMEL ALANI",
+  "bilimAlanAd": "BİLGİSAYAR BİLİMLERİ VE MÜHENDİSLİĞİ",
+  "anahtarkelime1Ad": "Web Kazıma",
+  "anahtarkelime2Ad": "Tersine Mühendislik",
+  "anahtarkelime3Ad": "Değişiklik Algılama",
+  "orcid": "0009-0000-0000-0001",
+  "scopusId": "",
+  "researcherId": "",
+  "gscholar": "",
+  "wpublication": 2,
+  "watif": 0,
+  "whindex": 0,
+  "scPublication": 0,
+  "scAtif": 0,
+  "scHindex": 0,
+  "wosResearcherDate": "",
+  "scopusMetricDate": "",
+  "authorImage": "data:image/jpeg;base64,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",
+  "ozgecmis": "Benim adım Dean Winchester. Kova burcuyum, gün batımından, kumsalda uzun yürüyüşler yapmaktan ve oynak hatunlardan hoşlanırım.",
+  "eposta": "bahadir.arslan@hogwarts.example"
+ },
+ "/akademisyen/ogrenim/bilgiler": {
+  "data": [
+   {
+    "baslangicTarihi": "2020",
+    "bitisTarihi": "2024",
+    "programAdi": "LİSANS",
+    "unvBirimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ",
+    "fakulteBilgisi": "MÜHENDİSLİK FAKÜLTESİ",
+    "bolumBilgisi": "YAZILIM MÜHENDİSLİĞİ BÖLÜMÜ",
+    "tezAdi": ""
+   }
+  ],
+  "recordsTotal": 1,
+  "recordsFiltered": 1
+ },
+ "/deneyim/akademik/gorev": {
+  "data": [
+   {
+    "baslangicTarihi": "2024",
+    "bitisTarihi": "",
+    "kadroUnvanAdi": "ARAŞTIRMA GÖREVLİSİ",
+    "unvBirimAdi": "HOGWARTS ÜNİVERSİTESİ",
+    "fakultebilgisi": "MÜHENDİSLİK FAKÜLTESİ",
+    "bolumbilgisi": "YAZILIM MÜHENDİSLİĞİ BÖLÜMÜ",
+    "akademikDurumAdi": "Kadrolu"
+   }
+  ],
+  "recordsTotal": 1,
+  "recordsFiltered": 1
+ },
+ "/deneyim/idari/gorev": {
+  "data": [],
+  "recordsTotal": 0,
+  "recordsFiltered": 0
+ },
+ "/deneyim/universite/disi": {
+  "data": [
+   {
+    "baslangicTarihi": "2023",
+    "bitisTarihi": "Devam Ediyor",
+    "gorevAdi": "Yazılım Mühendisi",
+    "kurulusAdi": "HAVELSAN",
+    "isyeriTuruAdi": "Özel Sektör",
+    "isTanimi": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliq"
+   },
+   {
+    "baslangicTarihi": "2022",
+    "bitisTarihi": "2024",
+    "gorevAdi": "Yazılım Geliştirici",
+    "kurulusAdi": "TÜRK KIZILAY",
+    "isyeriTuruAdi": "Sivil Toplum Kuruluşu",
+    "isTanimi": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliq"
+   }
+  ],
+  "recordsTotal": 2,
+  "recordsFiltered": 2
+ },
+ "/odul/list": {
+  "data": [],
+  "recordsTotal": 0,
+  "recordsFiltered": 0
+ },
+ "/uyelik/list": {
+  "data": [],
+  "recordsTotal": 0,
+  "recordsFiltered": 0
+ },
+ "/sanatsal/faaliyet/list": {
+  "data": [],
+  "recordsTotal": 0,
+  "recordsFiltered": 0
+ },
+ "/ders/list": {
+  "data": [],
+  "recordsTotal": 0,
+  "recordsFiltered": 0
+ },
+ "/patent/list": {
+  "data": [],
+  "recordsTotal": 0,
+  "recordsFiltered": 0
+ },
+ "/yayin/list": {
+  "data": [
+   {
+    "yayinId": 9990000102,
+    "yayinAdi": "REA: Gizli Akademik API'lerin Tersine Mühendisliği",
+    "yil": 2025,
+    "yayinYeri": "Hogwarts Bilgisayar Bilimleri Sempozyumu",
+    "doi": "10.99999/hogwarts.W9990000102",
+    "issn": "",
+    "isbn": "",
+    "yazarAdi": "BAHADIR ARSLAN, MURAT YÜLEK",
+    "yayinTuruAdi": "Uluslararası kongrede sunulan bildiri",
+    "kapsam": "1",
+    "cilt": "",
+    "sayi": "",
+    "ilkSayfa": "33",
+    "sonSayfa": "40",
+    "endeksAdi": ""
+   },
+   {
+    "yayinId": 9990000101,
+    "yayinAdi": "Değişiklik Algılamalı Web Kazıma ile Akademik Profil Birleştirme",
+    "yil": 2025,
+    "yayinYeri": "Journal of Magical Computing",
+    "doi": "10.99999/hogwarts.W9990000101",
+    "issn": "9999-0001",
+    "isbn": "",
+    "yazarAdi": "BAHADIR ARSLAN, GÖKHAN TOPAL, SERDAR MÜLDÜR",
+    "yayinTuruAdi": "Uluslararası hakemli dergide yayımlanan makale",
+    "kapsam": "1",
+    "cilt": "4",
+    "sayi": "2",
+    "ilkSayfa": "101",
+    "sonSayfa": "118",
+    "endeksAdi": ""
+   },
+   {
+    "yayinId": 9990000103,
+    "yayinAdi": "Sayfa Parmak İzi Benzerliği ile Yapısal Değişiklik Tespiti",
+    "yil": 2024,
+    "yayinYeri": "Diagon Alley Journal of Software Engineering",
+    "doi": "10.99999/hogwarts.W9990000103",
+    "issn": "9999-0002",
+    "isbn": "",
+    "yazarAdi": "BAHADIR ARSLAN, SERDAR MÜLDÜR",
+    "yayinTuruAdi": "Uluslararası hakemli dergide yayımlanan makale",
+    "kapsam": "1",
+    "cilt": "12",
+    "sayi": "7",
+    "ilkSayfa": "845",
+    "sonSayfa": "860",
+    "endeksAdi": ""
+   }
+  ],
+  "recordsTotal": 3,
+  "recordsFiltered": 3
+ },
+ "/surdurulebilirlik/list": {
+  "data": [],
+  "recordsTotal": 0,
+  "recordsFiltered": 0
+ },
+ "/analiz/wos-yillik-istatistik": [
+  {
+   "yil": 2024,
+   "yayinSayisi": 1,
+   "atifSayisi": 0
+  },
+  {
+   "yil": 2025,
+   "yayinSayisi": 2,
+   "atifSayisi": 0
+  }
+ ],
+ "/analiz/yayin-tur-kapsam-dagilimi": [
+  {
+   "turAdi": "MAKALE",
+   "ulusalSayi": 0,
+   "uluslararasiSayi": 2
+  },
+  {
+   "turAdi": "BİLDİRİ",
+   "ulusalSayi": 0,
+   "uluslararasiSayi": 1
+  }
+ ],
+ "/analiz/total-count-by-academician": [
+  {
+   "label": "Makale",
+   "count": 2
+  },
+  {
+   "label": "Bildiri",
+   "count": 1
+  },
+  {
+   "label": "Proje",
+   "count": 4
+  }
+ ],
+ "/yayin/list?yayinAnaTurId=1": {
+  "data": [
+   {
+    "yayinId": 9990000101,
+    "yayinAdi": "Değişiklik Algılamalı Web Kazıma ile Akademik Profil Birleştirme",
+    "yil": 2025,
+    "yayinYeri": "Journal of Magical Computing",
+    "doi": "10.99999/hogwarts.W9990000101",
+    "issn": "9999-0001",
+    "isbn": "",
+    "yazarAdi": "BAHADIR ARSLAN, GÖKHAN TOPAL, SERDAR MÜLDÜR",
+    "yayinTuruAdi": "Uluslararası hakemli dergide yayımlanan makale",
+    "kapsam": "1",
+    "cilt": "4",
+    "sayi": "2",
+    "ilkSayfa": "101",
+    "sonSayfa": "118",
+    "endeksAdi": ""
+   },
+   {
+    "yayinId": 9990000103,
+    "yayinAdi": "Sayfa Parmak İzi Benzerliği ile Yapısal Değişiklik Tespiti",
+    "yil": 2024,
+    "yayinYeri": "Diagon Alley Journal of Software Engineering",
+    "doi": "10.99999/hogwarts.W9990000103",
+    "issn": "9999-0002",
+    "isbn": "",
+    "yazarAdi": "BAHADIR ARSLAN, SERDAR MÜLDÜR",
+    "yayinTuruAdi": "Uluslararası hakemli dergide yayımlanan makale",
+    "kapsam": "1",
+    "cilt": "12",
+    "sayi": "7",
+    "ilkSayfa": "845",
+    "sonSayfa": "860",
+    "endeksAdi": ""
+   }
+  ],
+  "recordsTotal": 2,
+  "recordsFiltered": 2
+ },
+ "/yayin/list?yayinAnaTurId=2": {
+  "data": [
+   {
+    "yayinId": 9990000102,
+    "yayinAdi": "REA: Gizli Akademik API'lerin Tersine Mühendisliği",
+    "yil": 2025,
+    "yayinYeri": "Hogwarts Bilgisayar Bilimleri Sempozyumu",
+    "doi": "10.99999/hogwarts.W9990000102",
+    "issn": "",
+    "isbn": "",
+    "yazarAdi": "BAHADIR ARSLAN, MURAT YÜLEK",
+    "yayinTuruAdi": "Uluslararası kongrede sunulan bildiri",
+    "kapsam": "1",
+    "cilt": "",
+    "sayi": "",
+    "ilkSayfa": "33",
+    "sonSayfa": "40",
+    "endeksAdi": ""
+   }
+  ],
+  "recordsTotal": 1,
+  "recordsFiltered": 1
+ },
+ "/yayin/list?yayinAnaTurId=3": {
+  "data": [],
+  "recordsTotal": 0,
+  "recordsFiltered": 0
+ },
+ "/proje/detay?projeId=hogwarts-proje-0": {
+  "projeId": "hogwarts-proje-0",
+  "projeAdi": "OMTIS",
+  "projeTuruAd": "Kurum Destekli Proje",
+  "projeDurumuAd": "Tamamlandı",
+  "baslangicTarihi": "2023",
+  "bitisTarihi": "2024",
+  "projeKonusu": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+  "projeOzet": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+  "butcesi": "0",
+  "paraBirimi": "TL",
+  "projeEkip": [
+   {
+    "yazarad": "BAHADIR",
+    "yazarsoyad": "ARSLAN",
+    "projedekiGoreviAd": "Yürütücü",
+    "birimAdi": "HOGWARTS ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "GÖKHAN",
+    "yazarsoyad": "TOPAL",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "SERDAR",
+    "yazarsoyad": "MÜLDÜR",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "MURAT",
+    "yazarsoyad": "YÜLEK",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   }
+  ],
+  "destekleyenKurum": "Hogwarts Üniversitesi"
+ },
+ "/proje/detay?projeId=hogwarts-proje-1": {
+  "projeId": "hogwarts-proje-1",
+  "projeAdi": "OPTIS",
+  "projeTuruAd": "Sanayi Destekli Proje",
+  "projeDurumuAd": "Tamamlandı",
+  "baslangicTarihi": "2024",
+  "bitisTarihi": "2025",
+  "projeKonusu": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+  "projeOzet": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+  "butcesi": "0",
+  "paraBirimi": "TL",
+  "projeEkip": [
+   {
+    "yazarad": "BAHADIR",
+    "yazarsoyad": "ARSLAN",
+    "projedekiGoreviAd": "Yürütücü",
+    "birimAdi": "HOGWARTS ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "GÖKHAN",
+    "yazarsoyad": "TOPAL",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "SERDAR",
+    "yazarsoyad": "MÜLDÜR",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "MURAT",
+    "yazarsoyad": "YÜLEK",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   }
+  ],
+  "destekleyenKurum": "Hogwarts Üniversitesi"
+ },
+ "/proje/detay?projeId=hogwarts-proje-2": {
+  "projeId": "hogwarts-proje-2",
+  "projeAdi": "OKTIS",
+  "projeTuruAd": "TÜBİTAK Projesi",
+  "projeDurumuAd": "Devam Ediyor",
+  "baslangicTarihi": "2025",
+  "bitisTarihi": "",
+  "projeKonusu": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+  "projeOzet": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+  "butcesi": "0",
+  "paraBirimi": "TL",
+  "projeEkip": [
+   {
+    "yazarad": "BAHADIR",
+    "yazarsoyad": "ARSLAN",
+    "projedekiGoreviAd": "Yürütücü",
+    "birimAdi": "HOGWARTS ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "GÖKHAN",
+    "yazarsoyad": "TOPAL",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "SERDAR",
+    "yazarsoyad": "MÜLDÜR",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "MURAT",
+    "yazarsoyad": "YÜLEK",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   }
+  ],
+  "destekleyenKurum": "Hogwarts Üniversitesi"
+ },
+ "/proje/detay?projeId=hogwarts-proje-3": {
+  "projeId": "hogwarts-proje-3",
+  "projeAdi": "OKTEBS",
+  "projeTuruAd": "Kurum Destekli Proje",
+  "projeDurumuAd": "Devam Ediyor",
+  "baslangicTarihi": "2025",
+  "bitisTarihi": "",
+  "projeKonusu": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+  "projeOzet": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+  "butcesi": "0",
+  "paraBirimi": "TL",
+  "projeEkip": [
+   {
+    "yazarad": "BAHADIR",
+    "yazarsoyad": "ARSLAN",
+    "projedekiGoreviAd": "Yürütücü",
+    "birimAdi": "HOGWARTS ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "GÖKHAN",
+    "yazarsoyad": "TOPAL",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "SERDAR",
+    "yazarsoyad": "MÜLDÜR",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   },
+   {
+    "yazarad": "MURAT",
+    "yazarsoyad": "YÜLEK",
+    "projedekiGoreviAd": "Araştırmacı",
+    "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+   }
+  ],
+  "destekleyenKurum": "Hogwarts Üniversitesi"
+ },
+ "/proje/list": {
+  "data": [
+   {
+    "projeId": "hogwarts-proje-0",
+    "projeAdi": "OMTIS",
+    "projeTuruAd": "Kurum Destekli Proje",
+    "projeDurumuAd": "Tamamlandı",
+    "baslangicTarihi": "2023",
+    "bitisTarihi": "2024",
+    "projeKonusu": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+    "projeOzet": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+    "butcesi": "0",
+    "paraBirimi": "TL",
+    "projeEkip": [
+     {
+      "yazarad": "BAHADIR",
+      "yazarsoyad": "ARSLAN",
+      "projedekiGoreviAd": "Yürütücü",
+      "birimAdi": "HOGWARTS ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "GÖKHAN",
+      "yazarsoyad": "TOPAL",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "SERDAR",
+      "yazarsoyad": "MÜLDÜR",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "MURAT",
+      "yazarsoyad": "YÜLEK",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     }
+    ],
+    "destekleyenKurum": "Hogwarts Üniversitesi"
+   },
+   {
+    "projeId": "hogwarts-proje-1",
+    "projeAdi": "OPTIS",
+    "projeTuruAd": "Sanayi Destekli Proje",
+    "projeDurumuAd": "Tamamlandı",
+    "baslangicTarihi": "2024",
+    "bitisTarihi": "2025",
+    "projeKonusu": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+    "projeOzet": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+    "butcesi": "0",
+    "paraBirimi": "TL",
+    "projeEkip": [
+     {
+      "yazarad": "BAHADIR",
+      "yazarsoyad": "ARSLAN",
+      "projedekiGoreviAd": "Yürütücü",
+      "birimAdi": "HOGWARTS ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "GÖKHAN",
+      "yazarsoyad": "TOPAL",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "SERDAR",
+      "yazarsoyad": "MÜLDÜR",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "MURAT",
+      "yazarsoyad": "YÜLEK",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     }
+    ],
+    "destekleyenKurum": "Hogwarts Üniversitesi"
+   },
+   {
+    "projeId": "hogwarts-proje-2",
+    "projeAdi": "OKTIS",
+    "projeTuruAd": "TÜBİTAK Projesi",
+    "projeDurumuAd": "Devam Ediyor",
+    "baslangicTarihi": "2025",
+    "bitisTarihi": "",
+    "projeKonusu": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+    "projeOzet": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+    "butcesi": "0",
+    "paraBirimi": "TL",
+    "projeEkip": [
+     {
+      "yazarad": "BAHADIR",
+      "yazarsoyad": "ARSLAN",
+      "projedekiGoreviAd": "Yürütücü",
+      "birimAdi": "HOGWARTS ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "GÖKHAN",
+      "yazarsoyad": "TOPAL",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "SERDAR",
+      "yazarsoyad": "MÜLDÜR",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "MURAT",
+      "yazarsoyad": "YÜLEK",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     }
+    ],
+    "destekleyenKurum": "Hogwarts Üniversitesi"
+   },
+   {
+    "projeId": "hogwarts-proje-3",
+    "projeAdi": "OKTEBS",
+    "projeTuruAd": "Kurum Destekli Proje",
+    "projeDurumuAd": "Devam Ediyor",
+    "baslangicTarihi": "2025",
+    "bitisTarihi": "",
+    "projeKonusu": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+    "projeOzet": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.",
+    "butcesi": "0",
+    "paraBirimi": "TL",
+    "projeEkip": [
+     {
+      "yazarad": "BAHADIR",
+      "yazarsoyad": "ARSLAN",
+      "projedekiGoreviAd": "Yürütücü",
+      "birimAdi": "HOGWARTS ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "GÖKHAN",
+      "yazarsoyad": "TOPAL",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "SERDAR",
+      "yazarsoyad": "MÜLDÜR",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     },
+     {
+      "yazarad": "MURAT",
+      "yazarsoyad": "YÜLEK",
+      "projedekiGoreviAd": "Araştırmacı",
+      "birimAdi": "OSTİM TEKNİK ÜNİVERSİTESİ"
+     }
+    ],
+    "destekleyenKurum": "Hogwarts Üniversitesi"
+   }
+  ],
+  "recordsTotal": 4,
+  "recordsFiltered": 4
+ },
+ "/akademisyen/birlikte/calisanlar/{guid}": [
+  {
+   "authorGuidId": "",
+   "personelAdiSoyadi": "GÖKHAN TOPAL",
+   "kadroUnvanAdi": "",
+   "universiteAd": "OSTİM TEKNİK ÜNİVERSİTESİ",
+   "kadroYeri": "OSTİM TEKNİK ÜNİVERSİTESİ/",
+   "authorImage": ""
+  },
+  {
+   "authorGuidId": "",
+   "personelAdiSoyadi": "SERDAR MÜLDÜR",
+   "kadroUnvanAdi": "",
+   "universiteAd": "OSTİM TEKNİK ÜNİVERSİTESİ",
+   "kadroYeri": "OSTİM TEKNİK ÜNİVERSİTESİ/",
+   "authorImage": ""
+  },
+  {
+   "authorGuidId": "",
+   "personelAdiSoyadi": "MURAT YÜLEK",
+   "kadroUnvanAdi": "",
+   "universiteAd": "OSTİM TEKNİK ÜNİVERSİTESİ",
+   "kadroYeri": "OSTİM TEKNİK ÜNİVERSİTESİ/",
+   "authorImage": ""
+  }
+ ],
+ "/tez/yurt/ici/yonetilen/{guid}": []
+}

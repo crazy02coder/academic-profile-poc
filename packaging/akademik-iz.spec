@@ -13,6 +13,7 @@ ROOT = Path(SPECPATH).parent
 datas = [(str(ROOT / "static"), "static"),
          # Uygulama paketinin .py olmayan dosyaları (puan ölçütleri, WoS kayıt eşlemesi).
          (str(ROOT / "app" / "criteria"), "app/criteria"),
+         (str(ROOT / "app" / "demo"), "app/demo"),
          (str(ROOT / "app" / "wos_records.json"), "app"),
          # REA (Node betikleri); Node'u Playwright'ın sürücüsünden gelir (bkz. app/config.py rea_command).
          (str(ROOT / "node_modules"), "node_modules"),

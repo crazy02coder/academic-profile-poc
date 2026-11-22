@@ -3092,3 +3092,9 @@ details.student-accordion > summary svg:last-child { transition: transform .25s 
 .nt-group:hover { border-color: var(--blue); }
 .nt-group span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nt-group svg { width: 15px; height: 15px; color: var(--muted); }
+
+/* Ayarlar → Canlı test kaynağı */
+.ts-form { margin: 8px 0; }
+/* ekleme satırındaki düğme alanlarla aynı yükseklikte; altındaki düğmeler alanlara yapışmasın */
+.nt-add > .btn { align-self: stretch; height: auto; }
+.ts-form + .actions { margin-top: 14px; }

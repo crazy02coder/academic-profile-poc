@@ -4321,6 +4321,7 @@ function renderProfile(r, chat) {
         <div class="kebab ph-gear"><button class="icon-btn kebab-btn" type="button" aria-label="Profil ayarları" title="Profil ayarları">${icon("settings")}</button><div class="kebab-menu" hidden>
           <button class="btn ${isFav ? "" : "primary"}" id="favPersonBtn" type="button">${icon("star")}${isFav ? "Favorilerde" : "Favorilere ekle"}</button>
           <button class="btn" id="refreshProfileBtn" type="button" title="Yenilenecek bilgileri ve kaynakları seç">${icon("refresh")}Yenile</button>
+          <button class="btn" id="followPubsBtn" type="button" title="Yeni yayın yayımlayınca WhatsApp'tan haber ver">${icon("book")}Yayınlarını takip et</button>
         </div></div>
       </div>
       </div><div class="kpis">
@@ -4399,6 +4400,16 @@ function renderProfile(r, chat) {
   const drawPubs = () => publicationTable.update(r.publications);
 
   $("#refreshProfileBtn").onclick = () => refreshProfileModal(r);
+  $("#followPubsBtn").onclick = async (e) => {
+    const btn = e.currentTarget, aid = srcMeta.openalex?.id || "";
+    if (!p.orcid && !aid) { toast("Bu profilde ORCID ya da OpenAlex kimliği yok; yayınları güvenilir biçimde takip edilemez."); return; }
+    btn.disabled = true;
+    try {
+      const res = await post("/api/follows", { name: p.name, title: p.title || "", institution: p.institution || "", orcid: p.orcid || "", author_id: aid });
+      toast(`${icon("book")} ${esc(p.name)} takipte; ${res.known} mevcut yayın kaydedildi. Yeni yayınlar WhatsApp'tan bildirilecek.`);
+      btn.innerHTML = `${icon("book")}Takipte`;
+    } catch (err) { toast(esc(err.message || "Takibe alınamadı.")); btn.disabled = false; }
+  };
   loadYokStats(r.job_id);
   bindProjectModals(r);
   bindSourcePicker($("#profileSourcesPicker"), (sources) => runProfileRefresh(r, ["publications"], sources));
@@ -5227,7 +5238,8 @@ async function viewSystem() {
           <div class="recipe-block"><b>Site tarifleri (REA)</b><p class="muted">REA sitelerin arka plandaki isteklerini öğrenir; sayfa yapısı değişince yeniden öğrenir.</p>
             <div class="actions"><button class="btn sm" type="button" data-recipes>Öğrenilen tarifler</button><button class="btn sm" type="button" data-scan>Değişiklikleri tara</button></div></div>
           <div class="recipe-block"><b>Veri tarifleri</b><p class="muted">Doğrudan okunan kaynaklar: YÖK Akademik, YÖK Atlas ve YÖK İstatistik. "Kontrol et" kaynaktan örnek kayıt alır; yanıtın biçimi değiştiyse burada görünür.</p>
-            <div id="contractList" class="contract-grid">${skeleton(2)}</div></div></div>
+            <div id="contractList" class="contract-grid">${skeleton(2)}</div></div>
+          <div class="recipe-block" id="testSourceBlock"></div></div>
     </div>`);
   aiSettingsCard();
   assistantSettingsCard();
@@ -5235,6 +5247,7 @@ async function viewSystem() {
   searchSettingsCard();
   epoSettingsCard();
   notifySettingsCard();
+  testSourceBlock();
   scoreSettingsCard();
   contractsCard();
 }
@@ -5372,6 +5385,40 @@ async function assistantSettingsCard() {
       status.textContent = "Kaydedildi; yeni görüşmelerde geçerli.";
     } catch (e) { status.textContent = e.message || "Kaydedilemedi."; }
   };
+}
+
+// Canlı test kaynağı (akademik-iz-poc-test): jüri gösterimi için YÖK ve OpenAlex benzeri test API'si.
+async function testSourceBlock() {
+  const box = $("#testSourceBlock");
+  let cfg = null;
+  try { cfg = await api("/api/settings/test-source"); } catch { if (box) box.innerHTML = ""; return; }
+  if (!box?.isConnected) return;
+  const draw = (message = "") => {
+    box.innerHTML = `<b>Canlı test kaynağı</b><p class="muted">Jüri gösterimi için YÖK Akademik ve OpenAlex'i taklit eden test API'si (Hogwarts Üniversitesi · Bahadır Arslan).
+        Adres girilince Veri tarifleri'ne test kaynağı eklenir ve test akademisyeni yayın takibine alınır: test projesinde
+        <code>python app.py eski</code> sonrası "Kontrol et" farkı bulur, <code>python app.py openalex "…"</code> sonrası bir dakika içinde WhatsApp'tan yeni yayın bildirimi gelir.</p>
+      <form class="nt-add ts-form" autocomplete="off"><div class="input"><input id="tsUrl" inputmode="url" placeholder="https://akademik-iz-poc-test.onrender.com" value="${esc(cfg.url || "")}"></div>
+        <button class="btn sm" type="submit">Kaydet</button></form>
+      ${cfg.enabled ? `<div class="actions"><button class="btn sm" type="button" data-ts-learn>${icon("sparkle")}Test sitesini REA'ya öğret</button>
+        <a class="btn sm" href="${esc(cfg.url)}" target="_blank" rel="noopener">${icon("external")}Test panelini aç</a></div>` : ""}
+      <p class="muted ai-note" data-ts-status role="status">${esc(message)}</p>`;
+    hydrateIcons(box);
+    const status = (t) => { $("[data-ts-status]", box).textContent = t; };
+    $(".ts-form", box).onsubmit = async (e) => {
+      e.preventDefault();
+      try { cfg = await post("/api/settings/test-source", { url: $("#tsUrl").value.trim() }); draw(cfg.enabled ? "Kaydedildi; Veri tarifleri'ne test kaynağı eklendi." : "Test kaynağı kapatıldı."); contractsCard(); }
+      catch (err) { status(err.message || "Kaydedilemedi."); }
+    };
+    $("[data-ts-learn]", box)?.addEventListener("click", async (e) => {
+      const btn = e.currentTarget; btn.disabled = true; status("Hogwarts kadro sayfası okunuyor (Render uykudaysa ~1 dakika)…");
+      try {
+        const r = await post("/api/test-source/learn-site", {});
+        status(`Öğretildi: ${r.domain} · ${r.elements} yapı öğesi${r.person_on_page ? " · Bahadır Arslan sayfada bulundu" : ""}. Sayfa yapısı değişince "Değişiklikleri tara" farkı bulur.`);
+      } catch (err) { status(err.message || "Öğretilemedi."); }
+      finally { btn.disabled = false; }
+    });
+  };
+  draw();
 }
 
 // WhatsApp bildirimi (QR ile bağlı cihaz): veri tarifi kontrolleri ve REA taramasının sonucu seçilen alıcılara gider.

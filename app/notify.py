@@ -188,7 +188,9 @@ def _contract_story(r: dict) -> str:
         return (f"⚠️ *{label}*: kaynağa ulaşılamadı ({r['error']}). Önceki tarif korunuyor; site geçici olarak kapalı "
                 "olabilir, bir sonraki kontrolde yeniden denenecek.")
     if r.get("status") == "broken":
-        return (f"🔴 *{label}*: kaynağın yanıt biçimi değişti ve şu bilgiler boş dönmeye başladı: {_names(r.get('empty') or [])}. "
+        outputs = r.get("outputs") or {}
+        empty = [outputs.get(k, k) for k in r.get("empty") or []]  # iç ad yerine okunur ad: faculty → Fakülte
+        return (f"🔴 *{label}*: kaynağın yanıt biçimi değişti ve şu bilgiler boş dönmeye başladı: {_names(empty)}. "
                 "Bu alanlar düzelene kadar ilgili sayfalarda eksik görünecek; Ayarlar → Veri tarifleri → \"Tarifi güncelle\" "
                 "ile yeni eşleme öğrenilebilir.")
     if r.get("status") == "changed":
@@ -331,7 +333,7 @@ def latest_status() -> str:
 async def check_all_contracts() -> list[dict]:
     from . import contracts
     results = []
-    for cid in contracts.CONTRACTS:
+    for cid in contracts.active_ids():
         try:
             results.append(await contracts.check(cid))
         except Exception as exc:  # noqa: BLE001

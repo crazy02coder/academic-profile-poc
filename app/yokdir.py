@@ -120,6 +120,9 @@ def _trip(reason: str) -> None:
 
 async def api(client, path: str, **params):
     """YÖK API çağrısı: `data` alanını döndürür. Zaman aşımı/engelde sigorta atar; tekrar denemez."""
+    from . import hogwarts
+    if hogwarts.handles(path, params):  # canlı test kurumu: pakete gömülü yanıt, ağa çıkılmaz
+        return hogwarts.yok_api(path, params)
     if paused():
         raise httpx.ConnectError("YÖK Akademik şu an yanıt vermiyor; bir süre sonra yeniden denenecek.")
     try:
@@ -141,16 +144,23 @@ async def api(client, path: str, **params):
 
 
 # ------------------------------------------------------------------ üniversite ve fakülteler
+def _with_demo(unis: list[dict]) -> list[dict]:
+    """Canlı test kurumu (Hogwarts Üniversitesi) YÖK listesinin sonuna eklenir."""
+    from . import hogwarts
+    row = hogwarts.university_row()
+    return unis + [row] if row and not any(u.get("birim_id") == row["birim_id"] for u in unis) else unis
+
+
 async def universities(client, refresh: bool = False) -> list[dict]:
     cached = None if refresh else _load("universities2", LIST_TTL)
     if cached:
-        return cached
+        return _with_demo(cached)
     try:
         d = await api(client, "/university/list", page=1, length=1000)
     except httpx.HTTPError:
         stale = _load("universities2", 10 ** 10)  # YÖK yanıt vermezse eski liste: sayfa takılmasın
         if stale:
-            return stale
+            return _with_demo(stale)
         raise
     out = [{"name": clean(u["birimAdi"]), "url": f"{BASE}/universities", "birim_id": u["birimId"],
             "name_en": u.get("birimAdiEn") or "", "city": u.get("ilAdi") or "", "type": u.get("tur") or "",
@@ -158,7 +168,7 @@ async def universities(client, refresh: bool = False) -> list[dict]:
            for u in (d or {}).get("data", []) if u.get("birimAdi")]
     if out:
         _save("universities2", out)
-    return out
+    return _with_demo(out)
 
 
 def match_university(unis: list[dict], names: list[str]) -> dict | None:
@@ -178,7 +188,7 @@ def match_university(unis: list[dict], names: list[str]) -> dict | None:
     return best if score >= 0.75 else None
 
 
-def place(row: dict) -> tuple[str, str]:
+def place(row: dict, cid: str = "yok.staff") -> tuple[str, str]:
     """(fakülte, bölüm). YÖK eskiden bunları fakulteAd / bolumAd alanlarında veriyordu; Kasım 2026'dan beri liste
     satırlarında yalnız kadroYeri var: "ÜNİVERSİTE/FAKÜLTE/BÖLÜM/ANABİLİM DALI/". Eski alanlar varsa onlar kullanılır."""
     faculty, department = clean(row.get("fakulteAd") or ""), clean(row.get("bolumAd") or "")
@@ -186,8 +196,8 @@ def place(row: dict) -> tuple[str, str]:
         return faculty, department
     # Ayarlar → Veri tarifleri'nde öğrenilmiş eşleme varsa (yanıt biçimi yine değiştiyse) o kullanılır.
     from . import contracts
-    faculty = faculty or contracts.mapped("yok.staff", "faculty", row)
-    department = department or contracts.mapped("yok.staff", "department", row)
+    faculty = faculty or contracts.mapped(cid, "faculty", row)
+    department = department or contracts.mapped(cid, "department", row)
     if faculty and department:
         return faculty, department
     parts = [clean(x) for x in str(row.get("kadroYeri") or "").split("/") if clean(x)]
@@ -197,14 +207,14 @@ def place(row: dict) -> tuple[str, str]:
     return faculty or (parts[0] if parts else ""), department or (parts[1] if len(parts) > 1 else "")
 
 
-def _person(row: dict) -> dict:
+def _person(row: dict, cid: str = "yok.staff") -> dict:
     guid = row.get("authorGuidId") or ""
     title_raw = clean(row.get("kadroUnvanAdi") or "")
     keywords = [clean(row.get(f"anahtarkelime{i}Ad") or "") for i in (1, 2, 3)]
     return {
         "name": tr_title(clean(row.get("personelAdiSoyadi") or "")),
         "title": YOK_TITLES.get(title_raw, tr_title(title_raw)), "university": clean(row.get("universiteAd") or ""),
-        "faculty": place(row)[0], "department": place(row)[1],
+        "faculty": place(row, cid)[0], "department": place(row, cid)[1],
         "orcid": row.get("orcid") or "", "email": "", "url": f"{BASE}/academician-details?authorGuidId={guid}" if guid else "",
         "yok_id": guid, "photo": "", "source": "yok", "field": clean(row.get("bilimAlanAd") or ""),
         "area": clean(row.get("temelAlanAd") or ""), "keywords": [k for k in keywords if k],
@@ -430,6 +440,9 @@ async def _wikidata_site(name: str) -> str:
 
 async def _home_of(client, uni: dict) -> str:
     """Kurum sitesi (site adresini kullanıcı girmez): önbellek, yoksa Wikidata."""
+    from . import hogwarts
+    if uni.get("birim_id") == hogwarts.BIRIM:
+        return hogwarts.home()
     key = f"home-{uni['id']}"
     cached = _load(key, 30 * 24 * 3600)
     if cached:

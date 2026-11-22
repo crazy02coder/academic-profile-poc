@@ -33,6 +33,10 @@ CONTRACTS = {
                                    "score": "Taban puan", "rank": "Başarı sırası", "quota": "Kontenjan"},
                        # Yeni açılan ya da henüz yerleştirme yapılmamış programda puan ve sıra boş olabilir.
                        "optional": ["score", "rank"]},
+    # Canlı test kaynağı (Ayarlar → Sistem → test API adresi girilince görünür): YÖK ile aynı ayrıştırıcı
+    "test.staff": {"label": "Test API · kadro listesi (Hogwarts)", "source": "akademik-iz-poc-test /api/akademisyen/list",
+                   "learnable": True, "test": True,
+                   "outputs": {"name": "Ad soyad", "title": "Unvan", "faculty": "Fakülte", "department": "Bölüm", "yok_id": "Kimlik"}},
     "yok.istatistik": {"label": "YÖK İstatistik · öğrenci sayıları", "source": "istatistik.yok.gov.tr (Öğrenci Sayıları Raporu)",
                        "outputs": {"name": "Üniversite", "type": "Üniversite türü", "city": "İl", "mode": "Öğrenim türü",
                                    "year": "Öğretim yılı", "total": "Genel toplam"}},
@@ -92,6 +96,9 @@ def mapped(cid: str, output: str, row: dict) -> str:
 
 # ------------------------------------------------------------------ örnek kayıt ve ayrıştırma
 async def _sample(cid: str) -> dict:
+    if cid == "test.staff":
+        from . import test_source
+        return await test_source.staff_sample()
     if cid == "yok.istatistik":
         from . import yok_istatistik
         got = await yok_istatistik.sample()
@@ -123,9 +130,9 @@ async def _sample(cid: str) -> dict:
 
 
 def _parse(cid: str, row: dict) -> dict:
-    if cid == "yok.staff":
+    if cid in ("yok.staff", "test.staff"):
         from .yokdir import _person
-        return _person(row)
+        return _person(row, cid)
     if cid == "atlas.programs":
         from . import atlas
         program = atlas._program(row, int(row.get("_yil") or time.localtime().tm_year), True)
@@ -142,9 +149,16 @@ def _fields(row: dict) -> list[str]:
     return sorted(k for k, v in row.items() if v not in (None, "", [], {}))
 
 
+def active_ids() -> list[str]:
+    """Gösterilen tarifler: test kaynağı yalnız adresi girildiyse."""
+    from . import test_source
+    return [cid for cid, spec in CONTRACTS.items() if not spec.get("test") or test_source.enabled()]
+
+
 def summary() -> list[dict]:
     out = []
-    for cid, spec in CONTRACTS.items():
+    for cid in active_ids():
+        spec = CONTRACTS[cid]
         saved = load(cid)
         out.append({"id": cid, "label": spec["label"], "source": spec["source"], "status": saved.get("status") or "unknown",
                     "checked_at": saved.get("checked_at") or 0, "empty": saved.get("empty") or [], "removed": saved.get("removed") or [],

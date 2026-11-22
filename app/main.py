@@ -683,6 +683,9 @@ async def create_job(data: JobIn):
 @app.post("/api/jobs/{jid}/refresh", status_code=202)
 async def refresh_job(jid: str, body: RefreshIn | None = None, *, wos: bool = True):
     """Seçilen bölümleri yeniler; gövdesiz eski istemciler tam yenileme yapabilir."""
+    from . import hogwarts
+    if jid == hogwarts.JOB_ID:
+        raise HTTPException(409, "Bu, canlı test kurumunun hazır profilidir; yenilenmez.")
     old = _result_for(jid)
     if not old:
         raise HTTPException(404, "Profil sonucu bulunamadı.")
@@ -1122,6 +1125,93 @@ async def whatsapp_groups():
         raise HTTPException(409, str(exc) if isinstance(exc, RuntimeError) else f"Gruplar okunamadı ({type(exc).__name__}).") from None
 
 
+class TestSourceIn(BaseModel):
+    url: str = ""
+
+
+@app.get("/api/settings/test-source")
+async def test_source_get():
+    from . import test_source
+    return test_source.public()
+
+
+@app.post("/api/settings/test-source")
+async def test_source_save(body: TestSourceIn):
+    from . import pubwatch, test_source
+    try:
+        out = test_source.save(body.url)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    asyncio.create_task(pubwatch.ensure_test_follow())  # test akademisyeni hemen takibe alınır
+    return out
+
+
+@app.post("/api/test-source/learn-site")
+async def test_source_learn_site():
+    """Hogwarts kadro sayfasını REA site tariflerine ekler (sonraki "Değişiklikleri tara" bununla kıyaslar)."""
+    from . import test_source
+    try:
+        return await test_source.learn_site()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, str(exc) if isinstance(exc, ValueError) else f"Test sitesi okunamadı ({type(exc).__name__}).") from None
+
+
+class FollowIn(BaseModel):
+    name: str = ""
+    author_id: str = ""
+    orcid: str = ""
+    source: str = "openalex"
+    title: str = ""
+    institution: str = ""
+
+
+@app.get("/api/follows")
+async def follows_list():
+    from . import pubwatch
+    return pubwatch.public()
+
+
+@app.post("/api/follows")
+async def follows_add(body: FollowIn):
+    """Yayın takibine ekler; o anki yayınlar bilinen sayılır (ilk takipte bildirim yok)."""
+    from . import pubwatch
+    if body.source not in ("openalex", "test"):
+        raise HTTPException(422, "Bilinmeyen kaynak.")
+    try:
+        entry = await pubwatch.follow(body.name, body.author_id, body.orcid, body.source, body.title, body.institution)
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Yazar kaydı okunamadı ({type(exc).__name__}).") from None
+    return {"ok": True, "key": entry["key"], "known": len(entry["known"]), "follows": pubwatch.public()}
+
+
+@app.post("/api/follows/test")
+async def follows_add_test():
+    """Canlı test akademisyenini (Bahadır Arslan · Hogwarts) takibe ekler."""
+    from . import pubwatch, test_source
+    p = test_source.TEST_PERSON
+    try:
+        entry = await pubwatch.follow(p["name"], p["author_id"], p["orcid"], "test", "", p["institution"])
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Test API'sine ulaşılamadı ({type(exc).__name__}). Render uykudaysa bir dakika sonra yeniden deneyin.") from None
+    return {"ok": True, "key": entry["key"], "known": len(entry["known"]), "follows": pubwatch.public()}
+
+
+@app.delete("/api/follows/{key:path}")
+async def follows_remove(key: str):
+    from . import pubwatch
+    return {"ok": pubwatch.unfollow(key), "follows": pubwatch.public()}
+
+
+@app.post("/api/follows/check")
+async def follows_check():
+    from . import pubwatch
+    return {"report": await pubwatch.check(), "follows": pubwatch.public()}
+
+
 @app.get("/api/whatsapp/status")
 async def whatsapp_status():
     from . import whatsapp
@@ -1197,8 +1287,9 @@ async def _remote_data():
 @app.on_event("startup")
 async def _daily_notify():
     """Günlük veri tarifi kontrolü (Ayarlar → Bildirimler → Günde bir kez kontrol et)."""
-    from . import notify, whatsapp
+    from . import notify, pubwatch, whatsapp
     asyncio.create_task(notify.daily_loop())
+    asyncio.create_task(pubwatch.loop())  # yayın takibi: test kaynağı dakikada bir, OpenAlex günde bir
     if whatsapp.paired() and whatsapp.available():
         asyncio.create_task(whatsapp.connect())  # daha önce QR okutulduysa kendiliğinden bağlan
 
@@ -1959,7 +2050,8 @@ async def universities():
 
 
 _FEATURED = {name: order for order, names in enumerate([
-    ("ostim teknik universitesi",), ("orta dogu teknik universitesi",), ("istanbul teknik universitesi",),
+    ("ostim teknik universitesi",), ("hogwarts universitesi",),  # canlı test kurumu (app/hogwarts.py)
+    ("orta dogu teknik universitesi",), ("istanbul teknik universitesi",),
     ("bogazici universitesi",), ("koc universitesi",), ("fenerbahce universitesi",), ("ted universitesi",),
     ("tobb ekonomi ve teknoloji universitesi",), ("marmara universitesi",), ("baskent universitesi",),
     ("ihsan dogramaci bilkent universitesi", "bilkent universitesi"), ("galatasaray universitesi",),
@@ -2414,7 +2506,8 @@ async def university_department_staff(uid: str, faculty: str = Query(default="",
         if people:
             return {"people": people}
     elif people:
-        return {"people": yokdir.by_rank([yokdir.public_person(p, uni.get("raw", "")) for p in people])}
+        from . import hogwarts
+        return {"people": hogwarts.attach(yokdir.by_rank([yokdir.public_person(p, uni.get("raw", "")) for p in people]))}
     # YÖK'ten kadro gelmedi: hata yerine bölümün kendi sayfasındaki kişi kartları.
     site = await _site_department_staff(uid, faculty, department)
     if site:

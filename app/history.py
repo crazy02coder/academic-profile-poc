@@ -123,7 +123,10 @@ def save(chat: dict):
 
 
 def load(cid: str) -> dict | None:
+    from . import hogwarts
     p = CHATS_DIR / f"{_safe(cid)}.json"
+    if cid == hogwarts.CHAT_ID and not p.exists():
+        return hogwarts.chat()
     return json.loads(p.read_text()) if p.exists() else None
 
 
@@ -158,9 +161,14 @@ def _interests(job_id: str | None) -> list[str]:
 
 
 def list_all() -> list[dict]:
-    if not CHATS_DIR.exists():
-        return []
+    from . import hogwarts
     out = []
+    demo = hogwarts.chat()
+    if demo and not (CHATS_DIR / f"{demo['id']}.json").exists():  # canlı test kurumunun hazır profili (sohbet edilince dosyadan)
+        out.append({k: demo.get(k) for k in ("id", "job_id", "name", "title", "institution", "papers", "created", "updated")}
+                   | {"messages": 0, "preview": "", "interests": (hogwarts.result(demo["job_id"]) or {}).get("profile", {}).get("interests", [])})
+    if not CHATS_DIR.exists():
+        return out
     for p in CHATS_DIR.glob("*.json"):
         try:
             c = json.loads(p.read_text())
@@ -178,6 +186,10 @@ def save_result(job_id: str, result: dict):
 
 
 def load_result(job_id: str) -> dict | None:
+    from . import hogwarts
+    demo = hogwarts.result(job_id)
+    if demo:
+        return demo
     p = RUNS_DIR / f"{_safe(job_id)}.json"
     return json.loads(p.read_text()) if p.exists() else None
 
