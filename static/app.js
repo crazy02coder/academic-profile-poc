@@ -5228,7 +5228,8 @@ async function viewSystem() {
       <div class="settings-label">Veri kaynakları</div>
       <div class="settings-two"><div class="card card-pad" id="speedCard">${skeleton(2)}</div>
         <div class="card card-pad ai-card" id="searchCard">${skeleton(2)}</div></div>
-      <div class="card card-pad ai-card" id="epoCard">${skeleton(2)}</div>
+      <div class="settings-two"><div class="card card-pad ai-card key-card" id="epoCard">${skeleton(2)}</div>
+        <div class="card card-pad ai-card key-card" id="openalexCard">${skeleton(2)}</div></div>
       <div class="settings-label">Puan hesaplama</div>
       <div class="card card-pad" id="scoreCard">${skeleton(3)}</div>
       <div class="settings-label">Bildirimler</div>
@@ -5246,6 +5247,7 @@ async function viewSystem() {
   speedSettingsCard();
   searchSettingsCard();
   epoSettingsCard();
+  openalexSettingsCard();
   notifySettingsCard();
   testSourceBlock();
   scoreSettingsCard();
@@ -5572,8 +5574,9 @@ async function epoSettingsCard() {
         <div class="field"><label for="epoKey">Consumer Key</label><div class="input"><input id="epoKey" type="password" autocomplete="new-password" placeholder="${cfg.epo ? "Kayıtlı; değiştirmek için yazın" : "Consumer Key"}"></div></div>
         <div class="field"><label for="epoSecret">Consumer Secret</label><div class="input"><input id="epoSecret" type="password" autocomplete="new-password" placeholder="${cfg.epo ? "Kayıtlı; değiştirmek için yazın" : "Consumer Secret"}"></div></div>
       </form>
-      <div class="actions"><button class="btn primary sm" type="button" data-epo-save>Kaydet</button>
-        ${cfg.epo ? `<button class="btn sm" type="button" data-epo-clear>Anahtarı sil</button>` : ""}</div>
+      <div class="actions key-actions"><button class="btn primary sm" type="button" data-epo-save>Kaydet</button>
+        <button class="btn sm" type="button" data-epo-test ${cfg.epo ? "" : "disabled"}>${icon("refresh")}Bağlantıyı dene</button>
+        ${cfg.epo ? `<span class="spacer"></span><button class="btn sm danger" type="button" data-epo-clear>${icon("trash")}Anahtarı sil</button>` : ""}</div>
       <p class="muted ai-note" data-epo-status role="status">${esc(message || (cfg.epo ? "Anahtar kayıtlı; patent sekmeleri açık." : "Anahtar yok; patent sekmeleri kapalı."))}</p>`;
     hydrateIcons(card);
     const status = (text) => { $("[data-epo-status]", card).textContent = text; };
@@ -5585,9 +5588,55 @@ async function epoSettingsCard() {
     $("[data-epo-save]", card).addEventListener("click", () => {
       const key = $("#epoKey").value.trim(), secret = $("#epoSecret").value.trim();
       if (!cfg.epo && (!key || !secret)) { status("Consumer Key ve Consumer Secret ikisi de gerekli."); return; }
+      if (!key && !secret) { status("Değiştirmek için yeni anahtarı yazın."); return; }
       save({ epo_key: key, epo_secret: secret });
     });
+    $("[data-epo-test]", card).addEventListener("click", async (e) => {
+      const btn = e.currentTarget; btn.disabled = true; status("EPO'ya bağlanılıyor…");
+      try { const r = await post("/api/settings/epo/test", {}); status(r.message); }
+      catch (err) { status(err.message || "Denenemedi."); }
+      finally { btn.disabled = false; }
+    });
     $("[data-epo-clear]", card)?.addEventListener("click", () => save({ clear: ["epo_key", "epo_secret"] }));
+  };
+  draw();
+}
+
+// OpenAlex anahtarı: anahtarsız istekler IP başına ortak günlük bütçeyi paylaşır; anahtarla kişisel bütçe kullanılır.
+async function openalexSettingsCard() {
+  const card = $("#openalexCard");
+  let cfg = null;
+  try { cfg = await api("/api/settings/search"); } catch { if (card) card.innerHTML = `<p class="muted">OpenAlex ayarları okunamadı.</p>`; return; }
+  if (!card?.isConnected) return;
+  const draw = (message = "") => {
+    card.innerHTML = `<div class="card-title">${icon("globe")}OpenAlex</div>
+      <p class="muted" style="margin:0 0 12px">Yayınlar, atıflar ve yayın takibi OpenAlex'ten gelir. Anahtarsız istekler ortak günlük bütçeyi paylaşır; ücretsiz anahtarla kişisel bütçe kullanılır: openalex.org → hesap → <b>API key</b>.</p>
+      <form class="ai-form" autocomplete="off">
+        <div class="field"><label for="oaKey">API anahtarı</label><div class="input"><input id="oaKey" type="password" autocomplete="new-password" placeholder="${cfg.openalex ? "Kayıtlı; değiştirmek için yazın" : "OpenAlex API anahtarı"}"></div></div>
+      </form>
+      <div class="actions key-actions"><button class="btn primary sm" type="button" data-oa-save>Kaydet</button>
+        <button class="btn sm" type="button" data-oa-test>${icon("refresh")}Bağlantıyı dene</button>
+        ${cfg.openalex ? `<span class="spacer"></span><button class="btn sm danger" type="button" data-oa-clear>${icon("trash")}Anahtarı sil</button>` : ""}</div>
+      <p class="muted ai-note" data-oa-status role="status">${esc(message || (cfg.openalex ? "Anahtar kayıtlı; kişisel günlük bütçe kullanılıyor." : "Anahtar yok; ortak günlük bütçe kullanılıyor."))}</p>`;
+    hydrateIcons(card);
+    const status = (text) => { $("[data-oa-status]", card).textContent = text; };
+    const save = async (body, done) => {
+      status("Kaydediliyor…");
+      try { cfg = await post("/api/settings/search", body); draw(done); }
+      catch (e) { status(e.message || "Kaydedilemedi."); }
+    };
+    $("[data-oa-save]", card).addEventListener("click", () => {
+      const key = $("#oaKey").value.trim();
+      if (!key) { status("Anahtarı yazın."); return; }
+      save({ openalex_key: key }, "Kaydedildi; bütün OpenAlex isteklerinde kullanılıyor.");
+    });
+    $("[data-oa-test]", card).addEventListener("click", async (e) => {
+      const btn = e.currentTarget; btn.disabled = true; status("OpenAlex'e bağlanılıyor…");
+      try { const r = await post("/api/settings/openalex/test", {}); status(r.message); }
+      catch (err) { status(err.message || "Denenemedi."); }
+      finally { btn.disabled = false; }
+    });
+    $("[data-oa-clear]", card)?.addEventListener("click", () => save({ clear: ["openalex_key"] }, "Anahtar silindi; ortak bütçe kullanılıyor."));
   };
   draw();
 }

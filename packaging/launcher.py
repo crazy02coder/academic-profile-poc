@@ -4,7 +4,7 @@ Açılınca:
   1. Sunucuyu (FastAPI + uvicorn) arka planda, boş bir yerel portta başlatır.
   2. Logolu küçük bir kontrol penceresi gösterir: adres, durum, "Uygulamayı aç" ve "Kapat".
   3. Sunucu hazır olunca uygulamayı varsayılan tarayıcıda açar.
-  4. İlk açılışta tarama için gereken Chromium bileşenlerini indirir (bir kez; uygulama bu sırada da kullanılabilir).
+  4. Tarama için bilgisayarın Chrome'unu (yoksa Edge'ini) kullanır; ikisi de yoksa ilk açılışta Chromium indirir.
 Pencere kapanınca sunucu da kapanır.
 
 Uygulama başka bir süreç olarak kendini çağırdığında ("exe -m app.search_worker") yalnız o modül çalışır.
@@ -86,9 +86,12 @@ def _free_port(start: int) -> int:
 
 
 def _browsers_missing() -> list[str]:
-    """Tarama için gereken Chromium'lardan diskte olmayanlar (Playwright ve Patchright ayrı sürüm kullanır)."""
+    """Tarama için gereken Chromium'lardan diskte olmayanlar (Playwright ve Patchright ayrı sürüm kullanır).
+    Bilgisayarda Chrome varsa ikisi de onu kullanır (yalnız Edge varsa Playwright onu kullanır); indirme gerekmez."""
+    from app.config import system_browser
+    needed = [name for name, have in (("playwright", system_browser()), ("patchright", system_browser(chrome_only=True))) if not have]
     missing = []
-    for name in ("playwright", "patchright"):
+    for name in needed:
         try:
             module = __import__(f"{name}._impl._driver", fromlist=["compute_driver_executable", "get_driver_env"])
             node, cli = module.compute_driver_executable()

@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-from .config import chromium_executable, rea_command
+from .config import chromium_executable, rea_command, stealth_browser, hidden_process
 
 NOISE_HOSTS = ("google-analytics", "googletagmanager", "doubleclick", "facebook", "hotjar", "clarity.ms",
                "yandex", "gstatic", "fonts.googleapis", "cloudflareinsights", "tiktok", "linkedin",
@@ -169,7 +169,7 @@ def run_scenario_sync(scenario: dict, timeout: int = 90) -> Capture:
         started = time.time()
         proc = subprocess.run([*cmd, "capture-browser-scenario", path, "--format", "json"],
                               capture_output=True, text=True, timeout=timeout,
-                              env={**os.environ, "NO_COLOR": "1"})
+                              env={**os.environ, "NO_COLOR": "1"}, **hidden_process())
         cap = _parse(proc.stdout)
         if not cap.duration_ms:
             cap.duration_ms = int((time.time() - started) * 1000)
@@ -213,7 +213,7 @@ async def capture_connected(endpoint: str, target_id: str, url: str, timeout: in
         proc = await asyncio.create_subprocess_exec(
             *cmd, "capture-browser-scenario", path, "--format", "json",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "NO_COLOR": "1"})
+            env={**os.environ, "NO_COLOR": "1"}, **hidden_process())
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
         cap = _parse(stdout.decode("utf-8", "replace"))
         if proc.returncode and cap.ok:
@@ -298,7 +298,7 @@ class StealthBridge:
     def __enter__(self):
         from scrapling.fetchers import StealthySession
 
-        self.session = StealthySession(headless=True, network_idle=True, timeout=45000, block_webrtc=True,
+        self.session = StealthySession(**stealth_browser(), headless=True, network_idle=True, timeout=45000, block_webrtc=True,
                                        extra_flags=[f"--remote-debugging-port={self.port}",
                                                     "--remote-debugging-address=127.0.0.1"])
         self.session.__enter__()
@@ -316,7 +316,7 @@ class StealthBridge:
         if not cmd:
             return None
         proc = subprocess.run([*cmd, "list-browser-targets", self.endpoint, "--format", "json"],
-                              capture_output=True, text=True, timeout=40)
+                              capture_output=True, text=True, timeout=40, **hidden_process())
         try:
             targets = json.loads(proc.stdout)["normalized_result"]["targets"]
         except (ValueError, KeyError, TypeError):

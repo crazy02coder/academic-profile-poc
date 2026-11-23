@@ -22,7 +22,7 @@ from scrapling import Selector
 from scrapling.fetchers import AsyncStealthySession
 
 from . import wos_verification
-from .config import ROOT
+from .config import ROOT, stealth_browser
 from .text import clean, doi_key, fold
 
 CACHE = ROOT / 'data' / 'wos'
@@ -370,7 +370,7 @@ async def _run(result: dict, retry: bool, on_publications=None):
                         if previous.get('records'):
                             await publish(previous['records'], {**previous, 'complete': False})
                         progress({'checked': 0, 'candidates': 0, 'matched': 0, 'new': 0, 'rejected': 0})
-                        session = await stack.enter_async_context(AsyncStealthySession(
+                        session = await stack.enter_async_context(AsyncStealthySession(**stealth_browser(), 
                             headless=True, network_idle=False, timeout=45000, max_pages=1))
                         try:
                             async with wos_verification.time_budget(300):
@@ -415,7 +415,7 @@ async def _run(result: dict, retry: bool, on_publications=None):
                     if entry is None or retry and entry.get('status') != 'ok':
                         try:
                             if session is None:
-                                session = await stack.enter_async_context(AsyncStealthySession(
+                                session = await stack.enter_async_context(AsyncStealthySession(**stealth_browser(), 
                                     headless=True, network_idle=False, timeout=45000, max_pages=1))
                             async with wos_verification.time_budget(90):
                                 entry = await lookup(p, session)

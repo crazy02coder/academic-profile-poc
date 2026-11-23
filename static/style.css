@@ -3020,6 +3020,12 @@ details.student-accordion > summary svg:last-child { transition: transform .25s 
 .ct-actions .btn { justify-content: center; white-space: nowrap; }
 .key-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
 .key-actions .spacer { flex: 1; }
+/* Yan yana anahtar kartları: aynı yükseklik, düğmeler ve durum satırı kartın altında hizalı */
+.settings-two > .key-card { display: flex; flex-direction: column; }
+.settings-two > .key-card > .ai-form { flex: 0 0 auto; }
+.settings-two > .key-card > .key-actions { margin-top: auto; padding-top: 14px; }
+.key-actions .btn { display: inline-flex; align-items: center; gap: 6px; }
+.key-actions .btn svg { width: 15px; height: 15px; }
 .btn.danger { color: #d92d20; border-color: color-mix(in srgb, #d92d20 35%, var(--line)); }
 .btn.danger:hover { background: rgba(217,45,32,.07); }
 

@@ -101,7 +101,28 @@ def _site_rows(rows: list[dict], root: str) -> list[dict]:
     return out
 
 
+def _ddgs_sync(query: str, backend: str) -> list[dict]:
+    """search_worker ile aynı sorgu, aynı süreçte (exe için)."""
+    import contextlib
+    import io as _io
+
+    from . import search_worker
+    out = _io.StringIO()
+    with contextlib.redirect_stdout(out):
+        sys_stdin = sys.stdin
+        try:
+            sys.stdin = _io.StringIO(json.dumps({"query": query, "backend": backend}))
+            search_worker.main()
+        finally:
+            sys.stdin = sys_stdin
+    return json.loads(out.getvalue() or "[]")
+
+
 async def _ddgs_worker(query: str, backend: str) -> list[dict]:
+    if getattr(sys, "frozen", False):
+        # Paketli exe'de alt süreç = uygulamanın tamamının yeniden açılması (her sorguda saniyeler); DDGS kendi
+        # zaman aşımıyla (4 sn) sınırlı olduğundan iş parçacığında çalıştırılır.
+        return await asyncio.to_thread(_ddgs_sync, query, backend)
     # Ayrı süreç sayesinde süre aşımı/iptal gerçek isteği de sonlandırır;
     # asyncio.to_thread arka planda çalışmaya devam ederdi.
     proc = await asyncio.create_subprocess_exec(

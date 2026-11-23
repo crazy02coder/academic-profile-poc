@@ -131,8 +131,10 @@ async def _context():
         _SESSION["playwright"] = playwright
         port = rea._free_port()
         try:
+            from .config import system_browser
+            exe = system_browser()  # bilgisayarın Chrome/Edge'i; yoksa Playwright'ın Chromium'u
             browser = await playwright.chromium.launch(
-                headless=True, timeout=5000,
+                headless=True, timeout=5000, **({"executable_path": exe} if exe else {}),
                 args=[f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1"])
             _SESSION["browser"] = browser
             context = await browser.new_context(locale="tr-TR")

@@ -105,13 +105,13 @@ def save(provider: str, key: str = "", clear_key: bool = False, model: str = "",
 def secrets() -> list[str]:
     keys = search()
     return [p["key"] for p in (_load().get("providers") or {}).values() if p.get("key")] \
-        + [keys[name] for name in ("serper_key", "google_cse_key", "epo_key", "epo_secret") if keys[name]]
+        + [keys[name] for name in ("serper_key", "google_cse_key", "epo_key", "epo_secret", "openalex_key") if keys[name]]
 
 
 # ------------------------------------------------------------------ arama servisleri (Serper.dev, Google Custom Search)
 # Ayarlar sayfasından girilen servis anahtarları → yedek ortam değişkeni (.env). EPO: patent servisi (Open Patent Services).
 _SEARCH_ENV = {"serper_key": "SERPER_API_KEY", "google_cse_key": "GOOGLE_CSE_KEY", "google_cse_cx": "GOOGLE_CSE_CX",
-               "epo_key": "EPO_KEY", "epo_secret": "EPO_SECRET"}
+               "epo_key": "EPO_KEY", "epo_secret": "EPO_SECRET", "openalex_key": "OPENALEX_API_KEY"}
 
 
 def search() -> dict:
@@ -125,11 +125,11 @@ def search_public() -> dict:
     """Arayüze giden görünüm: anahtarların kendisi yok, yalnız kayıtlı olup olmadıkları. Arama motoru kimliği gizli değildir."""
     keys = search()
     return {"serper": bool(keys["serper_key"]), "google_cse": bool(keys["google_cse_key"]), "google_cse_cx": keys["google_cse_cx"],
-            "epo": bool(keys["epo_key"] and keys["epo_secret"])}
+            "epo": bool(keys["epo_key"] and keys["epo_secret"]), "openalex": bool(keys["openalex_key"])}
 
 
 def save_search(serper_key: str = "", google_cse_key: str = "", google_cse_cx: str | None = None, clear: tuple = (),
-                epo_key: str = "", epo_secret: str = "") -> None:
+                epo_key: str = "", epo_secret: str = "", openalex_key: str = "") -> None:
     """Boş bırakılan anahtar değişmez; silmek için adı clear içinde verilir. Kimlik (cx) verildiği gibi yazılır."""
     data = _load()
     entry = data.get("search") if isinstance(data.get("search"), dict) else {}
@@ -142,6 +142,8 @@ def save_search(serper_key: str = "", google_cse_key: str = "", google_cse_cx: s
         entry["epo_key"] = epo_key.strip()
     if epo_secret.strip():
         entry["epo_secret"] = epo_secret.strip()
+    if openalex_key.strip():
+        entry["openalex_key"] = openalex_key.strip()
     if google_cse_key.strip():
         entry["google_cse_key"] = google_cse_key.strip()
     if google_cse_cx is not None:
@@ -172,3 +174,14 @@ def save_assistant(values: dict) -> dict:
     data["assistant"] = entry
     _write(data)
     return entry
+
+
+def apply_openalex_key() -> None:
+    """Kayıtlı OpenAlex anahtarını bütün OpenAlex isteklerine uygular (config.OPENALEX_PARAMS yerinde güncellenir;
+    modüller aynı sözlüğü kullandığı için yeniden başlatmak gerekmez)."""
+    from . import config
+    key = search()["openalex_key"]
+    if key:
+        config.OPENALEX_PARAMS["api_key"] = key
+    else:
+        config.OPENALEX_PARAMS.pop("api_key", None)

@@ -117,11 +117,52 @@ def rea_command() -> list[str] | None:
     return [found] if found else None
 
 
+def hidden_process() -> dict:
+    """Alt süreç bayrakları: Windows'ta (özellikle pencereli exe'de) her Node/araç çağrısı için cmd penceresi açılmaz."""
+    if os.name == "nt":
+        import subprocess
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
+
+
+def system_browser(chrome_only: bool = False) -> str | None:
+    """Bilgisayarda kurulu Chrome (yoksa Edge). Varsa tarama bunu kullanır; ayrıca Chromium indirilmez."""
+    if platform.system() == "Windows":
+        roots = [os.environ.get(k) for k in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "ProgramW6432")]
+        names = [("Google", "Chrome", "Application", "chrome.exe")]
+        if not chrome_only:
+            names.append(("Microsoft", "Edge", "Application", "msedge.exe"))
+        for parts in names:
+            for root in roots:
+                if root and Path(root, *parts).exists():
+                    return str(Path(root, *parts))
+        return None
+    if platform.system() == "Darwin":
+        apps = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+        if not chrome_only:
+            apps.append("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
+        return next((a for a in apps if Path(a).exists()), None)
+    for name in ("google-chrome", "google-chrome-stable") + (() if chrome_only else ("microsoft-edge",)):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def stealth_browser() -> dict:
+    """Scrapling gizli oturumları için: kurulu Chrome varsa o kullanılır (Patchright'ın Chromium'u indirilmez)."""
+    return {"real_chrome": True} if system_browser(chrome_only=True) else {}
+
+
 def chromium_executable() -> str | None:
-    """REA'nın 'launch' modu için Playwright'ın indirdiği Chromium'u bulur."""
+    """REA'nın 'launch' modu ve Playwright için tarayıcı: önce bilgisayarın Chrome/Edge'i, yoksa Playwright'ın
+    indirdiği Chromium."""
     explicit = os.getenv("REA_CHROME")
     if explicit and Path(explicit).exists():
         return explicit
+    system = system_browser()
+    if system:
+        return system
     base = os.getenv("PLAYWRIGHT_BROWSERS_PATH") or (
         str(Path.home() / "Library/Caches/ms-playwright")
         if platform.system() == "Darwin"

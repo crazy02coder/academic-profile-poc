@@ -543,6 +543,9 @@ class SearchSettingsIn(BaseModel):
     serper_key: str = ""
     google_cse_key: str = ""
     google_cse_cx: str | None = None
+    epo_key: str = ""
+    epo_secret: str = ""
+    openalex_key: str = ""
     clear: list[str] = []
 
 
@@ -554,10 +557,52 @@ async def search_settings_get():
 @app.post("/api/settings/search")
 async def search_settings_save(body: SearchSettingsIn):
     """Arama servisi anahtarları (Serper.dev, Google Custom Search); anahtarlar arayüze geri gönderilmez."""
-    if any(len(x) > 300 for x in (body.serper_key, body.google_cse_key, body.google_cse_cx or "")):
+    if any(len(x) > 300 for x in (body.serper_key, body.google_cse_key, body.google_cse_cx or "", body.epo_key,
+                                  body.epo_secret, body.openalex_key)):
         raise HTTPException(422, "Anahtar çok uzun.")
-    ai_settings.save_search(body.serper_key, body.google_cse_key, body.google_cse_cx, tuple(body.clear[:3]))
+    ai_settings.save_search(body.serper_key, body.google_cse_key, body.google_cse_cx, tuple(body.clear[:6]),
+                            body.epo_key, body.epo_secret, body.openalex_key)
+    if body.epo_key or body.epo_secret or {"epo_key", "epo_secret"} & set(body.clear):
+        patents._TOKEN.update(value="", exp=0)  # yeni anahtarla yeniden kimlik alınır
+    ai_settings.apply_openalex_key()
     return ai_settings.search_public()
+
+
+@app.post("/api/settings/epo/test")
+async def epo_settings_test():
+    """EPO anahtarıyla kimlik (erişim jetonu) alınabiliyor mu."""
+    if not patents.enabled():
+        return {"ok": False, "message": "Consumer Key ve Consumer Secret kayıtlı değil."}
+    patents._TOKEN.update(value="", exp=0)
+    try:
+        async with patents._client() as client:
+            await patents._token(client)
+    except patents.PatentError as exc:
+        return {"ok": False, "message": str(exc)}
+    except httpx.HTTPError as exc:
+        return {"ok": False, "message": f"EPO'ya ulaşılamadı ({type(exc).__name__})."}
+    return {"ok": True, "message": "Bağlantı başarılı; EPO anahtarı geçerli."}
+
+
+@app.post("/api/settings/openalex/test")
+async def openalex_settings_test():
+    """OpenAlex'e anahtarla küçük bir istek: anahtar geçerli mi ve kişisel bütçe kullanılıyor mu."""
+    from .config import OPENALEX_PARAMS
+    from .sources import OPENALEX
+    keyed = "api_key" in OPENALEX_PARAMS
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(f"{OPENALEX}/works", params={"per-page": 1, "select": "id", **OPENALEX_PARAMS})
+    except httpx.HTTPError as exc:
+        return {"ok": False, "message": f"OpenAlex'e ulaşılamadı ({type(exc).__name__})."}
+    if r.status_code in (401, 403):
+        return {"ok": False, "message": "OpenAlex anahtarı geçersiz."}
+    if r.status_code == 429:
+        return {"ok": False, "message": "OpenAlex günlük istek sınırı doldu" + ("." if keyed else "; anahtar girerseniz kişisel bütçe kullanılır.")}
+    if r.status_code != 200:
+        return {"ok": False, "message": f"OpenAlex HTTP {r.status_code} döndürdü."}
+    return {"ok": True, "message": "Bağlantı başarılı; " + ("anahtar geçerli, kişisel günlük bütçe kullanılıyor." if keyed
+                                                          else "anahtarsız ortak bütçe kullanılıyor (anahtar girmeniz önerilir).")}
 
 
 @app.post("/api/settings/search/test")
@@ -1282,6 +1327,11 @@ async def _remote_data():
     """Hazır veri (GitHub Pages) arka planda indirilir; arayüz istekleri beklemez."""
     from . import remote_data
     remote_data.prefetch()
+
+
+@app.on_event("startup")
+async def _openalex_key():
+    ai_settings.apply_openalex_key()  # Ayarlar'da kaydedilen OpenAlex anahtarı (.env'deki yerine)
 
 
 @app.on_event("startup")

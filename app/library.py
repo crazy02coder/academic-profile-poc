@@ -16,7 +16,7 @@ import uuid
 
 import httpx
 
-from .config import CONTACT_MAIL, OPENALEX_PARAMS, ROOT, USER_AGENT
+from .config import CONTACT_MAIL, OPENALEX_PARAMS, ROOT, USER_AGENT, stealth_browser
 from . import publication_status, quartiles, trsources, wos, wos_publications, wos_verification
 from .text import clean, doi_key, fold, name_score, name_tokens, title_key
 
@@ -359,7 +359,7 @@ def _publish_topic(job: dict):
 async def _collect_wos_topic(query: str, limit: int) -> dict:
     from scrapling.fetchers import AsyncStealthySession
     async with wos_verification.time_budget(WOS_TOPIC_BUDGET + 5):
-        async with AsyncStealthySession(headless=True, network_idle=False, timeout=45000, max_pages=1) as session:
+        async with AsyncStealthySession(**stealth_browser(), headless=True, network_idle=False, timeout=45000, max_pages=1) as session:
             return await wos_publications.collect_topic(query, session, limit=limit,
                                                         budget=WOS_TOPIC_BUDGET)
 

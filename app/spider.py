@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+from .config import stealth_browser  # noqa: E402
+
 import asyncio
 import logging
 import re
@@ -78,7 +80,7 @@ class StaffSpider(Spider):
         manager.add("default", FetcherSession(impersonate="chrome", stealthy_headers=True, headers=TR_HEADERS,
                                               timeout=15, retries=1, follow_redirects=True,
                                               **({"verify": bundle} if bundle else {})), default=True)
-        manager.add("stealth", AsyncStealthySession(headless=True, network_idle=True, solve_cloudflare=True,
+        manager.add("stealth", AsyncStealthySession(**stealth_browser(), headless=True, network_idle=True, solve_cloudflare=True,
                                                     timeout=45000, block_webrtc=True, locale="tr-TR",
                                                     extra_headers=TR_HEADERS), lazy=True)
 

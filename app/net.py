@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 
 import certifi
 
-from .config import CACHE_DIR, curl_path
+from .config import CACHE_DIR, curl_path, stealth_browser, hidden_process
 
 import scrapling.fetchers  # noqa: E402,F401 - logger'ı kurması için önce import edilir
 
@@ -127,7 +127,7 @@ def _issuer_certificates(data: bytes) -> list[str]:
         raise RuntimeError("PKCS#7 AIA paketi için OpenSSL komutu bulunamadı")
     result = subprocess.run(
         [executable, "pkcs7", "-inform", "PEM" if b"-----BEGIN" in data[:80] else "DER", "-print_certs"],
-        input=data, capture_output=True, timeout=10, check=True,
+        input=data, capture_output=True, timeout=10, check=True, **hidden_process(),
     )
     blocks = _PEM_CERT.findall(result.stdout.decode("ascii", errors="ignore"))
     if not blocks:
@@ -253,7 +253,7 @@ def _stealth_sync(url: str, wait_selector: str | None = None, solve_cf: bool = F
                   locale="tr-TR", extra_headers=TR_HEADERS, solve_cloudflare=solve_cf)
     if wait_selector:
         kwargs["wait_selector"] = wait_selector
-    resp = StealthyFetcher.fetch(url, **kwargs)
+    resp = StealthyFetcher.fetch(url, **stealth_browser(), **kwargs)
     return Page(url=str(resp.url), status=resp.status, html=resp.html_content or "",
                 via="scrapling.stealthy+cloudflare" if solve_cf else "scrapling.stealthy", selector=resp)
 
@@ -270,7 +270,7 @@ async def _stealth_session():
         _STEALTH.update(session=None, loop=loop, lock=asyncio.Lock())
     async with _STEALTH["lock"]:
         if _STEALTH["session"] is None:
-            sess = AsyncStealthySession(headless=True, network_idle=True, timeout=30000, block_webrtc=True,
+            sess = AsyncStealthySession(**stealth_browser(), headless=True, network_idle=True, timeout=30000, block_webrtc=True,
                                         hide_canvas=True, locale="tr-TR", extra_headers=TR_HEADERS, max_pages=4)
             await sess.start()
             _STEALTH["session"] = sess
