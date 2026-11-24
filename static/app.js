@@ -759,7 +759,7 @@ async function runProfileRefresh(r, sections, sources) {
 function refreshProfileModal(r) {
   const prefs = r.refresh_preferences || {};
   const chosen = new Set(prefs.sections || ["publications"]);
-  openModal(`<form id="refreshForm"><div class="modal-heading"><span class="modal-emblem">${icon("refresh")}</span><div><h2 id="refreshTitle">Neyi yenileyelim?</h2><p class="muted">${esc(r.profile.name)} · Yalnız seçtiğin bilgiler taranır.</p></div></div><div class="refresh-grid">${REFRESH_SECTIONS.map(([id, title, desc, ic]) => `<label class="refresh-choice"><input type="checkbox" name="section" value="${id}" ${chosen.has(id) ? "checked" : ""}><span class="choice-icon">${icon(ic)}</span><span><b>${title}</b><small>${desc}</small></span></label>`).join("")}</div><fieldset class="refresh-sources" id="refreshSources"><legend>Yayın kaynakları</legend><div class="source-options">${PROFILE_SOURCES.map((s) => `<label><input type="checkbox" name="scan-source" value="${s}" ${(prefs.sources || PROFILE_SOURCES).includes(s) ? "checked" : ""}><span>${esc(SRC_TR[s] || s)}</span></label>`).join("")}</div></fieldset><p class="refresh-note">Seçmediğin bilgiler, sohbetin ve kayıtlı yayınların korunur.</p><div class="modal-footer"><button class="btn" type="button" data-close>Vazgeç</button><button class="btn primary" id="refreshSubmit" type="submit">${icon("refresh")}Seçilenleri yenile</button></div></form>`);
+  openModal(`<form id="refreshForm"><div class="modal-heading"><span class="modal-emblem">${icon("refresh")}</span><div><h2 id="refreshTitle">Neyi yenileyelim?</h2><p class="muted">${esc(r.profile.name)} · Yalnız seçtiğin bilgiler taranır.</p></div></div><div class="pick-all"><button class="link" type="button" data-pick-all="section">Tümünü seç</button></div><div class="refresh-grid">${REFRESH_SECTIONS.map(([id, title, desc, ic]) => `<label class="refresh-choice"><input type="checkbox" name="section" value="${id}" ${chosen.has(id) ? "checked" : ""}><span class="choice-icon">${icon(ic)}</span><span><b>${title}</b><small>${desc}</small></span></label>`).join("")}</div><fieldset class="refresh-sources" id="refreshSources"><legend>Yayın kaynakları</legend><div class="pick-all in-box"><button class="link" type="button" data-pick-all="scan-source">Tümünü seç</button></div><div class="source-options">${PROFILE_SOURCES.map((s) => `<label><input type="checkbox" name="scan-source" value="${s}" ${(prefs.sources || PROFILE_SOURCES).includes(s) ? "checked" : ""}><span>${esc(SRC_TR[s] || s)}</span></label>`).join("")}</div></fieldset><p class="refresh-note">Seçmediğin bilgiler, sohbetin ve kayıtlı yayınların korunur.</p><div class="modal-footer"><button class="btn" type="button" data-close>Vazgeç</button><button class="btn primary" id="refreshSubmit" type="submit">${icon("refresh")}Seçilenleri yenile</button></div></form>`);
   $(".modal-box").setAttribute("aria-labelledby", "refreshTitle");
   const form = $("#refreshForm");
   const update = () => {
@@ -767,7 +767,12 @@ function refreshProfileModal(r) {
     $("#refreshSources").hidden = !sections.includes("publications");
     $("#refreshSubmit").disabled = !sections.length || sections.includes("publications") && !selectedSources(form).length;
   };
-  form.onchange = update;
+  // "Tümünü seç": gruptaki bütün kutuları işaretler; hepsi işaretliyse "Seçimi kaldır" olur ve hepsini boşaltır.
+  const pickers = $$("[data-pick-all]", form);
+  const label = () => pickers.forEach((b) => { const boxes = $$(`[name="${b.dataset.pickAll}"]`, form); b.textContent = boxes.length && boxes.every((x) => x.checked) ? "Seçimi kaldır" : "Tümünü seç"; });
+  pickers.forEach((b) => b.onclick = () => { const boxes = $$(`[name="${b.dataset.pickAll}"]`, form), all = boxes.every((x) => x.checked); boxes.forEach((x) => { x.checked = !all; }); update(); label(); });
+  form.onchange = () => { update(); label(); };
+  label();
   form.onsubmit = (e) => { e.preventDefault(); const sections = $$("[name=section]:checked", form).map((el) => el.value); if (!sections.length) return; const sources = selectedSources(form); closeModal(); runProfileRefresh(r, sections, sources); };
   update();
 }
@@ -6384,10 +6389,17 @@ const UNI_REFRESH = [["facts", "Künye ve sayılar", "Rektör, şehir, kuruluş;
   ["atlas", "Aday bakışı", "YÖK Atlas programları, taban puan ve kontenjanlar", "grid"]];
 function refreshUniversityModal(d) {
   openModal(`<form id="uniRefreshForm"><div class="modal-heading"><span class="modal-emblem">${icon("refresh")}</span><div><h2>Neyi yenileyelim?</h2><p class="muted">${esc(d.data.name)} · Yalnız seçtiğin bilgiler yeniden alınır.</p></div></div>
+    <div class="pick-all"><button class="link" type="button" data-pick-all="what">Tümünü seç</button></div>
     <div class="refresh-grid">${UNI_REFRESH.map(([id, title, desc, ic]) => `<label class="refresh-choice"><input type="checkbox" name="what" value="${id}" ${id === "facts" ? "checked" : ""}><span class="choice-icon">${icon(ic)}</span><span><b>${title}</b><small>${desc}</small></span></label>`).join("")}</div>
     <p class="refresh-note">Kadro dağılımı YÖK Akademik'e birkaç küçük istek atar; öğrenci tablosu kayıtlıysa yeniden okunmaz.</p>
     <div class="modal-footer"><button class="btn" type="button" data-close>Vazgeç</button><button class="btn primary" type="submit">${icon("refresh")}Seçilenleri yenile</button></div></form>`);
   $("#uniRefreshForm [data-close]").onclick = closeModal;
+  {
+    const form = $("#uniRefreshForm"), b = $("[data-pick-all]", form), boxes = () => $$('[name="what"]', form);
+    const label = () => { b.textContent = boxes().every((x) => x.checked) ? "Seçimi kaldır" : "Tümünü seç"; };
+    b.onclick = () => { const all = boxes().every((x) => x.checked); boxes().forEach((x) => { x.checked = !all; }); label(); };
+    form.onchange = label; label();
+  }
   $("#uniRefreshForm").onsubmit = async (e) => {
     e.preventDefault();
     const what = new Set($$('#uniRefreshForm input[name="what"]:checked').map((x) => x.value));

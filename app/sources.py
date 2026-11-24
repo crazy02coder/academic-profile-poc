@@ -364,6 +364,19 @@ async def scholar_works(profile: Profile, log) -> tuple[list[dict], dict | None]
     link = profile.links.get("scholar", "")
     m = re.search(r"user=([\w-]{12})", link)
     if not m:
+        # Kayıtta Scholar bağlantısı yok: YÖK'ün bu kişi için verdiği Scholar kimliği yerelde kayıtlıysa o kullanılır
+        # (ağ isteği yok). Böylece ad aramasına düşülmez ve sonuç bilgisayardan bilgisayara değişmez.
+        try:
+            from . import yokdir
+            guid = re.search(r"authorGuidId=([0-9A-F]{16})", profile.links.get("yok", "") or "")
+            known = ((yokdir._stale(f"stats2-{guid[1]}") or {}).get("ids") or {}).get("scholar") if guid else ""
+        except Exception:  # noqa: BLE001
+            known = ""
+        if re.fullmatch(r"[\w-]{12}", str(known or "")):
+            profile.links["scholar"] = f"https://scholar.google.com/citations?user={known}"
+            m = re.search(r"user=([\w-]{12})", profile.links["scholar"])
+            await log("publications", "running", "Scholar profili YÖK'teki kimlikle açılıyor.")
+    if not m:
         # Profil linki yoksa: Scholar arama sayfasında 'User profiles for' kutusu (best-effort)
         q = f'author:"{profile.name or profile.query_name}" {profile.get("institution", "")}'.strip()
         try:
@@ -553,7 +566,8 @@ def _yok_profile_of(d: dict) -> dict:
             "path": path, "institution": path[0] if path else "", "department": d.get("bolumAd") or (path[-1] if path else ""),
             "field": clean(d.get("bilimAlanAd") or ""), "area": clean(d.get("temelAlanAd") or ""),
             "keywords": [clean(d[k]) for k in ("anahtarkelime1Ad", "anahtarkelime2Ad", "anahtarkelime3Ad") if d.get(k)],
-            "orcid": d.get("orcid") or "", "researcher_id": d.get("researcherId") or "", "scopus_id": d.get("scopusId") or ""}
+            "orcid": d.get("orcid") or "", "researcher_id": d.get("researcherId") or "", "scopus_id": d.get("scopusId") or "",
+            "scholar_id": d.get("gscholar") or ""}
 
 
 async def _yok_rows(client, path: str, **params) -> list[dict]:
@@ -899,6 +913,9 @@ async def yok_works(profile: Profile, log, *, sections: set[str] | None = None, 
         if prof.get("orcid"):
             profile.links.setdefault("orcid", prof["orcid"])
             profile.observe("orcid", prof["orcid"], "yok", src)
+        # YÖK'teki Google Scholar kimliği: Scholar profili ad aramasıyla tahmin edilmez, doğrudan bu kimlikle açılır.
+        if re.fullmatch(r"[\w-]{12}", str(prof.get("scholar_id") or "")):
+            profile.links.setdefault("scholar", f"https://scholar.google.com/citations?user={prof['scholar_id']}")
         profile.yok = res.get("extra") or {}
         # Ekstra bilgi sekmesi: temel alan, bilim alanı, anahtar kelimeler ve dizin kimlikleri (Scopus, ResearcherID)
         for key in ("area", "field", "keywords", "scopus_id", "researcher_id"):

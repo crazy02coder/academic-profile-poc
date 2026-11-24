@@ -3104,3 +3104,8 @@ details.student-accordion > summary svg:last-child { transition: transform .25s 
 /* ekleme satırındaki düğme alanlarla aynı yükseklikte; altındaki düğmeler alanlara yapışmasın */
 .nt-add > .btn { align-self: stretch; height: auto; }
 .ts-form + .actions { margin-top: 14px; }
+
+/* Yenile pencereleri: "Tümünü seç" */
+.pick-all { display: flex; justify-content: flex-end; margin: 4px 0 8px; }
+.pick-all.in-box { margin: -4px 0 6px; }
+.pick-all .link { font-size: 13px; font-weight: 600; }
