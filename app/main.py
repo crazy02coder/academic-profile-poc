@@ -54,6 +54,11 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 async def no_stale_assets(request: Request, call_next):
     """Arayüz dosyaları her açılışta ETag ile doğrulanır: güncelleme sonrası tarayıcı eski app.js'i kullanmaz."""
     started = time.time()
+    if request.query_params.get("refresh") in ("1", "true") or request.url.path.endswith("/refresh"):
+        # Kullanıcı yenileme istedi: arama kaydından yalnız son 24 saatin sonucu kullanılır (app/search_store.py).
+        # Değer bu isteğe ve isteğin başlattığı arka plan işlerine geçer.
+        from . import search_store
+        search_store.FRESH.set(True)
     response = await call_next(request)
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache"
@@ -1330,6 +1335,29 @@ async def _remote_data():
 
 
 @app.on_event("startup")
+async def _warm_browser():
+    """Paketli uygulamada (exe) tarama tarayıcısı açılıştan birkaç saniye sonra arka planda hazırlanır: tarayıcının
+    açılması Windows'ta saniyeler sürer, ilk arama ya da sayfa bunu beklemez. Geliştirme ortamında kapalıdır
+    (sunucu sık yeniden başlar); AKADEMIK_IZ_WARM_BROWSER=1 ile açılır, =0 ile exe'de de kapatılır."""
+    import sys
+    choice = os.getenv("AKADEMIK_IZ_WARM_BROWSER", "").strip()
+    if choice == "0" or not (choice == "1" or getattr(sys, "frozen", False)):
+        return
+
+    async def warm():
+        await asyncio.sleep(6)  # önce arayüz açılsın
+        try:
+            from .net import _stealth_session
+            started = time.time()
+            await _stealth_session()
+            logger.info("Tarama tarayıcısı hazır (%.1f sn).", time.time() - started)
+        except Exception as exc:  # noqa: BLE001 — tarayıcı henüz inmemiş olabilir; ilk kullanımda yeniden denenir
+            logger.info("Tarama tarayıcısı önceden açılamadı (%s); ilk kullanımda açılacak.", type(exc).__name__)
+
+    asyncio.create_task(warm())
+
+
+@app.on_event("startup")
 async def _openalex_key():
     ai_settings.apply_openalex_key()  # Ayarlar'da kaydedilen OpenAlex anahtarı (.env'deki yerine)
 
@@ -1698,6 +1726,9 @@ def _staff_metrics(people: list[dict], institution: str = "") -> list[dict]:
 
 
 def _start_unit_collection(people: list[dict], institution: str, domain: str, unit: str, *, refresh: bool = False) -> dict:
+    if refresh:  # yenileme isteği gövdede geldi: arama kaydından yalnız taze sonuç kullanılsın
+        from . import search_store
+        search_store.FRESH.set(True)
     known = [(chat, _result_for(chat["job_id"])) for chat in history_store.list_all()]
     for person in people:
         matches = [r for _, r in known if r and _directory_matches(person, institution, r["profile"])]
@@ -2773,6 +2804,8 @@ def _unit_publication_result(data: dict) -> dict:
 @app.post("/api/units/papers/{job_id}/people/{person_key:path}")
 async def unit_person_refresh(job_id: str, person_key: str):
     """Birimdeki tek kişiyi tarar (satırdaki Yenile düğmesi); WoS çalışmaz."""
+    from . import search_store
+    search_store.FRESH.set(True)
     async def collect(person, institution, domain, *, on_update=None):
         return await _collect_unit_person(person, institution, domain, on_update=on_update, refresh=True)
 

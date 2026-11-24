@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote, urldefrag, urlparse
 
 import httpx
 
+from . import search_store
 from .config import ROOT
 from .discover import registrable
 from .text import content_tokens
@@ -69,6 +70,33 @@ def _usage(provider: str, outcome: str, query: str, limited: bool = False) -> No
         with (folder / "search.log").open("a", encoding="utf-8") as out:
             out.write("\t".join([time.strftime("%d.%m %H:%M:%S"), provider, ("SINIR " if limited else "") + outcome,
                                   f"1dk={window[1]} 10dk={window[10]} 60dk={window[60]} oturum={len(sent)}",
+                                  " ".join(query.split())[:90]]) + "\n")
+    except OSError:
+        pass
+
+
+async def _saved(q: str, log=None) -> list[dict]:
+    """Sorgunun kayıtlı sonuçları (yerel ya da yayımlanan ortak kayıt): arama motoruna gidilmez. Yoksa boş."""
+    try:
+        hit = await search_store.get(q)
+    except Exception:  # noqa: BLE001 — kayıt yardımcıdır: okunamazsa canlı arama yapılır
+        hit = None
+    if not hit:
+        return []
+    rows, source = hit
+    _hit_log(source, len(rows), q)
+    if log:
+        await log(f"Arama · {source} kayıt: {len(rows)} sonuç (arama motoruna gidilmedi).")
+    return rows
+
+
+def _hit_log(source: str, count: int, query: str) -> None:
+    """Kayıttan karşılanan arama da search.log'a yazılır (motor sayaçlarına girmez): kaydın çalıştığı buradan görülür."""
+    try:
+        folder = ROOT / "data" / "job-log"
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / "search.log").open("a", encoding="utf-8") as out:
+            out.write("\t".join([time.strftime("%d.%m %H:%M:%S"), f"kayit-{source}", f"{count} sonuç", "istek yok",
                                   " ".join(query.split())[:90]]) + "\n")
     except OSError:
         pass
@@ -350,10 +378,15 @@ async def site_results(domain_url: str, query: str, log=None, k: int = 6,
     if not root or not query.strip() or k <= 0:
         return []
     q = f"site:{root} {' '.join(query.split())}"
+    if providers is None:  # çağıran belirli motorları istediyse kayıt okunmaz
+        rows = _site_rows(await _saved(q, log), root)
+        if rows:
+            return rank_results(rows, query)[:k]
     providers = _plan() if providers is None else providers
     for provider in providers:
         rows = _site_rows(await _provider(provider, q, log), root)
         if rows:
+            search_store.put(q, provider, rows)
             return rank_results(rows, query)[:k]
     return []
 
@@ -367,12 +400,16 @@ async def site_results_race(domain_url: str, query: str, log=None, k: int = 6) -
     q = f"site:{root} {' '.join(query.split())}"
     # Motorlar _plan sırasıyla denenir (önce Brave, penceresi doluysa Serper); sonuç veren ilk motor kullanılır.
     # Eskiden bütün motorlar aynı anda soruluyordu: her arama Brave'e de gidiyor, istek sınırını dolduruyordu.
+    rows = _site_rows(await _saved(q, log), root)  # kayıt, motor sırası ayrılmadan önce (Brave penceresi harcanmaz)
+    if rows:
+        return rank_results(rows, query)[:k]
     for provider in _plan():
         try:
             rows = _site_rows(await _provider(provider, q, log), root)
         except Exception:
             continue
         if rows:
+            search_store.put(q, provider, rows)
             return rank_results(rows, query)[:k]
     return []
 
@@ -382,14 +419,20 @@ async def web_results(query: str, log=None, k: int = 8) -> list[dict]:
     (başlık, kısa açıklama, adres). Öğrenci rehberinin lisans dışı başlıkları kullanır."""
     if not query.strip() or k <= 0:
         return []
+    q = " ".join(query.split())
+    rows = await _saved(q, log)
+    if rows:
+        return rows[:k]
     for provider in _plan():
         try:
-            rows = await _provider(provider, " ".join(query.split()), log)
+            rows = await _provider(provider, q, log)
         except Exception:  # noqa: BLE001 — sıradaki motor denenir
             continue
         rows = [r for r in rows if isinstance(r, dict) and str(r.get("url") or r.get("href") or "").startswith(("http://", "https://"))]
         if rows:
-            return [{**r, "url": r.get("url") or r.get("href")} for r in rows[:k]]
+            rows = [{**r, "url": r.get("url") or r.get("href")} for r in rows]
+            search_store.put(q, provider, rows)
+            return rows[:k]
     return []
 
 

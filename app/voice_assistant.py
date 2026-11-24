@@ -336,12 +336,18 @@ async def preview(name: str, voice: str, tone: str) -> bytes:
 
 
 # ------------------------------------------------------------------ oturum
+class _Renew(Exception):
+    """Model sunucusu oturumun kapanacağını bildirdi; tarayıcı konuşmayı kaybetmeden yeniden bağlanır."""
+
+
 class AssistantSession:
     def __init__(self, ws: WebSocket, mode: str, llm):
         self.ws, self.mode, self.llm = ws, mode if mode in MODES else "topic", llm
         self.session = None
-        self.audio: asyncio.Queue = asyncio.Queue(maxsize=200)
+        self.audio: asyncio.Queue = asyncio.Queue(maxsize=400)
         self.muted = False
+        self.tool_tasks: dict[asyncio.Task, set[str]] = {}  # süren araç çağrıları → çağrı kimlikleri
+        self.renew = False             # model sunucusu bağlantıyı kapatacağını bildirdi (GoAway)
         self.history: list[dict] = []  # tarayıcının sakladığı önceki konuşma (yeniden bağlanınca bağlam olarak verilir)
         self.resume = False            # bağlantı koptuktan sonra kendiliğinden yeniden bağlanma: selamlama yapılmaz
         self.model = ""
@@ -387,12 +393,45 @@ class AssistantSession:
             await self.send({"type": "results", "tool": name, "seconds": round(time.time() - started, 1), **card})
         return types.FunctionResponse(id=call.id, name=name, response={"result": result})
 
+    def _start_tools(self, calls: list) -> None:
+        """Araç çağrıları arka planda çalışır; bu sırada modelden gelen mesajlar (söz kesme, iptal, bağlantı denetimi)
+        okunmaya devam eder. Eskiden araç bitene kadar okuma duruyordu: uzun süren aramada gelen mesajlar birikiyor,
+        bağlantı denetimi yanıtsız kalıp oturum kopabiliyordu; kullanıcı söze girince iptal de işlenmiyordu."""
+        task = asyncio.create_task(self._run_tools(calls))
+        self.tool_tasks[task] = {call.id for call in calls if getattr(call, "id", None)}
+        task.add_done_callback(lambda done: self.tool_tasks.pop(done, None))
+
+    async def _run_tools(self, calls: list) -> None:
+        responses = [await self._tool(call) for call in calls]
+        try:
+            await self.session.send_tool_response(function_responses=responses)
+        except Exception as exc:  # noqa: BLE001 — bağlantı kapandıysa okuma döngüsü bunu zaten bildirir
+            log.info("Araç sonucu modele gönderilemedi: %s", type(exc).__name__)
+
+    async def _cancel_tools(self, ids: set[str]) -> None:
+        """Model çağrıyı iptal etti (kullanıcı söze girdi): süren arama durdurulur, eskiyen sonuç gösterilmez."""
+        hit = False
+        for task, own in list(self.tool_tasks.items()):
+            if own & ids and not task.done():
+                task.cancel()
+                hit = True
+        if hit:
+            await self.send({"type": "turn_complete"})  # arayüz "düşünüyor"da kalmasın
+
     async def _to_gemini(self):
         from google.genai import types
         while True:
-            pcm = await self.audio.get()
-            if self.session:
-                await self.session.send_realtime_input(audio=types.Blob(data=pcm, mime_type=f"audio/pcm;rate={SEND_RATE}"))
+            parts = [await self.audio.get()]
+            size = len(parts[0])
+            # Kuyrukta birikmiş parçalar tek istekte gider: ağ ya da sunucu bir an yavaşladığında ses atılmaz, gecikme
+            # parça parça birikmez. Bir istekte en çok ~1 sn'lik ses (16 kHz, 16 bit: 32.000 bayt).
+            while size < 32000 and not self.audio.empty():
+                chunk = self.audio.get_nowait()
+                parts.append(chunk)
+                size += len(chunk)
+            if self.session and size:
+                await self.session.send_realtime_input(
+                    audio=types.Blob(data=b"".join(parts), mime_type=f"audio/pcm;rate={SEND_RATE}"))
 
     async def _from_gemini(self):
         heard, said = [], []
@@ -400,9 +439,22 @@ class AssistantSession:
             async for msg in self.session.receive():
                 if msg.data:
                     await self.send({"type": "audio", "pcm": base64.b64encode(msg.data).decode("ascii")})
+                if getattr(msg, "go_away", None):
+                    # Sunucu bağlantıyı birazdan kapatacak (bağlantı süresi sınırı). Sessizken hemen, konuşma sürüyorsa
+                    # tur bitince oturum yenilenir: cümle yarıda kesilmez, kullanıcı hata görmez.
+                    self.renew = True
+                    if not (heard or said or self.tool_tasks):
+                        raise _Renew()
                 content = msg.server_content
                 if content:
                     if content.interrupted:
+                        if said:
+                            # Yarıda kesilen cevap kendi balonunda kapanır, sonraki cevapla birleşmez. Önce o cevabı
+                            # başlatan kullanıcı sözü kapanır: sohbet (ve saklanan geçmiş) doğru sırada kalır.
+                            if heard:
+                                await self.send({"type": "message", "speaker": "user", "text": "".join(heard).strip()})
+                            await self.send({"type": "message", "speaker": "assistant", "text": "".join(said).strip()})
+                            heard, said = [], []
                         await self.send({"type": "interrupted"})
                     if content.input_transcription and content.input_transcription.text:
                         heard.append(content.input_transcription.text)
@@ -417,9 +469,13 @@ class AssistantSession:
                             await self.send({"type": "message", "speaker": "assistant", "text": "".join(said).strip()})
                         heard, said = [], []
                         await self.send({"type": "turn_complete"})
-                if msg.tool_call:
-                    responses = [await self._tool(call) for call in msg.tool_call.function_calls]
-                    await self.session.send_tool_response(function_responses=responses)
+                        if self.renew and not self.tool_tasks:
+                            raise _Renew()
+                cancelled = getattr(msg, "tool_call_cancellation", None)
+                if cancelled and cancelled.ids:
+                    await self._cancel_tools(set(cancelled.ids))
+                if msg.tool_call and msg.tool_call.function_calls:
+                    self._start_tools(list(msg.tool_call.function_calls))
 
     async def _from_browser(self):
         while True:
@@ -489,7 +545,7 @@ class AssistantSession:
 
     async def run(self):
         if not ai_settings.resolved("gemini").get("key"):
-            await self.send({"type": "error", "message": "Sesli asistan için Ayarlar'da bir Gemini anahtarı girin."})
+            await self.send({"type": "error", "fatal": True, "message": "Sesli asistan için Ayarlar'da bir Gemini anahtarı girin."})
             return
         await self._hello()
         live = _Live(self._config())
@@ -506,7 +562,7 @@ class AssistantSession:
                     if task.exception() and not isinstance(task.exception(), WebSocketDisconnect):
                         raise task.exception()
             finally:
-                for task in tasks:
+                for task in [*tasks, *self.tool_tasks]:
                     task.cancel()
 
 
@@ -517,9 +573,18 @@ async def serve(ws: WebSocket, mode: str, llm) -> None:
         await session.run()
     except WebSocketDisconnect:
         pass
+    except _Renew:
+        log.info("Asistan oturumu yenileniyor (model sunucusu bağlantıyı kapatacağını bildirdi).")
+        await session.send({"type": "reconnect", "soft": True, "reason": "oturum süresi"})
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
-        if "1007" in message or "1011" in message or "1008" in message or "ConnectionClosed" in type(exc).__name__:
+        code = getattr(exc, "code", None)
+        # Anahtar ya da kota sorunu yeniden bağlanarak düzelmez: kullanıcıya nedeni söylenir.
+        lasting = any(mark in message for mark in ("API key", "API_KEY", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "quota", "billing"))
+        # Model sunucusu bağlantıyı kapattı: WebSocket kapanış kodları 1000-4999 (süre sınırı 1000/1006, iç hata 1011…).
+        closed = ("1007" in message or "1011" in message or "1008" in message or "ConnectionClosed" in type(exc).__name__
+                  or (isinstance(code, int) and 1000 <= code <= 4999))
+        if closed and not lasting:
             # Model bağlantıyı kapattı (ör. 1007 "audio content type not supported"): sesi reddeden model bırakılır,
             # tarayıcı konuşmayı kaybetmeden kendiliğinden yeniden bağlanır.
             if "CONTENT_TYPE_AUDIO" in message and session.model:
@@ -530,9 +595,11 @@ async def serve(ws: WebSocket, mode: str, llm) -> None:
             await session.send({"type": "reconnect", "reason": message[:200]})
         else:
             log.exception("Asistan oturumu kapandı")
-            if "API key" in message or "403" in message or "401" in message:
+            if "API key" in message or "API_KEY" in message or "PERMISSION_DENIED" in message or "403" in message or "401" in message:
                 message = "Gemini anahtarı geçersiz ya da sesli modele erişimi yok (Ayarlar → Yapay zekâ)."
-            await session.send({"type": "error", "message": message[:300]})
+            elif lasting:
+                message = "Gemini kullanım sınırı doldu (kota); bir süre sonra yeniden deneyin ya da Ayarlar'dan anahtarı değiştirin."
+            await session.send({"type": "error", "fatal": True, "message": message[:300]})
     finally:
         try:
             await ws.close()

@@ -21,6 +21,8 @@
   const svg = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${ICON[name]}</svg>`;
   const STATUS = { idle: "Hazır", connecting: "Bağlanıyor…", listening: "Dinliyorum", thinking: "Düşünüyor…", speaking: "Konuşuyor", muted: "Mikrofon kapalı", ended: "Görüşme bitti" };
   const TOOL_LABEL = { find_topics: "Yayınlar aranıyor…", find_advisors: "Akademisyenler aranıyor…", web_search: "Web'de aranıyor…" };
+  // Art arda yeniden bağlanma denemeleri arasındaki bekleme (ms); liste bitince durulur ve düğme gösterilir.
+  const RETRY = [600, 1500, 3000, 5000, 8000];
   let active = null;
   // Sohbet geçmişi tarayıcıda saklanır (sayfa başına): sayfa yenilense ya da bağlantı kopsa da konuşma kaybolmaz ve
   // yeniden bağlanınca asistana bağlam olarak verilir.
@@ -166,12 +168,16 @@
 
     async start(withMic, resume = false) {
       if (this.ws) return;
+      clearTimeout(this.retryTimer);
+      this.failed = false; this.readyAt = 0;
       this.root.classList.add("va-live");
       $(".va-start", this.root).hidden = true; $(".va-note", this.root).hidden = true;
       $(".va-end", this.root).hidden = false;
       this.setState("connecting");
       if (!this.playCtx) try {
-        this.playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: this.recvRate });
+        const AC = window.AudioContext || window.webkitAudioContext;
+        // Tarayıcı 24 kHz bağlamı kabul etmezse varsayılan hızla açılır; ses parçaları kendi hızıyla çalınır.
+        try { this.playCtx = new AC({ sampleRate: this.recvRate }); } catch { this.playCtx = new AC(); }
         if (this.playCtx.state === "suspended") await this.playCtx.resume();
         this.analyser = this.playCtx.createAnalyser(); this.analyser.fftSize = 512;
         this.analyser.connect(this.playCtx.destination); this.analyserData = new Uint8Array(this.analyser.fftSize);
@@ -182,10 +188,13 @@
       const ws = this.ws;
       ws.onclose = () => { if (this.ws === ws) this.dropped(); };
       ws.onerror = () => this.setStatus("Bağlantı kurulamadı.");
-      await new Promise((resolve) => { ws.onopen = resolve; setTimeout(resolve, 8000); });
+      // Bağlantı açılınca, kurulamayınca ya da 8 sn sonra devam edilir (kurulamayan bağlantı 8 sn bekletmez).
+      this.opening = new Promise((resolve) => { ws.onopen = resolve; ws.addEventListener("close", resolve); setTimeout(resolve, 8000); });
+      await this.opening;
       // İlk mesaj: önceki konuşma (asistan kaldığı yerden devam etsin) ve bunun kendiliğinden yeniden bağlanma olup olmadığı.
       if (ws.readyState === 1) ws.send(JSON.stringify({ type: "hello", resume, history: this.saved.messages.slice(-24) }));
-      if (withMic && !this.micStream) {
+      // Bağlantı bu arada kapandıysa mikrofon açılmaz (görüşme yokken mikrofon açık kalmasın).
+      if (withMic && !this.micStream && this.ws === ws) {
         try { await this.startMic(); $(".va-mic", this.root).hidden = false; }
         catch { this.muted = true; this.addNote("Mikrofon izni verilmedi; yazarak konuşabilirsin."); }
       }
@@ -196,20 +205,36 @@
       this.micCtx = new (window.AudioContext || window.webkitAudioContext)();
       if (this.micCtx.state === "suspended") await this.micCtx.resume();
       const src = this.micCtx.createMediaStreamSource(this.micStream);
-      const code = `class MicProc extends AudioWorkletProcessor {
-        constructor() { super(); this.ratio = sampleRate / ${this.sendRate}; this.acc = 0; }
+      // Mikrofon sesi 16 kHz'e indirilir ve 40 ms'lik parçalar hâlinde gönderilir (saniyede 25 mesaj).
+      // Eskiden her ses çerçevesi (≈3 ms) ayrı mesajdı: saniyede ≈375 küçük mesaj, yavaş bilgisayarda sıra dolunca
+      // ses atılıyor, asistan konuşmayı eksik duyuyordu. Örnekler atlanarak değil, aradaki örneklerin ortalaması
+      // alınarak indirilir: tiz seslerin konuşma bandına karışıp (örtüşme) tanımayı bozması azalır.
+      const code = /* mic-worklet:start */`class MicProc extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          this.ratio = sampleRate / ${this.sendRate}; this.acc = 0; this.sum = 0; this.n = 0;
+          this.buf = new Int16Array(${Math.round(this.sendRate * 0.04)}); this.len = 0; this.energy = 0; this.count = 0;
+        }
         process(inputs) {
           const ch = inputs[0][0]; if (!ch) return true;
-          const out = []; let level = 0;
           for (let i = 0; i < ch.length; i++) {
-            level += ch[i] * ch[i]; this.acc += 1;
-            if (this.acc >= this.ratio) { this.acc -= this.ratio; const s = Math.max(-1, Math.min(1, ch[i])); out.push(s < 0 ? s * 0x8000 : s * 0x7fff); }
+            const v = ch[i];
+            this.energy += v * v; this.count += 1; this.sum += v; this.n += 1; this.acc += 1;
+            if (this.acc >= this.ratio) {
+              this.acc -= this.ratio;
+              const s = Math.max(-1, Math.min(1, this.sum / this.n)); this.sum = 0; this.n = 0;
+              this.buf[this.len++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+              if (this.len === this.buf.length) {
+                const out = this.buf.slice(0);
+                this.port.postMessage({ pcm: out.buffer, level: Math.sqrt(this.energy / this.count) }, [out.buffer]);
+                this.len = 0; this.energy = 0; this.count = 0;
+              }
+            }
           }
-          if (out.length) { const buf = new Int16Array(out); this.port.postMessage({ pcm: buf.buffer, level: Math.sqrt(level / ch.length) }, [buf.buffer]); }
           return true;
         }
       }
-      registerProcessor('va-mic', MicProc);`;
+      registerProcessor('va-mic', MicProc);`/* mic-worklet:end */;
       const url = URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
       await this.micCtx.audioWorklet.addModule(url); URL.revokeObjectURL(url);
       this.worklet = new AudioWorkletNode(this.micCtx, "va-mic");
@@ -226,7 +251,7 @@
       switch (m.type) {
         case "ready":
           $(".va-name", this.root).textContent = m.name || "Asistan";
-          this.readyAt = Date.now();
+          this.readyAt = Date.now(); this.recovering = false;
           console.info("[asistan] model:", m.model);
           this.recvRate = m.receive_rate || this.recvRate;
           this.setState(this.muted ? "muted" : "listening");
@@ -239,22 +264,25 @@
         case "turn_complete": if (this.state === "thinking") this.setState(this.muted ? "muted" : "listening"); break;
         case "results": this.results(m); break;
         case "document": this.addNote(`📎 ${m.name} okundu (${m.chars.toLocaleString("tr-TR")} karakter).`); break;
-        case "error": this.addNote(m.message, true); this.setStatus(m.message); break;
-        case "reconnect": this.reconnectWanted = true; break;
+        case "error": this.addNote(m.message, true); this.setStatus(m.message); if (m.fatal) this.failed = true; break;
+        case "reconnect": this.reconnectWanted = true; this.softDrop = Boolean(m.soft); break;
       }
     }
 
     /* ---- ses çalma ---- */
     play(pcm64) {
       if (!this.playCtx) return;
-      const bytes = unb64(pcm64), int16 = new Int16Array(bytes), f32 = new Float32Array(int16.length);
+      if (this.playCtx.state === "suspended") this.playCtx.resume().catch(() => {});  // sekme arka plandan döndü
+      const bytes = unb64(pcm64);
+      if (bytes.byteLength < 2) return;  // boş parça
+      const int16 = new Int16Array(bytes, 0, bytes.byteLength >> 1), f32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 0x8000;
       const buf = this.playCtx.createBuffer(1, f32.length, this.recvRate);
       buf.copyToChannel(f32, 0);
       const node = this.playCtx.createBufferSource();
       node.buffer = buf; node.connect(this.analyser);
       const now = this.playCtx.currentTime;
-      if (this.playHead < now) this.playHead = now + 0.03;
+      if (this.playHead < now) this.playHead = now + 0.05;  // küçük tampon: parçalar arasında boşluk (çıtırtı) olmasın
       node.start(this.playHead); this.playHead += buf.duration;
       this.nodes.push(node);
       node.onended = () => {
@@ -313,20 +341,26 @@
       $(".va-new", this.root).hidden = true;
       if (live) { this.closeConnection(); this.start(!this.muted); }
     }
-    addNote(text, error) {
-      const chat = $(".va-chat", this.root), el = document.createElement("div");
+    addNote(text, error, once) {
+      const chat = $(".va-chat", this.root);
+      const last = chat.lastElementChild;
+      if (once && last?.classList.contains("note") && last.textContent === text) return;
+      const el = document.createElement("div");
       el.className = `va-msg note${error ? " err" : ""}`; el.textContent = text;
       chat.appendChild(el); chat.scrollTop = chat.scrollHeight;
     }
     async sendText() {
       const input = $(".va-text", this.root), text = input.value.trim();
       if (!text) return;
-      if (!this.ws) { await this.start(false); }
+      if (!this.ws) await this.start(false);
+      else if (this.ws.readyState === 0) await this.opening;  // bağlantı kurulurken yazıldı: açılması beklenir
       if (this.ws?.readyState === 1) { this.ws.send(JSON.stringify({ type: "text", text })); input.value = ""; }
+      else this.setStatus("Bağlantı kurulamadı; mesaj gönderilmedi.");
     }
     async sendDocument(file) {
       if (file.size > 10e6) { this.addNote(`${file.name}: 10 MB'tan büyük belge gönderilemez.`, true); return; }
       if (!this.ws) await this.start(false);
+      else if (this.ws.readyState === 0) await this.opening;
       const data = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
@@ -399,20 +433,31 @@
       this.cutAudio();
     }
     dropped() {
-      // Model bağlantıyı kapattı: konuşma birkaç saniyeden uzun sürdüyse mikrofon açık kalarak kendiliğinden yeniden
-      // bağlanılır (geçmiş asistana verilir, selam tekrarlanmaz). Art arda kopmada dur.
-      this.ws = null; this.cutAudio();
+      // Bağlantı koptu. Sağlıklı süren bir görüşmeden sonra (ya da sunucu istediğinde) mikrofon açık kalarak
+      // kendiliğinden yeniden bağlanılır: geçmiş asistana verilir, selam tekrarlanmaz. Art arda başarısız denemelerde
+      // bekleme uzar, RETRY bitince durulur. (Eskiden "sağlıklı sürdü" bilgisi ilk bağlantıdan kalıyordu: sunucu ya da
+      // internet kapalıyken durmadan yeniden deniyor, sohbete aynı notu yığıyordu.)
+      const soft = this.softDrop; this.softDrop = false;
+      this.ws = null;
+      if (!soft) this.cutAudio();  // planlı oturum yenilemesinde çalmakta olan cümle bitsin
       const lived = this.readyAt && Date.now() - this.readyAt > 3000;
-      if (this.root.isConnected && (this.reconnectWanted || lived) && this.retries < 3) {
-        this.retries = lived ? 1 : this.retries + 1;
-        this.reconnectWanted = false;
-        this.addNote("Bağlantı yenileniyor…");
-        setTimeout(() => this.start(false, true), 600);
+      this.readyAt = 0;
+      if (lived) this.retries = 0;
+      const again = !this.failed && (this.reconnectWanted || lived || this.recovering);
+      this.reconnectWanted = false;
+      if (this.root.isConnected && again && this.retries < RETRY.length) {
+        this.recovering = true;
+        const wait = RETRY[this.retries++];
+        this.addNote("Bağlantı yenileniyor…", false, true);
+        if (!soft) this.setState("connecting", "Bağlantı yenileniyor…");
+        this.retryTimer = setTimeout(() => this.start(false, true), wait);
         return;
       }
       this.stop(false);
     }
     stop(byUser) {
+      clearTimeout(this.retryTimer);  // bekleyen yeniden bağlanma, görüşme bitirildikten sonra çalışmasın
+      this.recovering = false; this.retries = 0;
       this.closeConnection();
       try { this.micStream?.getTracks().forEach((t) => t.stop()); } catch { /* yok */ }
       try { this.micCtx?.close(); } catch { /* yok */ }
