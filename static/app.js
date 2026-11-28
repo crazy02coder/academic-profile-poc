@@ -243,9 +243,26 @@ function setNav(key) {
   syncSidebar();
 }
 
+// Onay penceresi: ortada, yayla açılan kutu. Promise<boolean> döner (Esc ve dışına basmak "vazgeç").
+function askBox({ title, text = "", ok = "Tamam", cancel = "Vazgeç", icon: ic = "sparkle", danger = false }) {
+  return new Promise((resolve) => {
+    const layer = document.createElement("div");
+    layer.className = "ask-layer";
+    layer.innerHTML = `<div class="ask-box" role="alertdialog" aria-modal="true" aria-label="${esc(title)}"><span class="ask-icon ${danger ? "danger" : ""}">${icon(ic)}</span><h3>${esc(title)}</h3>${text ? `<p>${esc(text)}</p>` : ""}
+      <div class="ask-actions"><button type="button" class="btn" data-no>${esc(cancel)}</button><button type="button" class="btn primary ${danger ? "danger" : ""}" data-yes>${esc(ok)}</button></div></div>`;
+    document.body.appendChild(layer); hydrateIcons(layer);
+    const done = (value) => { layer.classList.add("out"); document.removeEventListener("keydown", key); setTimeout(() => layer.remove(), 180); resolve(value); };
+    const key = (e) => { if (e.key === "Escape") done(false); if (e.key === "Enter") done(true); };
+    document.addEventListener("keydown", key);
+    layer.onclick = (e) => { if (e.target === layer || e.target.closest("[data-no]")) done(false); else if (e.target.closest("[data-yes]")) done(true); };
+    $("[data-yes]", layer).focus();
+  });
+}
 function toast(html, ms = 4200) {
   const el = document.createElement("div");
-  el.className = "toast"; el.innerHTML = html;
+  // Tür, metnin başındaki işaretten anlaşılır; altta kalan süreyi gösteren çubuk vardır.
+  const text = String(html), kind = /hata|başarısız|ulaşılamadı|alınamadı|silinemedi/i.test(text) ? "err" : /kaydedildi|eklendi|tamam|güncellendi|kopyalandı|hazır/i.test(text) ? "ok" : "info";
+  el.className = `toast ${kind}`; el.style.setProperty("--ms", `${ms}ms`); el.innerHTML = `<span class="toast-dot"></span><div>${html}</div>`;
   $("#toasts").appendChild(el);
   setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 320); }, ms);
 }
@@ -968,6 +985,10 @@ function mountPublicationTable(host, prefix, listKey, papers, defaultSort = "yea
   let all = papers, page = 0, sort = defaultSort, direction = defaultSort === "title" ? "asc" : "desc";
   host.innerHTML = publicationTableHtml(prefix, listKey, options.rowId);
   const tbody = $(`#${options.rowId || `${prefix}Rows`}`, host), wrap = $(".tbl-wrap", host);
+  let kind = "";
+  const kindBar = document.createElement("div"); kindBar.className = "pub-kinds"; kindBar.setAttribute("role", "group"); kindBar.setAttribute("aria-label", "Yayın türü");
+  host.prepend(kindBar);
+  kindBar.onclick = (e) => { const b = e.target.closest("[data-kind]"); if (!b) return; kind = b.dataset.kind; page = 0; draw(); };
   const sourceFor = options.sourceFor || ((p) => {
     const ref = p.profile_refs?.find((x) => x.job_id && x.pid);
     return ref ? { jid: ref.job_id, pid: ref.pid, person: ref.name } : (p.job_id && p.pid ? { jid: p.job_id, pid: p.pid, person: p.person } : {});
@@ -975,7 +996,12 @@ function mountPublicationTable(host, prefix, listKey, papers, defaultSort = "yea
   const groups = { Title: ["Filter", "Quart"], Stage: ["Stage"], Year: ["FromYear", "ToYear"], Source: ["Source"], Verification: ["Verification"] };
   const fields = Object.values(groups).flat();
   const draw = () => {
-    const filters = readPublicationFilters(prefix), list = filterPublications(all, { ...filters, sort, direction });
+    const filters = readPublicationFilters(prefix), everyKind = filterPublications(all, { ...filters, sort, direction });
+    // Tür çubuğu: süzülmüş listedeki türler ve sayıları; seçilen tür yalnız görünümü daraltır.
+    const kinds = new Map(); everyKind.forEach((p) => kinds.set(pubCat(p), (kinds.get(pubCat(p)) || 0) + 1));
+    if (kind && !kinds.has(kind)) kind = "";
+    kindBar.innerHTML = kinds.size > 1 ? `<button type="button" class="${kind ? "" : "on"}" data-kind="">Tümü<b>${fmtNum(everyKind.length)}</b></button>` + PUB_CATS.filter(([k]) => kinds.has(k)).map(([k, label]) => `<button type="button" class="${kind === k ? "on" : ""}" data-kind="${k}">${esc(label)}<b>${fmtNum(kinds.get(k))}</b></button>`).join("") : "";
+    const list = kind ? everyKind.filter((p) => pubCat(p) === kind) : everyKind;
     S.lists[listKey] = list;
     const size = Number($(`#${prefix}PageSize`, host).value) || Math.max(list.length, 1), pages = Math.max(1, Math.ceil(list.length / size));
     page = Math.min(page, pages - 1);
@@ -2337,9 +2363,10 @@ document.addEventListener("click", (e) => {
     const x = S.collabs?.[+co.dataset.collab]; if (!x) return;
     const c = chatByName(x.name), last = fold(x.name).split(" ").pop();
     const shared = (S.collabPubs || []).filter((pub) => (pub.authors || []).some((a) => fold(a).includes(last) && fold(a)[0] === fold(x.name)[0]));
-    openPeek(co, { ...(c ? chatPerson(c) : {}), name: x.name, title: x.title, institution: x.institution, department: x.unit, photo: x.photo || (c ? profilePhoto(c) : ""),
-      links: safeUrl(x.url) ? [`<a class="chip" href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener">${icon("cap")}YÖK</a>`] : [],
-      extra: peekPubs("Ortak yayınlar", shared) });
+    if (c) { location.hash = `#/profil/${c.id}`; return; }
+    askBox({ icon: "users", title: `${x.name} için profil çıkarılsın mı?`,
+      text: `${[x.title, x.institution].filter(Boolean).join(", ")}${shared.length ? ` · ${shared.length} ortak yayın` : ""}. Yayınları, dersleri ve projeleri kaynaklardan toplanır; birkaç dakika sürebilir.`,
+      ok: "Profili çıkar", cancel: "Vazgeç" }).then((yes) => { if (yes) startFromYok({ name: x.name, url: x.url, university: x.institution, department: x.unit, source: "yok" }); });
   }
 });
 
@@ -3052,8 +3079,8 @@ function transitAnim(mode) {
 // Yer listesi (kafe, eczane, AVM…): ad, not, çalışma saati, uzaklık; satıra basınca haritada açılır.
 function campusPlaces(g, color) {
   const items = [...g.items].sort((a, b) => (b.note === "AVM") - (a.note === "AVM") || a.distance - b.distance);
-  return `<div class="place-list">${items.map((x, i) => `<a class="place-row" style="--i:${Math.min(i, 24)};--c:${color}" href="https://www.openstreetmap.org/?mlat=${x.lat}&mlon=${x.lon}#map=18/${x.lat}/${x.lon}" target="_blank" rel="noopener">
-      <span class="place-no">${i + 1}</span><span class="place-main"><b>${esc(x.name)}</b>${x.note || x.hours ? `<small>${esc([x.note, x.hours].filter(Boolean).join(" · "))}</small>` : ""}</span><em>${campusDist(x.distance)}</em>${icon("external")}</a>`).join("")}</div>
+  return `<div class="place-list">${items.map((x, i) => `<div class="place-row" role="button" tabindex="0" title="3B haritada göster" data-place="${x.lat},${x.lon}" data-place-name="${esc(x.name)}" data-place-note="${esc([x.note, campusDist(x.distance)].filter(Boolean).join(" · "))}" data-place-color="${color}" style="--i:${Math.min(i, 24)};--c:${color}">
+      <span class="place-no">${i + 1}</span><span class="place-main"><b>${esc(x.name)}</b>${x.note || x.hours ? `<small>${esc([x.note, x.hours].filter(Boolean).join(" · "))}</small>` : ""}</span><em>${campusDist(x.distance)}</em><a class="place-ext" title="OpenStreetMap'te aç" aria-label="OpenStreetMap'te aç" href="https://www.openstreetmap.org/?mlat=${x.lat}&mlon=${x.lon}#map=18/${x.lat}/${x.lon}" target="_blank" rel="noopener">${icon("external")}</a></div>`).join("")}</div>
     ${g.count > items.length ? `<p class="faint" style="margin:10px 0 0">Haritada adı yazılı ${items.length} nokta listelendi; toplam ${fmtNum(g.count)} nokta var.</p>` : ""}`;
 }
 // Sekmeli kampüs penceresi: tabs = [{ label, icon, color, html }]
@@ -3190,7 +3217,7 @@ async function mountCampus3d(host, uid) {
   // Kamera: hedef noktası çevresinde yörünge (theta, phi, dist) + kaydırma (target).
   const target = new THREE.Vector3(0, 0, 0), view = { theta: -.9, phi: .35, dist: R * 3.4 }, goal = { theta: -.55, phi: 1.02, dist: R * 1.75 };
   const place = () => { camera.position.set(target.x + view.dist * Math.sin(view.phi) * Math.sin(view.theta), view.dist * Math.cos(view.phi), target.z + view.dist * Math.sin(view.phi) * Math.cos(view.theta)); camera.lookAt(target); };
-  let drag = null, raf = 0, idle = true, last = null; const started = performance.now(), calm = calmMotion();
+  let drag = null, raf = 0, idle = true, last = null, fly = null, frameExtra = null; const started = performance.now(), calm = calmMotion();
   const size = () => { const w = host.clientWidth, h = host.clientHeight || 460; renderer.setSize(w, h, false); camera.aspect = w / Math.max(1, h); camera.updateProjectionMatrix(); };
   const ease = (t) => 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 3);
   const frame = (now) => {
@@ -3205,10 +3232,89 @@ async function mountCampus3d(host, uid) {
     buildings.forEach((b) => { if (b.scale.z < 1) b.scale.z = calm ? 1 : Math.max(.001, ease((t - b.userData.delay) / 900)); });
     pin.position.y = 62 + Math.sin(now / 420) * 5;
     const pulse = (now / 1600) % 1; ring.scale.setScalar(1 + pulse * 2.2); ring.material.opacity = .7 * (1 - pulse);
-    place(); renderer.render(scene, camera);
+    place(); frameExtra?.(now); if (fly) place(); renderer.render(scene, camera);
     if (!host.hidden) raf = requestAnimationFrame(frame);
   };
   const kick = () => { if (!raf) raf = requestAnimationFrame(frame); };
+  // Seçilen yer: renkli iğne + yerde halka + adını taşıyan etiket; kamera oraya yumuşakça uçar.
+  const spotPin = new THREE.Mesh(new THREE.ConeGeometry(8, 24, 20), std(0xe8590c, { emissive: 0x3a1500 })); spotPin.rotation.x = Math.PI; spotPin.visible = false; scene.add(spotPin);
+  const spotRing = new THREE.Mesh(new THREE.RingGeometry(10, 13, 48), new THREE.MeshBasicMaterial({ color: 0xe8590c, transparent: true, opacity: .8, side: THREE.DoubleSide }));
+  spotRing.rotation.x = -Math.PI / 2; spotRing.position.y = 1.4; spotRing.visible = false; scene.add(spotRing);
+  const spotLabel = document.createElement("div"); spotLabel.className = "campus-3d-spot"; spotLabel.hidden = true; host.appendChild(spotLabel);
+  const kx = 111320 * Math.cos(data.center.lat * Math.PI / 180);
+  // Yol ağı: sahnedeki yol çizgilerinin köşe noktaları düğüm, ardışık noktalar kenar. Kampüsten seçilen yere en kısa
+  // yol bu ağ üzerinde bulunur (Dijkstra) ve sokakları izleyen mavi şerit olarak çizilir.
+  const nodes = new Map(), nodeOf = (q) => { const k = q[0] + "," + q[1]; let n = nodes.get(k); if (!n) { n = { x: q[0], y: q[1], to: [] }; nodes.set(k, n); } return n; };
+  (data.roads || []).forEach((r) => { for (let k = 1; k < r.p.length; k += 1) { const a = nodeOf(r.p[k - 1]), b = nodeOf(r.p[k]), d = Math.hypot(a.x - b.x, a.y - b.y); if (d > 0) { a.to.push([b, d]); b.to.push([a, d]); } } });
+  const nearest = (x, y) => { let best = null, bd = Infinity; nodes.forEach((n) => { const d = (n.x - x) ** 2 + (n.y - y) ** 2; if (d < bd) { bd = d; best = n; } }); return best; };
+  const shortest = (from, to) => {
+    if (!from || !to) return null;
+    const dist = new Map([[from, 0]]), prev = new Map(), heap = [[0, from]], done = new Set();
+    const push = (item) => { heap.push(item); let i = heap.length - 1; while (i > 0) { const up = (i - 1) >> 1; if (heap[up][0] <= heap[i][0]) break; [heap[up], heap[i]] = [heap[i], heap[up]]; i = up; } };
+    const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let i = 0; for (;;) { const l = i * 2 + 1, r = l + 1; let m = i; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } } return top; };
+    while (heap.length) {
+      const [d, n] = pop(); if (done.has(n)) continue; done.add(n);
+      if (n === to) { const path = [n]; let c = n; while (prev.has(c)) { c = prev.get(c); path.push(c); } return path.reverse(); }
+      n.to.forEach(([m, w]) => { const nd = d + w; if (nd < (dist.get(m) ?? Infinity)) { dist.set(m, nd); prev.set(m, n); push([nd, m]); } });
+    }
+    return null;
+  };
+  const routeMat = new THREE.MeshBasicMaterial({ color: 0x2f7cf6 }), routeEdge = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  let route = null;  // { group, parts: [{mesh, a, b}], total, at }
+  const drawRoute = (pts) => {
+    if (route) { scene.remove(route.group); route.group.traverse((o) => o.geometry?.dispose()); }
+    const group = new THREE.Group(), parts = []; let total = 0;
+    for (let k = 1; k < pts.length; k += 1) {
+      const [x1, y1] = pts[k - 1], [x2, y2] = pts[k], len = Math.hypot(x2 - x1, y2 - y1); if (len < .2) continue;
+      [[routeEdge, 11.5, 1.5], [routeMat, 8, 1.7]].forEach(([mat, w, y]) => {
+        const seg = new THREE.Mesh(new THREE.PlaneGeometry(len, w), mat); seg.rotation.x = -Math.PI / 2; seg.rotation.z = Math.atan2(y2 - y1, x2 - x1);
+        seg.position.set((x1 + x2) / 2, y, -(y1 + y2) / 2); seg.visible = false; group.add(seg); parts.push({ mesh: seg, a: total });
+        const joint = new THREE.Mesh(new THREE.CircleGeometry(w / 2, 20), mat); joint.rotation.x = -Math.PI / 2; joint.position.set(x2, y, -y2); joint.visible = false; group.add(joint); parts.push({ mesh: joint, a: total + len });
+      });
+      total += len;
+    }
+    scene.add(group); route = { group, parts, total, at: performance.now() };
+    return total;
+  };
+  host._focus = (spot) => {
+    host._pending = null;
+    const x = (spot.lon - data.center.lon) * kx, z = -(spot.lat - data.center.lat) * 111320;
+    // Rota: kampüs → seçilen yer. Yol ağında bağlantı yoksa (ya da yer sahnenin dışındaysa) düz çizgiyle tamamlanır.
+    const path = shortest(nearest(0, 0), nearest(x, -z));
+    const pts = [[0, 0], ...(path || []).map((n) => [n.x, n.y]), [x, -z]];
+    const meters = drawRoute(pts), walk = Math.max(1, Math.round(meters / 80));
+    spot = { ...spot, note: `yürüyerek yaklaşık ${meters >= 950 ? (meters / 1000).toFixed(1).replace(".", ",") + " km" : Math.round(meters / 10) * 10 + " m"} · ${walk} dk` };
+    const span = Math.hypot(x, z);
+    spotPin.material.color.set(spot.color); spotRing.material.color.set(spot.color);
+    spotPin.position.set(x, 46, z); spotRing.position.set(x, 1.4, z); spotPin.visible = spotRing.visible = true;
+    spotLabel.innerHTML = `<b>${esc(spot.name)}</b>${spot.note ? `<small>${esc(spot.note)}</small>` : ""}`;
+    spotLabel.style.setProperty("--c", spot.color); spotLabel.hidden = false;
+    idle = false;
+    // Kamera rotanın tamamını görecek şekilde iki ucun ortasına uçar.
+    fly = { at: performance.now(), from: { x: target.x, z: target.z, dist: view.dist, phi: view.phi }, to: { x: x / 2, z: z / 2, dist: Math.max(300, Math.min(R * 2.2, span * 1.9)), phi: .8 } };
+    kick();
+  };
+  frameExtra = (now) => {
+    if (fly) {
+      const k = calm ? 1 : ease((now - fly.at) / 1100);
+      target.x = fly.from.x + (fly.to.x - fly.from.x) * k; target.z = fly.from.z + (fly.to.z - fly.from.z) * k;
+      view.dist = fly.from.dist + (fly.to.dist - fly.from.dist) * k; view.phi = fly.from.phi + (fly.to.phi - fly.from.phi) * k;
+      if (k >= 1) fly = null;
+    }
+    if (route) {
+      // Şerit kampüsten yere doğru uzar (yaklaşık 1,8 sn).
+      const shown = calm ? route.total : route.total * ease((now - route.at) / 1800);
+      route.parts.forEach((part) => { part.mesh.visible = part.a <= shown; });
+    }
+    if (spotPin.visible) {
+      spotPin.position.y = 46 + Math.sin(now / 360) * 4;
+      const pulse = (now / 1300) % 1; spotRing.scale.setScalar(1 + pulse * 2); spotRing.material.opacity = .8 * (1 - pulse);
+      const v = new THREE.Vector3(spotPin.position.x, 66, spotPin.position.z).project(camera);
+      spotLabel.style.transform = `translate(-50%, -100%) translate(${((v.x + 1) / 2) * host.clientWidth}px, ${((1 - v.y) / 2) * host.clientHeight}px)`;
+      spotLabel.style.opacity = v.z < 1 ? "1" : "0";
+    }
+  };
+  if (host._pending) host._focus(host._pending);
   canvas.oncontextmenu = (e) => e.preventDefault();
   canvas.onpointerdown = (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; idle = false; canvas.setPointerCapture(e.pointerId); };
   canvas.onpointerup = () => { drag = null; };
@@ -3230,7 +3336,24 @@ async function mountCampus3d(host, uid) {
   new ResizeObserver(() => { size(); kick(); }).observe(host);
   host._kick = kick; size(); kick();
 }
+// Listeden seçilen yer (kafe, eczane, AVM…) 3B haritada gösterilir: kamera oraya uçar, üstünde adıyla bir iğne belirir.
+function showPlaceIn3d(row) {
+  const [lat, lon] = row.dataset.place.split(",").map(Number), wrap = $(".campus-view");
+  if (!wrap || !S.uni || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  const box = $("[data-campus-3d]", wrap), spot = { lat, lon, name: row.dataset.placeName || "", note: row.dataset.placeNote || "", color: row.dataset.placeColor || "#e8590c" };
+  closeModal();
+  $$("[data-campus-view]", wrap).forEach((b) => b.classList.toggle("on", b.dataset.campusView === "3d"));
+  $("iframe", wrap).hidden = true; box.hidden = false;
+  box._pending = spot;  // sahne henüz yükleniyorsa hazır olunca uygulanır
+  mountCampus3d(box, S.uni.id); box._focus?.(spot); box._kick?.();
+  wrap.scrollIntoView({ behavior: calmMotion() ? "auto" : "smooth", block: "center" });
+}
+document.addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches?.("[data-place]")) { e.preventDefault(); showPlaceIn3d(e.target); }
+});
 document.addEventListener("click", (e) => {
+  const spot = e.target.closest("[data-place]");
+  if (spot && !e.target.closest(".place-ext")) { showPlaceIn3d(spot); return; }
   const open = e.target.closest("[data-campus-open]");
   if (open) { openCampusCard(open.dataset.campusOpen); return; }
   const tab = e.target.closest("[data-campus-view]");
@@ -3241,6 +3364,20 @@ document.addEventListener("click", (e) => {
     if (three && S.uni) { mountCampus3d(box, S.uni.id); box._kick?.(); }
   }
 });
+// Arama canlandırması (Konu bul, Danışman bul, hakem): ortadaki sorgudan kaynaklara uzanan ağ. Kaynak düğümleri sırayla
+// yanar, sorgudan onlara sinyal gider; üstüne gelinen düğüm öne çıkar. "Hareketi azalt" ayarında durağan kalır.
+const SCAN_SOURCES = { topic: ["OpenAlex", "Crossref", "Semantic Scholar", "TR Dizin", "OpenAIRE"], advisor: ["OpenAlex", "YÖK Akademik", "Tez Merkezi", "TR Dizin"], reviewer: ["OpenAlex", "YÖK Akademik", "Crossref"] };
+function scanAnim(kind, query, text) {
+  const names = SCAN_SOURCES[kind] || SCAN_SOURCES.topic, n = names.length, cx = 300, cy = 120;
+  const nodes = names.map((name, i) => { const a = -Math.PI / 2 + (i / n) * Math.PI * 2; return { name, i, x: cx + Math.cos(a) * 210, y: cy + Math.sin(a) * 82 }; });
+  const label = text || (kind === "topic" ? "Akademik kaynaklar taranıyor…" : "Konuda yayın yapanlar taranıyor…");
+  return `<div class="scan" role="status" aria-live="polite" style="--n:${n}"><svg viewBox="0 0 600 240" aria-hidden="true">
+    <g class="scan-rings"><ellipse cx="${cx}" cy="${cy}" rx="210" ry="82"/><ellipse cx="${cx}" cy="${cy}" rx="130" ry="50"/></g>
+    ${nodes.map((d) => `<g class="scan-link" style="--i:${d.i}"><line x1="${cx}" y1="${cy}" x2="${d.x.toFixed(1)}" y2="${d.y.toFixed(1)}"/><circle r="4"><animateMotion dur="1.6s" begin="${(d.i * .45).toFixed(2)}s" repeatCount="indefinite" path="M${cx} ${cy}L${d.x.toFixed(1)} ${d.y.toFixed(1)}"/></circle></g>`).join("")}
+    ${nodes.map((d) => `<g class="scan-node" style="--i:${d.i}" transform="translate(${d.x.toFixed(1)} ${d.y.toFixed(1)})"><circle class="scan-halo" r="17"/><circle class="scan-dot" r="9"/><text y="${d.y < cy ? -24 : 34}" text-anchor="middle">${esc(d.name)}</text></g>`).join("")}
+    <g class="scan-core" transform="translate(${cx} ${cy})"><circle class="scan-pulse" r="30"/><circle class="scan-pulse p2" r="30"/><circle class="scan-center" r="27"/><circle class="scan-lens" cx="-3" cy="-3" r="9"/><line class="scan-lens" x1="4" y1="4" x2="11" y2="11"/></g>
+  </svg><div class="scan-text"><b>${esc(label)}</b>${query ? `<small>“${esc(String(query).slice(0, 90))}”</small>` : ""}</div></div>`;
+}
 function linkPreviewCard(link) {
   const url = safeUrl(link.url);
   return `<article class="lp" data-lp-url="${esc(url)}"><header><span class="lp-ic">${icon(/\.pdf(\?|$)/i.test(url) ? "file" : "globe")}</span><div><b>${esc(cleanPageTitle(link.title, "Resmî sayfa"))}</b><small>${esc(hostPath(url))}</small></div>
@@ -4279,6 +4416,9 @@ function sectionView(rows, cls = "") {
 
 function renderProfile(r, chat) {
   const p = r.profile, a = r.analysis, y = p.yok || {}, sec = y.sections || {};
+  // Birlikte çalışılanlar listesinden kişinin kendisi çıkarılır (YÖK kimliği ya da adı aynı olan kayıt).
+  const ownId = (String(p.links?.yok || "").match(/authorGuidId=([0-9A-F]{16})|authorId=([0-9A-F]{16})/) || []).slice(1).find(Boolean) || "";
+  if (Array.isArray(y.collaborators)) y.collaborators = y.collaborators.filter((c) => !(ownId && c.yok_id === ownId) && fold(c.name || "") !== fold(p.name || ""));
   const key = r.job_id;
   const isFav = !!favPerson(key);
   setCrumbs([{ label: "Ana sayfa", href: "#/" }, { label: "Akademisyenler", href: "#/akademisyenler" }, { label: p.name }]);
@@ -4379,10 +4519,7 @@ function renderProfile(r, chat) {
       ${["memberships", "art"].filter((k) => (sec[k] || []).length).length ? `<div class="grid-2">${[["memberships", "Üyelikler", "users"], ["art", "Sanatsal faaliyetler", "sparkle"]].filter(([k]) => (sec[k] || []).length).map(([k, l, ic]) => `<div class="card card-pad"><div class="card-title">${icon(ic)}${l}<span class="spacer"></span><span class="count">${sec[k].length}</span><span class="badge yok">YÖK</span></div>${sectionView(sec[k])}</div>`).join("")}</div>` : ""}
     </div></div>
 
-    <div class="panel" data-panel="collab"><div class="stack"><div id="industryBox">${industryHtml(r.industry)}</div>${(y.collaborators || []).length ? `<div class="collabs stagger">${y.collaborators.map((c, i) => `
-      <div class="collab cl-card" data-collab="${i}" style="--i:${i}">
-        <div class="cl-uni">${c.institution ? organizationLogo("universities", orgId(c.institution), c.institution, "cl-logo") : ""}<span>${esc(c.institution || "")}</span></div>
-        <div class="cl-person">${avatar(c.name, c.photo, "av cl-av")}<div><b>${esc(c.name)}</b><span>${esc(c.title || "")}</span></div></div></div>`).join("")}</div>`
+    <div class="panel" data-panel="collab"><div class="stack"><div id="industryBox">${industryHtml(r.industry)}</div>${(y.collaborators || []).length ? collabCardsHtml(y.collaborators, r.publications || [])
       : `<div class="card">${emptyState("users", "İş birliği bilgisi yok", "YÖK'te birlikte çalıştığı kişi kaydı bulunamadı ya da profil eski sürümle hazırlandı.")}</div>`}</div></div>
 
     <div class="panel" data-panel="patents"><div class="stack">${(sec.patents || []).length ? `<div class="card card-pad" data-yok-patents><div class="card-title">${icon("file")}Patentler<span class="spacer"></span><span class="count">${sec.patents.length}</span><span class="badge yok">YÖK</span></div>
@@ -4390,12 +4527,15 @@ function renderProfile(r, chat) {
       <div class="card card-pad" id="patentsBox">${r.patents ? personPatentsHtml(r.patents) : ""}</div></div></div>
 
     <div class="panel" data-panel="score"><div id="scoreBox" class="t-score" data-job-id="${esc(r.job_id || "")}"></div></div>
-    <div class="panel" data-panel="chat"><div class="card chat-wrap">
-      <div class="chat-head"><span class="chat-orb">${icon("sparkle")}</span><div><b>Profil asistanı</b><span>${esc(p.name)} · toplanan kaynaklardan, kimlikli yanıt; veride yoksa tahmin olarak belirtir</span></div></div>
-      <div class="thread" id="thread"><div class="msg bot"><span class="chat-orb sm">${icon("sparkle")}</span><div class="bubble">Merhaba! <b>${esc(p.name)}</b> hakkında yayınlar, dersler, tezler, iş birlikleri ya da araştırma alanları üzerine soru sorabilirsiniz.
-        Cevaplar önce toplanan kaynaklara dayanır ve yayın kimlikleriyle gösterilir; veride olmayan sorularda çıkarım ya da genel bilgi "tahmin" olarak belirtilir.</div></div></div>
-      <div class="suggest">${["En çok atıf alan yayınları hangileri?", "Hangi dersleri veriyor?", "Danışmanlık yaptığı tezler hangi konularda?", "TÜBİTAK projeleri neler?", "Hangi firmalarla çalışmış?", "Son yıllarda hangi konulara yöneldi?", "En sık kimlerle çalışıyor?"].map((q) => `<button class="chip" data-ask="${esc(q)}" type="button">${esc(q)}</button>`).join("")}</div>
-      <form class="composer" id="askForm"><div class="input">${icon("message")}<input id="question" placeholder="${esc(p.name)} hakkında bir şey sorun…" autocomplete="off"></div>
+    <div class="panel" data-panel="chat"><div class="card chat-wrap assistant-surface">
+      <div class="chat-head"><span class="chat-orb">${icon("sparkle")}</span><div><b>Profil asistanı</b><span>${esc(p.name)}</span></div></div>
+      <div class="ai-ideas" id="askIdeas"><p class="ai-ideas-title">${esc(p.name)} hakkında ne öğrenmek istersin?</p>
+        <div class="ai-idea-grid">${[["award", "Atıflar", "En çok atıf alan yayınları hangileri?"], ["layers", "Dersler", "Hangi dersleri veriyor?"], ["cap", "Tezler", "Danışmanlık yaptığı tezler hangi konularda?"], ["file", "Projeler", "TÜBİTAK projeleri neler?"],
+          ["briefcase", "Sanayi", "Hangi firmalarla çalışmış?"], ["compass", "Yönelim", "Son yıllarda hangi konulara yöneldi?"], ["users", "Ortaklar", "En sık kimlerle çalışıyor?"], ["sparkle", "Özet", "Araştırma alanlarını kısaca özetler misin?"]]
+          .map(([ic, tag, q], k) => `<button type="button" class="ai-idea" data-ask="${esc(q)}" style="--i:${k}"><span>${icon(ic)}</span><small>${esc(tag)}</small><b>${esc(q)}</b></button>`).join("")}</div>
+        <p class="ai-ideas-note">Yanıtlar toplanan kaynaklara dayanır ve yayın kimlikleriyle gösterilir; veride olmayan bilgi tahmin olarak belirtilir.</p></div>
+      <div class="thread" id="thread"></div>
+      <form class="composer" id="askForm"><div class="input">${icon("message")}<input id="question" placeholder="${esc(p.name)} hakkında bir şey sor…" autocomplete="off"></div>
         <button class="btn primary" id="send" type="submit">${icon("send")}Gönder</button></form>
     </div></div>`);
 
@@ -4764,8 +4904,22 @@ function thesisList(items, advised) {
       ${advised ? `<span class="chip">${icon("user")}${esc(x.author)}</span>` : ""}<span class="chip">${esc(x.university)}</span>
       ${safeUrl(x.pdf) ? `<button class="chip teal" type="button" data-pdf="${esc(safeUrl(x.pdf))}" data-title="${esc(x.title)}">${icon("book")}PDF oku</button>` : ""}</div>
     ${x.abstract_tr ? `<details><summary>Türkçe özet</summary><div class="abs">${esc(x.abstract_tr)}</div></details>` : ""}
-    ${x.abstract_en ? `<details><summary>English abstract</summary><div class="abs">${esc(x.abstract_en)}</div></details>` : ""}</div>`).join("");
+    ${x.abstract_en ? `<details><summary>English abstract</summary><div class="abs">${esc(x.abstract_en)}</div></details>` : ""}
+    ${!x.abstract_tr && !x.abstract_en && x.kayitno && x.tezno ? `<details data-tez="${esc(x.kayitno)}|${esc(x.tezno)}"><summary>Özet ve danışman</summary><div class="abs faint">Açınca Tez Merkezi'nden okunur.</div></details>` : ""}</div>`).join("");
 }
+// Tez özeti yalnız kullanıcı açınca okunur (profil toplanırken çekilmez).
+document.addEventListener("toggle", async (e) => {
+  const el = e.target;
+  if (!el.matches?.("details[data-tez]") || !el.open || el.dataset.loaded) return;
+  el.dataset.loaded = "1";
+  const box = $(".abs", el), [kayitno, tezno] = el.dataset.tez.split("|");
+  box.innerHTML = `<span class="spinner"></span> Tez Merkezi'nden okunuyor…`;
+  try {
+    const d = await api(`/api/tez/detail?kayitno=${encodeURIComponent(kayitno)}&tezno=${encodeURIComponent(tezno)}`, { quiet: true });
+    box.classList.remove("faint");
+    box.innerHTML = [d.advisor && `<p><b>Danışman:</b> ${esc(d.advisor)}</p>`, d.abstract_tr && `<p>${esc(d.abstract_tr)}</p>`, d.abstract_en && `<p class="faint">${esc(d.abstract_en)}</p>`].filter(Boolean).join("") || "Bu tez için özet kaydı yok.";
+  } catch (err) { el.dataset.loaded = ""; box.textContent = `Okunamadı (${err.message || "bağlantı hatası"}); kapatıp yeniden açarak tekrar deneyebilirsin.`; }
+}, true);
 
 function techTrace(r) {
   const rec = r.recon || {}, rcp = rec.recipe || {}, lines = [];
@@ -4789,7 +4943,24 @@ function metaLine(m) {
   if (m.total_s != null) parts.push(`toplam ${m.total_s} sn`);
   return parts.length ? `<div class="meta">${parts.join(" · ")}</div>` : "";
 }
+// Birlikte çalışılan kişiler: en çok ortak yayını olan başta. Fotoğraf YÖK listesinde gelmez; kişi daha önce
+// incelendiyse onun profil fotoğrafı kullanılır, yoksa baş harfler kalır. Kurum logosu fotoğrafın köşesinde durur.
+function collabShared(c, pubs) {
+  const f = fold(c.name), last = f.split(" ").pop();
+  return pubs.filter((pub) => (pub.authors || []).some((a) => fold(a).includes(last) && fold(a)[0] === f[0])).length;
+}
+function collabCardsHtml(list, pubs) {
+  const rows = list.map((c, i) => ({ c, i, shared: collabShared(c, pubs), chat: chatByName(c.name) })).sort((a, b) => b.shared - a.shared || a.i - b.i);
+  const top = Math.max(1, ...rows.map((x) => x.shared));
+  return `<div class="co-list">${rows.map(({ c, i, shared, chat }, k) => `
+    <button type="button" class="co-row" data-collab="${i}" style="--i:${Math.min(k, 20)};--w:${Math.round((shared / top) * 100)}%">
+      <span class="co-face">${avatar(c.name, c.photo || (chat ? profilePhoto(chat) : ""), "av co-av")}${c.institution ? organizationLogo("universities", orgId(c.institution), c.institution, "co-badge") : ""}</span>
+      <span class="co-main"><b>${esc(c.name)}</b><span>${esc([c.title, c.institution].filter(Boolean).join(", "))}</span>${c.unit ? `<small>${esc(c.unit)}</small>` : ""}</span>
+      <span class="co-side">${shared ? `<b>${fmtNum(shared)}</b><small>ortak yayın</small>` : `<small>YÖK kaydı</small>`}${chat ? `<em>profili hazır</em>` : ""}</span>
+    </button>`).join("")}</div>`;
+}
 function addMsg(role, html) {
+  if (role === "user") $("#askIdeas")?.setAttribute("hidden", "");
   const thread = $("#thread"); if (!thread) return null;
   const el = document.createElement("div");
   el.className = `msg ${role}`;
@@ -5173,7 +5344,7 @@ async function viewSearch(q, requestedSources = "") {
   $("#searchForm").addEventListener("submit", (e) => { e.preventDefault(); search(); });
   const box = $("#sResults"), routeHash = location.hash;
   if (!q) { renderAgenda($("#shelves")); return; }
-  box.innerHTML = `<div id="topicSources" class="src-status"></div><div id="topicProgress" class="loading-line" role="status" aria-live="polite"><span class="spinner"></span>Akademik kaynaklar taranıyor…</div><div id="topicError"></div><div id="topicTable"></div>`;
+  box.innerHTML = `<div id="topicSources" class="src-status"></div><div id="topicProgress" class="loading-line" role="status" aria-live="polite"><span class="spinner"></span>Akademik kaynaklar taranıyor…</div><div id="topicError"></div><div id="topicTable">${scanAnim("topic", q)}</div>`;
   const active = () => box.isConnected && location.hash === routeHash;
   S.listMeta.search = { file: `arama ${q}` };
   const table = mountPublicationTable($("#topicTable"), "s", "search", [], "rel");
@@ -5437,7 +5608,7 @@ async function notifySettingsCard() {
   let poll = null;
   const stopPoll = () => { clearTimeout(poll); poll = null; };
   const waBox = (wa) => {
-    if (!wa.available) return `<p class="muted">WhatsApp bileşeni (neonize) kurulu değil: <code>pip install neonize</code></p>`;
+    if (!wa.available) return `<p class="muted">WhatsApp bileşeni yüklenemedi${wa.why ? `: <b>${esc(wa.why)}</b>` : ""}.<br>${/libmagic/i.test(wa.why || "") ? `Paket kurulu ama sistem kütüphanesi eksik. Terminalde <code>brew install libmagic</code> çalıştırıp sunucuyu yeniden başlat.` : `Kurulum: <code>pip install neonize</code>, sonra sunucuyu yeniden başlat.`}</p>`;
     if (wa.state === "ready") return `<div class="nt-wa ok"><span class="nt-dot"></span><div><b>Bağlı</b><small>${esc(wa.phone || "")} · mesajlar "Kendine mesaj" sohbetine gelir</small></div>
       <button class="btn sm" type="button" data-wa-logout>Bağlantıyı kes</button></div>`;
     if (wa.state === "qr" && wa.qr) return `<div class="nt-qr"><img src="${wa.qr}" alt="WhatsApp QR kodu" width="220" height="220">
@@ -5865,7 +6036,9 @@ document.addEventListener("click", (e) => {
 function firmAssistantHtml(f) {
   return `<aside class="student-assistant firm-assistant"><header class="student-assistant-head"><span class="student-assistant-symbol">${icon("sparkle")}</span><div><h3>Firma asistanı</h3><p>${esc(f.name)}</p></div></header>
     <p class="student-assistant-intro">Firmanın akademik iş birlikleri, çalıştığı üniversiteler ve projeleri hakkında sor.</p>
-    <div class="student-chat-suggestions">${["En çok hangi üniversitelerle çalışıyor?", "Hangi alanlarda ortak yayın var?", "TÜBİTAK projeleri neler?"].map((q) => `<button type="button" data-fa-q="${esc(q)}">${esc(q)}</button>`).join("")}</div>
+    <div class="student-chat-suggestions ai-ideas"><p class="ai-ideas-title">${esc(f.name)} hakkında ne öğrenmek istersin?</p><div class="ai-idea-grid">${[["building", "Üniversiteler", "En çok hangi üniversitelerle çalışıyor?"], ["layers", "Alanlar", "Hangi alanlarda ortak yayın var?"], ["file", "Projeler", "TÜBİTAK projeleri neler?"], ["users", "Akademisyenler", "En çok kimlerle yayın yapmış?"],
+      ["award", "Patentler", "Patentleri hangi konularda?"], ["compass", "Yönelim", "Son yıllarda hangi konulara yöneldi?"], ["globe", "AB projeleri", "Avrupa projelerinde yer almış mı?"], ["sparkle", "Özet", "Ar-Ge profilini kısaca özetler misin?"]]
+      .map(([ic, tag, q], k) => `<button type="button" class="ai-idea" data-fa-q="${esc(q)}" style="--i:${k}"><span>${icon(ic)}</span><small>${esc(tag)}</small><b>${esc(q)}</b></button>`).join("")}</div></div>
     <div class="student-chat-thread" role="log" aria-live="polite"></div>
     <form class="student-chat-form"><textarea rows="3" maxlength="1000" placeholder="Örneğin: Aselsan ile en çok kim yayın yapmış?" required></textarea><div class="student-chat-toolbar"><span>Enter gönderir</span><button class="btn primary" type="submit">${icon("send")}Gönder</button></div></form></aside>`;
 }
@@ -5894,7 +6067,9 @@ function bindFirmAssistant(host, fid) {
   };
   form.onsubmit = (e) => { e.preventDefault(); ask(input.value); };
   input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(input.value); } };
-  $$("[data-fa-q]", host).forEach((b) => b.onclick = () => ask(b.dataset.faQ));
+  const hideIdeas = () => $(".ai-ideas", host)?.setAttribute("hidden", "");
+  form.addEventListener("submit", hideIdeas); input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) hideIdeas(); });
+  $$("[data-fa-q]", host).forEach((b) => b.onclick = () => { hideIdeas(); ask(b.dataset.faQ); });
 }
 async function renderFirmOverview(fid, name, refresh = false) {
   const host = $("#firmOverview"); if (!host) return;
@@ -5905,7 +6080,7 @@ async function renderFirmOverview(fid, name, refresh = false) {
     const aiHost = $("#firmAi");
     if (aiHost && !aiHost.dataset.ready) {
       aiHost.dataset.ready = "1";
-      aiHost.innerHTML = `<div class="ai-view"><aside class="ai-side"><div class="ai-view-intro"><span class="ai-orb">${icon("sparkle")}</span><div><h2>${esc(name)} hakkında sor</h2><p>Yanıtlar firmanın künyesinden, ortak yayınlardan, akademisyenlerden ve projelerden gelir.</p></div></div></aside><div class="ai-main">${firmAssistantHtml({ name })}</div></div>`;
+      aiHost.innerHTML = `<div class="ai-view wide">${firmAssistantHtml({ name })}</div>`;
       hydrateIcons(aiHost); bindFirmAssistant(aiHost, fid);
     }
     $("[data-firm-refresh-facts]", host).onclick = () => renderFirmOverview(fid, name, true);

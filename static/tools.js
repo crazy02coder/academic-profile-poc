@@ -82,7 +82,6 @@ async function viewAdvisor(params) {
         <button class="btn primary" type="submit">${icon("search")}Danışman ara</button></div>
       ${mode === "2209" ? `<p class="faint t-hint">2209-A'da danışman, öğrencinin kendi üniversitesinden bir öğretim üyesi ya da doktoralı öğretim elemanı olur; güncel çağrı metnini kontrol et.</p>` : ""}</form>
     <div id="aResults"></div>`);
-  window.mountAssistant?.("advisor", $("#view"));  // sesli araştırma asistanı (static/assistant.js)
   const go = (m = mode) => {
     const text = $("#aQ").value.trim(), u = $("#aUni").value;
     try { if ($("#aOwn").checked && u) localStorage.setItem("own-uni", u); } catch { /* tercih */ }
@@ -103,7 +102,7 @@ async function viewAdvisor(params) {
     box.innerHTML = `<div class="t-steps">${[["search", "Konunu yaz", "Türkçe yazabilirsin; İngilizce karşılığıyla birlikte aranır."], ["users", "Adaylar sıralanır", "Son 5 yıldaki konu yayınları, atıflar ve güncellik birlikte puanlanır."], ["cap", "YÖK bilgisi eklenir", "Daha önce bakılanlar hemen görünür; diğerleri için karttaki düğmeyle YÖK’ten istenir."]].map(([ic, t, d], i) => `<div class="card t-step"><span>${i + 1}</span>${icon(ic)}<b>${t}</b><small>${d}</small></div>`).join("")}</div>`;
     hydrateIcons(box); return;
   }
-  box.innerHTML = `<div class="loading-line" role="status"><span class="spinner"></span>Konudaki yayınlar taranıyor…</div>${skeleton(4)}`;
+  box.innerHTML = `<div class="loading-line" role="status"><span class="spinner"></span>Konuya uygun danışmanlar aranıyor…</div>${skeleton(4)}`;
   let r;
   try { r = await api(`/api/tools/advisors?q=${encodeURIComponent(q)}&uni=${encodeURIComponent(uni)}&mode=${mode}`); }
   catch (e) { if (location.hash === hash) { box.innerHTML = `<div class="notice err"><div>${esc(e.message)}</div></div>`; } return; }

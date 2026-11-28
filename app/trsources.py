@@ -194,6 +194,8 @@ async def openaire_works(profile, log, ready=None) -> tuple[list[dict], dict | N
                 if "thesis" in kind and not (first and _same_person(name, orcid, first[0].get("fullName") or "", _author_orcid(first[0]))):
                     continue
                 rec = _openaire_record(x)
+                if orcid and any(_author_orcid(a).rsplit("/", 1)[-1] == orcid for a in x.get("authors") or []):
+                    rec["orcid_match"] = True  # kimlik ORCID ile doğrulandı: adaş ayıklamasına girmez (dedup.drop_homonyms)
                 hosts.update(rec["labels"])
                 out.append(rec)
     detail = ", ".join(f"{k} {v}" for k, v in hosts.most_common(6))
@@ -294,7 +296,14 @@ async def tez_details(cards: list[dict], name: str = "") -> list[dict]:
     return out
 
 
-async def tez_works(profile, log, details: bool = True) -> tuple[list[dict], dict | None]:
+async def tez_one(kayitno: str, tezno: str) -> dict:
+    """Tek bir tezin ayrıntısı (danışman, yer, Türkçe ve İngilizce özet): kullanıcı tezi açtığında okunur."""
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, event_hooks=RATE_HOOKS, headers={"User-Agent": USER_AGENT}) as client:
+        card = await _tez_detail(client, {"kayitno": kayitno, "tezno": tezno}, asyncio.Semaphore(1))
+    return {k: card.get(k, "") for k in ("advisor", "place", "abstract_tr", "abstract_en")}
+
+
+async def tez_works(profile, log, details: bool = False) -> tuple[list[dict], dict | None]:
     name = profile.name or profile.query_name
     upper = _upper_tr(name)
     store = recipes.load(TEZ_DOMAIN)
@@ -325,20 +334,37 @@ async def tez_works(profile, log, details: bool = True) -> tuple[list[dict], dic
         own = await _tez_search(client, recipe, "AdSoyad", upper) or []
         recipes.save(store)
         own = [c for c in own if _same_person(name, "", c["author"])]
+    # Adaşların tezleri ayrıntı sayfaları okunmadan elenir: yaygın adda onlarca tez geliyor, her birinin ayrıntısı YÖK
+    # hız sınırıyla tek tek okunuyordu (yenilemeyi dakikalarca uzatan kısım).
+    from .dedup import drop_foreign_theses
+    probe = [{"sources": ["tez"], "title": c["title"], "venue": c["university"], "card": c} for c in own]
+    kept, foreign = drop_foreign_theses(probe, (profile.yok or {}).get("education"))
+    if foreign:
+        own = [x["card"] for x in kept]
+        await log("publications", "running", f"YÖK Tez Merkezi: aynı adlı başka kişilere ait {len(foreign)} tez elendi.")
     for c in own:
         c["own"] = True
     if details:
         # Danışman alanında kişi gerçekten geçmeli (aynı adlı başka hocanın tezleri elenir)
         cards = await tez_details(own + advised, name)
         own, advised = [c for c in cards if c.get("own")], [c for c in cards if not c.get("own")]
-    profile.yok.setdefault("tez_merkezi", {"own": own, "advised": advised, **({} if details else {"details_pending": True})})
+    # Danışmanlık tezleri: aynı adlı başka hocalarınkiler, ayrıntı sayfası okunmadan üniversiteyle elenir. Tez, kişinin
+    # şimdiki kurumunda ya da YÖK'teki görev geçmişindeki bir kurumda yapılmış olmalı; kurum bilgisi yoksa dokunulmaz.
+    places = {fold(x) for x in [profile.get("institution", "")] + [c.get("place") or "" for c in (profile.yok or {}).get("career") or []] if x}
+    if places and advised:
+        near = [c for c in advised if any(fold(c["university"]) in x or x in fold(c["university"]) for x in places if fold(c["university"]))]
+        if len(near) < len(advised):
+            await log("publications", "running", f"YÖK Tez Merkezi: başka kurumlardaki aynı adlı danışmanlara ait {len(advised) - len(near)} tez elendi.")
+        advised = near
+    # Tez özetleri toplanmaz: kullanıcı bir tezi açtığında tek istekle okunur (tez_one).
+    profile.yok.setdefault("tez_merkezi", {"own": own, "advised": advised})
     records = [record("tez", source_id=c["no"], title=c["title"], year=c["year"], authors=[c["author"]],
                       venue=c["university"], abstract=c.get("abstract_tr") or c.get("abstract_en") or "",
                       url=c["pdf"] or TEZ + "tarama.jsp", type="dissertation", labels=[c["type"]] if c["type"] else [])
                for c in own]
     with_abs = sum(bool(c.get("abstract_tr") or c.get("abstract_en")) for c in advised)
     await log("publications", "running", f"YÖK Tez Merkezi: kendi tezi {len(own)}, danışmanlık yaptığı {len(advised)} tez "
-                                         + (f"({with_abs} özetli)." if details else "(özetler arka planda ayrıca çekilecek)."))
+                                         + (f"({with_abs} özetli)." if details else "(özetler tez açılınca okunur)."))
     return records, {"own": len(own), "advised": len(advised)}
 
 

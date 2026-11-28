@@ -437,6 +437,16 @@ async def collect(old: dict, sections: set[str], sources: set[str], llm, log) ->
                     doi_key(paper.get("doi")) and doi_key(paper.get("doi")) == doi_key(record.get("doi")) or
                     title_key(record.get("title", "")) in titles and record.get("year") == paper.get("year"))}
         merge_publications(result, incoming)
+        # Daha önce kaydedilmiş adaş kayıtları da ayıklanır (eski taramalarda ada göre girmiş olanlar).
+        from .dedup import drop_foreign_theses, drop_homonyms
+        kept, dropped = drop_homonyms(result.get("publications") or [], p.name)
+        kept, theses = drop_foreign_theses(kept, (result["profile"].get("yok") or {}).get("education"))
+        dropped = dropped + theses
+        if dropped:
+            result["publications"] = kept
+            by_source = Counter(source for paper in kept for source in paper.get("sources") or [])
+            result.update(unique_count=len(kept), by_source=dict(by_source), raw_count=sum(by_source.values()))
+            await log("dedup", "running", f"Adaş ayıklama: kişinin diğer yayınlarıyla bağı olmayan {len(dropped)} kayıt profilden çıkarıldı.")
         result["analysis"] = {"mode": "pending", "summary": "", "areas": [], "methods": [], "timeline": []}
     result.setdefault("recon", {}).setdefault("sources_meta", {}).update(source_meta)
     if "industry" in sections:

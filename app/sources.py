@@ -748,7 +748,8 @@ async def yok_profile_api(name: str, institution: str, link: str, emit, sections
                                    "title": YOK_TITLES.get(c.get("kadroUnvanAdi") or "", tr_title(c.get("kadroUnvanAdi") or "")),
                                    "institution": tr_title(c.get("universiteAd") or ""), "unit": tr_title(_units(*__import__("app.yokdir", fromlist=["place"]).place(c))),
                                    "photo": c.get("authorImage") if str(c.get("authorImage") or "").startswith("data:image") else "",
-                                   "url": YOK_PROFILE + (c.get("authorGuidId") or "")} for c in data["collaborators"]][:60]
+                                   "url": YOK_PROFILE + (c.get("authorGuidId") or "")} for c in data["collaborators"]
+                                  if (c.get("authorGuidId") or "") != guid][:60]  # kişinin kendisi listeye alınmaz
     counts = ", ".join(f"{k} {len(v)}" for k, v in sec.items())
     emit(f"YÖK profil ayrıntıları: görev {len(extra.get('career', []))}, öğrenim {len(extra.get('education', []))}, "
          f"birlikte çalıştığı {len(extra.get('collaborators', []))} kişi" + (f", {counts}" if counts else "") + ".")

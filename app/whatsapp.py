@@ -22,11 +22,17 @@ _client = None
 _lock = asyncio.Lock()
 
 
+_WHY = {"text": ""}
+
+
 def available() -> bool:
     try:
         import neonize  # noqa: F401
+        _WHY["text"] = ""
         return True
-    except Exception:  # noqa: BLE001 — paket ya da yerel kütüphane yok
+    except Exception as exc:  # noqa: BLE001 — paket ya da yerel kütüphane yok
+        # Neden yüklenemediği arayüze gider (ör. paket kurulu ama libmagic sistem kütüphanesi eksik).
+        _WHY["text"] = "paket kurulu değil" if isinstance(exc, ModuleNotFoundError) and "neonize" in str(exc) else str(exc)[:160]
         return False
 
 
@@ -42,6 +48,7 @@ def status() -> dict:
     # QR kodu ~20 sn'de bir yenilenir; eskiyen kod gösterilmez
     out["qr"] = _state["qr"] if _state["state"] == "qr" and time.time() - _state["qr_at"] < 60 else ""
     out["available"] = available()
+    out["why"] = _WHY["text"]
     out["paired"] = paired()
     return out
 

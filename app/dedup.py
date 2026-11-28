@@ -43,6 +43,69 @@ def _coauthor_overlap(a: dict, b: dict, subject: str) -> int:
     return len(na & nb)
 
 
+# Kişiyi adıyla arayan kaynaklar: kayıtta ORCID yoksa eşleşme yalnız ada dayanır (adaş riski).
+NAME_SEARCHED = {"openaire", "trdizin"}
+# Kişinin kendisinin girdiği ya da ORCID kimliğiyle süzülen kaynaklar.
+IDENTITY = {"yok", "orcid", "crossref", "wos"}
+
+
+def drop_homonyms(papers: list[dict], subject: str) -> tuple[list[dict], list[dict]]:
+    """Adaşların yayınlarını ayıklar: (kalanlar, çıkarılanlar).
+
+    OpenAIRE ve TR Dizin kişiyi adıyla arar. Yaygın bir adda ("Murat Şimşek") başka alanlardaki adaşların makale ve
+    tezleri de gelir. Yalnız bu kaynaklarda bulunan ve ORCID ile doğrulanmamış kayıt "ada dayalı"dır; kimliği belli
+    kaynaklardan (YÖK, ORCID, OpenAlex, Crossref…) gelenler "kesin"dir. Ada dayalı bir kayıt, kesin kayıtlarla ortak
+    yazar ya da aynı dergi/yayın yeri paylaşıyorsa desteklenmiş sayılır.
+
+    Ada dayalı kayıtların yarısından azı destekleniyorsa ad yaygındır: desteklenmeyenler çıkarılır. Çoğu
+    destekleniyorsa (nadir ad) hiçbirine dokunulmaz; kesin kayıt azsa (5'ten az) karar verilemez, yine dokunulmaz."""
+    # Kişinin kendi beyanına dayanan kayıtlar (YÖK, ORCID, ORCID ile süzülen Crossref, WoS) varsa "kesin" yalnız onlardır:
+    # OpenAlex ve Scholar da adaşları tek yazar profilinde birleştirebiliyor, o yüzden bu durumda onlar da sınanır.
+    hard = [p for p in papers if set(p.get("sources") or []) & IDENTITY or p.get("orcid_match")]
+    loose_sources = NAME_SEARCHED | ({"openalex", "scholar", "tez"} if len(hard) >= 5 else set())
+    def named(p):
+        return set(p.get("sources") or []) <= loose_sources and not p.get("orcid_match")
+    sure = [p for p in papers if not named(p)]
+    loose = [p for p in papers if named(p)]
+    if len(sure) < 5 or len(loose) < 5:
+        return papers, []
+    def others(p):
+        return {fold(x).split()[-1] for x in p.get("authors") or [] if x and fold(x) and name_score(subject, x) < 0.75}
+    coauthors = set().union(*(others(p) for p in sure))
+    venues = {fold(p.get("venue") or "") for p in sure} - {""}
+    backed = [p for p in loose if others(p) & coauthors or fold(p.get("venue") or "") in venues]
+    if len(backed) * 2 >= len(loose):
+        return papers, []
+    keep = {id(p) for p in backed}
+    return [p for p in papers if not named(p) or id(p) in keep], [p for p in loose if id(p) not in keep]
+
+
+def drop_foreign_theses(papers: list[dict], education: list[dict] | None) -> tuple[list[dict], list[dict]]:
+    """Tez Merkezi'nde yazar adıyla bulunan tezlerden adaşlara ait olanları ayıklar: (kalanlar, çıkarılanlar).
+
+    Bir kişi en çok birkaç tez yazar; yaygın bir adda yazar araması onlarca adaşın tezini getirir. YÖK'teki öğrenim
+    bilgisi varsa tez yalnız orada yazan tez adıyla ya da okunan üniversiteyle tutuyorsa kişinindir. Öğrenim bilgisi
+    yoksa üçe kadar teze dokunulmaz; daha fazlası adaş karışımıdır, hangisinin kişiye ait olduğu bilinemediği için
+    hiçbiri yayın sayılmaz (YÖK profili yenilenince öğrenim bilgisiyle yeniden eşleşir)."""
+    def thesis_only(p):
+        return set(p.get("sources") or []) == {"tez"}
+    theses = [p for p in papers if thesis_only(p)]
+    if not theses:
+        return papers, []
+    rows = [e for e in education or [] if isinstance(e, dict)]
+    if rows:
+        titles = {title_key(e.get("note") or "") for e in rows} - {""}
+        places = {fold(e.get("place") or "") for e in rows} - {""}
+        def mine(p):
+            venue = fold(p.get("venue") or "")
+            return title_key(p.get("title") or "") in titles or bool(venue) and any(venue in x or x in venue for x in places)
+        gone = [p for p in theses if not mine(p)]
+    else:
+        gone = theses if len(theses) > 3 else []
+    drop = {id(p) for p in gone}
+    return [p for p in papers if id(p) not in drop], gone
+
+
 async def resolve(records: list[dict], subject: str, llm=None, log=None) -> tuple[list[dict], dict]:
     recs = [r for r in records if r.get("title") and len(r["title"]) > 5]
     for r in recs:
@@ -160,7 +223,15 @@ async def resolve(records: list[dict], subject: str, llm=None, log=None) -> tupl
         orgs = {(o.get("name"), o.get("type")): o for m in members for o in (m.get("orgs") or [])}
         if orgs:
             best["orgs"] = list(orgs.values())
+        if any(m.get("orcid_match") for m in members):
+            best["orcid_match"] = True
         papers.append(best)
+
+    papers, dropped = drop_homonyms(papers, subject)
+    stats["homonym_dropped"] = len(dropped)
+    if dropped and log:
+        await log("dedup", "running", f"Adaş ayıklama: yalnız ada göre eşleşen ve kişinin diğer yayınlarıyla ortak yazarı ya da "
+                                      f"dergisi olmayan {len(dropped)} kayıt çıkarıldı (ör. {dropped[0]['title'][:70]}).")
 
     papers.sort(key=lambda p: (-(p["year"] or 0), p["title"]))
     for idx, p in enumerate(papers, 1):

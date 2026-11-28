@@ -395,6 +395,11 @@ async def pipeline(job: dict, data: JobIn):
 
         await log("dedup", "running", "Dil tespiti (langdetect + Türkçe karakter sezgisi), DOI/başlık/çapraz dil eşleştirme…")
         papers, stats = await resolve(records, profile.name or profile.query_name, None if light else llm, log)
+        from .dedup import drop_foreign_theses
+        papers, foreign = drop_foreign_theses(papers, (profile.yok or {}).get("education"))
+        if foreign:
+            stats["unique"] = len(papers)
+            await log("dedup", "running", f"Tez Merkezi: aynı adlı başka kişilere ait {len(foreign)} tez yayın listesine alınmadı.")
         await log("dedup", "done", f"{stats['raw']} ham kayıt → {stats['unique']} benzersiz yayın "
                                    f"(DOI {stats['doi']}, birebir başlık {stats['exact']}, bulanık {stats['fuzzy']}, "
                                    f"TR↔EN {stats['cross_lang']}).")
@@ -473,7 +478,6 @@ async def pipeline(job: dict, data: JobIn):
         job["result"] = result
         history_store.save_result(result["job_id"], result)
         if not light:
-            _spawn_tez_details(result["job_id"])
             _spawn_site_photo(result["job_id"])
         # Yalnız kullanıcının başlattığı tam toplama sırasında WoS işi oluştur.
         # Kayıtlı profilin açılması artık salt durum okumasıdır.
@@ -2016,6 +2020,26 @@ async def firm_teydeb(fid: str, refresh: bool = False):
     if d is None:
         raise HTTPException(404, "Firma resmi listede bulunamadı.")
     return d
+
+
+@app.get("/api/tez/detail")
+async def tez_detail(kayitno: str = Query(max_length=80), tezno: str = Query(max_length=80)):
+    """Tek tezin danışmanı ve özetleri: yalnız kullanıcı tezi açınca istenir (toplu çekilmez), bir gün saklanır."""
+    key = (kayitno, tezno)
+    hit = _TEZ_DETAIL.get(key)
+    if hit and time.time() - hit[0] < 86400:
+        return hit[1]
+    try:
+        data = await trsources.tez_one(kayitno, tezno)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Tez Merkezi'ne ulaşılamadı ({type(exc).__name__}).")
+    if len(_TEZ_DETAIL) > 500:
+        _TEZ_DETAIL.clear()
+    _TEZ_DETAIL[key] = (time.time(), data)
+    return data
+
+
+_TEZ_DETAIL: dict = {}
 
 
 @app.get("/api/tubitak/ardeb")
